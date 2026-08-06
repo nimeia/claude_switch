@@ -1,7 +1,5 @@
-# Publishes the one file a user downloads.
-#
-# Triggered by a `v*` tag so a release is always tied to a commit, and runnable
-# by hand for a dry run that builds the artifact without publishing anything.
+# Tag vX.Y.Z → build shippable artifacts → GitHub Release.
+# workflow_dispatch dry_run builds without publishing (good for a pre-flight).
 
 name: release
 
@@ -11,9 +9,13 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Build the artifact but do not create a release"
+        description: "Build artifacts but do not create a GitHub Release"
         type: boolean
         default: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -28,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check the tag matches VERSION
+      - name: Tag must match VERSION
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
@@ -36,8 +38,6 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           file_ver=$(tr -d '[:space:]' < VERSION)
           echo "tag=$tag VERSION=$file_ver"
-          # A release whose binary reports a different version than its tag is
-          # unsupportable — fail here rather than ship it.
           test "$tag" = "$file_ver"
 
       - uses: dtolnay/rust-toolchain@stable
@@ -46,34 +46,30 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - name: Build the native engine
+      - name: Build native engine
         run: cargo build -p claude-switch-ffi --release
 
-      - name: Publish the single-file app
+      - name: Publish single-file
         run: >
           dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj
-          -c Release -p:PublishSingleFileBundle=true -o dist
+          -c Release -p:PublishSingleFileBundle=true -o dist --nologo
 
-      - name: Verify the artifact is self-contained
+      - name: Verify self-contained
         shell: pwsh
         run: |
           $files = Get-ChildItem dist -File
           $files | Format-Table Name, Length
-          # A stray DLL beside the exe means the bundle did not absorb it, and
-          # users who download only the exe would hit a missing-dependency crash.
           if ($files.Count -ne 1 -or $files[0].Name -ne 'ClaudeSwitch.exe') {
             throw "expected exactly ClaudeSwitch.exe in dist, got: $($files.Name -join ', ')"
           }
 
-      - name: Smoke-run the published exe
+      - name: Smoke-run published exe
         shell: pwsh
         env:
           CLAUDE_SWITCH_LAYOUT_DIR: ${{ runner.temp }}/probe
           CLAUDE_SWITCH_LAYOUT_EXIT: "1"
           CLAUDE_SWITCH_PROBE_SETTLE_MS: "800"
         run: |
-          # Never publish a binary that has not been launched once. The
-          # self-contained check proves packaging; this proves it runs.
           $fixture = Join-Path $env:RUNNER_TEMP 'fixture-home'
           $p = Start-Process -FilePath dist/ClaudeSwitch.exe `
                  -ArgumentList '--skip-onboarding', '--fixture', $fixture `
@@ -84,18 +80,17 @@ jobs:
             throw 'the app never reached first paint'
           }
 
-      - name: Package (exe + zip)
+      - name: Package (exe + zip + SHA256)
         shell: pwsh
         run: ./packaging/pack.ps1 -PublishDir dist -OutDir artifacts
 
-      - name: Extract the zip and run what came out
+      - name: Smoke-run extracted zip
         shell: pwsh
         env:
           CLAUDE_SWITCH_LAYOUT_DIR: ${{ runner.temp }}/probe-zip
           CLAUDE_SWITCH_LAYOUT_EXIT: "1"
           CLAUDE_SWITCH_PROBE_SETTLE_MS: "800"
         run: |
-          # Most downloads will be the zip; test the copy that comes out of it.
           $out = Join-Path $env:RUNNER_TEMP 'unzip'
           Expand-Archive (Get-ChildItem artifacts/*.zip)[0].FullName -DestinationPath $out
           $fixture = Join-Path $env:RUNNER_TEMP 'fixture-zip'
@@ -112,8 +107,10 @@ jobs:
         with:
           name: ClaudeSwitch-win-x64
           path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Create the release
+      - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:

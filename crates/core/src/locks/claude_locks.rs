@@ -189,39 +189,33 @@ mod tests {
 
     #[test]
     fn lock_paths_default_home() {
-        let home = PathBuf::from(r"C:\Users\test");
+        // Build expected paths with join() so separators match the host OS —
+        // hard-coded `\` strings fail on Linux/macOS CI runners.
+        let home = PathBuf::from("Users").join("test");
         let env = env_at(&home);
-        assert_eq!(
-            credentials_lock_dir(&env),
-            PathBuf::from(r"C:\Users\test\.claude.lock")
-        );
+        assert_eq!(credentials_lock_dir(&env), home.join(".claude.lock"));
         assert_eq!(
             oauth_refresh_lock_dir(&env),
-            PathBuf::from(r"C:\Users\test\.claude\.oauth_refresh.lock")
+            home.join(".claude").join(".oauth_refresh.lock")
         );
-        assert_eq!(
-            config_lock_dir(&env),
-            PathBuf::from(r"C:\Users\test\.claude.json.lock")
-        );
+        assert_eq!(config_lock_dir(&env), home.join(".claude.json.lock"));
     }
 
     #[test]
     fn lock_paths_claude_config_dir() {
-        let home = PathBuf::from(r"C:\Users\test");
+        let home = PathBuf::from("Users").join("test");
         let mut env = env_at(&home);
-        env.claude_config_dir = Some(PathBuf::from(r"C:\c\claude"));
+        let ccd = PathBuf::from("c").join("claude");
+        env.claude_config_dir = Some(ccd.clone());
         assert_eq!(
             credentials_lock_dir(&env),
-            PathBuf::from(r"C:\c\claude.lock")
+            PathBuf::from("c").join("claude.lock")
         );
         assert_eq!(
             oauth_refresh_lock_dir(&env),
-            PathBuf::from(r"C:\c\claude\.oauth_refresh.lock")
+            ccd.join(".oauth_refresh.lock")
         );
-        assert_eq!(
-            config_lock_dir(&env),
-            PathBuf::from(r"C:\c\claude\.claude.json.lock")
-        );
+        assert_eq!(config_lock_dir(&env), ccd.join(".claude.json.lock"));
     }
 
     #[test]

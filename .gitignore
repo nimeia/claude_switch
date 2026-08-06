@@ -6,7 +6,8 @@ bin/
 obj/
 dist/
 
-# Release artifacts
+# Local release packaging output
+/artifacts/
 *.user
 
 # Probe / layout-acceptance output

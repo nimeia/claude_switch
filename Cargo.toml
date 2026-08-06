@@ -11,7 +11,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/example/claude-switch"
+repository = "https://github.com/nimeia/claude_switch"
 rust-version = "1.80"
 
 [workspace.lints.rust]

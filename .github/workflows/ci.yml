@@ -1,5 +1,5 @@
-# Gates every push: the Rust core on three platforms, and the Windows shell
-# (tests plus the single-file publish users actually download).
+# Solo-maintainer CI: one Windows job covers the shippable path.
+# Product is Windows-only; cross-platform GUI is not in scope yet.
 
 name: ci
 
@@ -9,17 +9,26 @@ on:
   pull_request:
     branches: [main, master]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  version-sync:
-    name: VERSION ↔ Cargo.toml
-    runs-on: ubuntu-latest
+  windows:
+    name: build · test · package
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check workspace version matches VERSION file
+
+      - name: VERSION ↔ Cargo.toml
+        shell: bash
         run: |
           set -euo pipefail
           file_ver=$(tr -d '[:space:]' < VERSION)
@@ -27,29 +36,17 @@ jobs:
           echo "VERSION=$file_ver cargo=$cargo_ver"
           test "$file_ver" = "$cargo_ver"
 
-  core:
-    name: core (${{ matrix.os }})
-    needs: version-sync
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-          - os: windows-latest
-          - os: macos-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "."
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
 
       - name: fmt
         run: cargo fmt --all -- --check
@@ -57,57 +54,39 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: test
+      - name: test (Rust)
         run: cargo test --workspace --all-targets
 
-  gui-win:
-    name: windows shell
-    needs: core
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.0.x"
-
-      - name: Build the native engine
+      - name: Build native engine
         run: cargo build -p claude-switch-ffi --release
 
-      - name: Test
-        run: dotnet test gui-win/ClaudeSwitch.App.Tests/ClaudeSwitch.App.Tests.csproj -c Release
+      - name: test (GUI)
+        run: dotnet test gui-win/ClaudeSwitch.App.Tests/ClaudeSwitch.App.Tests.csproj -c Release --nologo
 
       - name: FFI smoke
-        run: dotnet run --project gui-win/FfiSmoke -c Release
+        run: dotnet run --project gui-win/FfiSmoke -c Release --no-launch-profile
 
-      # The shippable artifact is built on every push, not only at release time:
-      # a publish that only breaks when tagged breaks at the worst moment.
       - name: Publish single-file
         run: >
           dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj
-          -c Release -p:PublishSingleFileBundle=true -o dist
+          -c Release -p:PublishSingleFileBundle=true -o dist --nologo
 
-      - name: Verify the artifact is self-contained
+      - name: Verify self-contained
         shell: pwsh
         run: |
           $files = Get-ChildItem dist -File
+          $files | Format-Table Name, Length
           if ($files.Count -ne 1 -or $files[0].Name -ne 'ClaudeSwitch.exe') {
             throw "expected exactly ClaudeSwitch.exe in dist, got: $($files.Name -join ', ')"
           }
 
-      - name: Smoke-run the published exe
+      - name: Smoke-run published exe
         shell: pwsh
         env:
-          # Isolated home: the smoke run must never touch a real Claude login.
           CLAUDE_SWITCH_LAYOUT_DIR: ${{ runner.temp }}/probe
           CLAUDE_SWITCH_LAYOUT_EXIT: "1"
           CLAUDE_SWITCH_PROBE_SETTLE_MS: "800"
         run: |
-          # The one-file check proves packaging, not that the bundle runs. This
-          # catches the failure that check cannot see: the native engine failing
-          # to resolve out of the self-extracted bundle, which would ship a
-          # binary that dies on launch for every user.
           $fixture = Join-Path $env:RUNNER_TEMP 'fixture-home'
           $p = Start-Process -FilePath dist/ClaudeSwitch.exe `
                  -ArgumentList '--skip-onboarding', '--fixture', $fixture `
@@ -116,25 +95,19 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "exe exited with $($p.ExitCode)" }
           $shot = Join-Path $env:CLAUDE_SWITCH_LAYOUT_DIR 'gui-layout.png'
           if (-not (Test-Path $shot)) { throw 'the app never reached first paint' }
-          Get-Content (Join-Path $env:CLAUDE_SWITCH_LAYOUT_DIR 'gui-layout-rects.txt') |
-            Select-String '^(list|status|strip)=' 
           Write-Host "published exe launched, rendered and exited cleanly"
 
-      - name: Package (exe + zip)
+      - name: Package (exe + zip + SHA256)
         shell: pwsh
-        # Built on every push, not only at release: a packaging script that is
-        # first exercised while cutting a tag fails while cutting a tag.
         run: ./packaging/pack.ps1 -PublishDir dist -OutDir artifacts
 
-      - name: Extract the zip and run what came out
+      - name: Smoke-run extracted zip
         shell: pwsh
         env:
           CLAUDE_SWITCH_LAYOUT_DIR: ${{ runner.temp }}/probe-zip
           CLAUDE_SWITCH_LAYOUT_EXIT: "1"
           CLAUDE_SWITCH_PROBE_SETTLE_MS: "800"
         run: |
-          # The zip is what most people will download, so the tested path has to
-          # be the extracted copy, not the exe we happened to publish.
           $out = Join-Path $env:RUNNER_TEMP 'unzip'
           Expand-Archive (Get-ChildItem artifacts/*.zip)[0].FullName -DestinationPath $out
           Get-ChildItem $out | Format-Table Name, Length
@@ -152,3 +125,5 @@ jobs:
         with:
           name: ClaudeSwitch-win-x64
           path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14

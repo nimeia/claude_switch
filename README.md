@@ -176,6 +176,23 @@ gui-win/ClaudeSwitch.App/Strings/    界面词条（每种语言一份 JSON，�
 
 版本号以根目录 `VERSION` 为准，必须与 `Cargo.toml` 的 `[workspace.package].version` 一致。
 
+## CI 与发布
+
+每个 push / PR 在 Windows 上跑完整门禁：Rust（fmt / clippy / test）→ GUI 测试 → 单文件 publish → 打包（exe + zip + SHA256）→ 启动冒烟。产物作为 workflow artifact 保留 14 天。
+
+发版（维护者）：
+
+```powershell
+# 1. 改 VERSION，并同步 Cargo.toml 的 workspace.package.version
+# 2. 提交后打 tag 并推送（tag 去掉 v 前缀必须等于 VERSION）
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+推送 `v*` tag 会触发 [release](.github/workflows/release.yml) workflow：构建 → 冒烟 → 创建 GitHub Release 并上传 `ClaudeSwitch-<版本>-win-x64.zip` / `.exe` / `SHA256SUMS.txt`。
+
+预演（不发版）：Actions → **release** → Run workflow，保持 `dry_run=true`。
+
 ## 平台
 
 目前只有 Windows。核心是跨平台的 Rust，macOS / Linux 的原生外壳在设计文档里但还没做。

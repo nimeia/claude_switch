@@ -66,6 +66,6 @@ Claude Switch — 在多个 Claude Code 账号之间切换
 源码与问题反馈
 --------------
 
-https://github.com/OWNER/claude-switch
+https://github.com/nimeia/claude_switch
 
 许可证：MIT（见 LICENSE）
