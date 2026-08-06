@@ -119,3 +119,36 @@ jobs:
           Get-Content (Join-Path $env:CLAUDE_SWITCH_LAYOUT_DIR 'gui-layout-rects.txt') |
             Select-String '^(list|status|strip)=' 
           Write-Host "published exe launched, rendered and exited cleanly"
+
+      - name: Package (exe + zip)
+        shell: pwsh
+        # Built on every push, not only at release: a packaging script that is
+        # first exercised while cutting a tag fails while cutting a tag.
+        run: ./packaging/pack.ps1 -PublishDir dist -OutDir artifacts
+
+      - name: Extract the zip and run what came out
+        shell: pwsh
+        env:
+          CLAUDE_SWITCH_LAYOUT_DIR: ${{ runner.temp }}/probe-zip
+          CLAUDE_SWITCH_LAYOUT_EXIT: "1"
+          CLAUDE_SWITCH_PROBE_SETTLE_MS: "800"
+        run: |
+          # The zip is what most people will download, so the tested path has to
+          # be the extracted copy, not the exe we happened to publish.
+          $out = Join-Path $env:RUNNER_TEMP 'unzip'
+          Expand-Archive (Get-ChildItem artifacts/*.zip)[0].FullName -DestinationPath $out
+          Get-ChildItem $out | Format-Table Name, Length
+          $fixture = Join-Path $env:RUNNER_TEMP 'fixture-zip'
+          $p = Start-Process -FilePath (Join-Path $out 'ClaudeSwitch.exe') `
+                 -ArgumentList '--skip-onboarding', '--fixture', $fixture `
+                 -WorkingDirectory $out -PassThru
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'extracted exe did not exit' }
+          if ($p.ExitCode -ne 0) { throw "extracted exe exited with $($p.ExitCode)" }
+          if (-not (Test-Path (Join-Path $env:CLAUDE_SWITCH_LAYOUT_DIR 'gui-layout.png'))) {
+            throw 'the extracted app never reached first paint'
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeSwitch-win-x64
+          path: artifacts/*

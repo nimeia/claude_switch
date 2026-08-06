@@ -84,39 +84,63 @@ jobs:
             throw 'the app never reached first paint'
           }
 
-      - name: Name the artifact after its version
-        shell: bash
+      - name: Package (exe + zip)
+        shell: pwsh
+        run: ./packaging/pack.ps1 -PublishDir dist -OutDir artifacts
+
+      - name: Extract the zip and run what came out
+        shell: pwsh
+        env:
+          CLAUDE_SWITCH_LAYOUT_DIR: ${{ runner.temp }}/probe-zip
+          CLAUDE_SWITCH_LAYOUT_EXIT: "1"
+          CLAUDE_SWITCH_PROBE_SETTLE_MS: "800"
         run: |
-          set -euo pipefail
-          ver=$(tr -d '[:space:]' < VERSION)
-          cd dist
-          # Two downloads in a folder must be tellable apart.
-          mv ClaudeSwitch.exe "ClaudeSwitch-$ver-win-x64.exe"
-          sha256sum "ClaudeSwitch-$ver-win-x64.exe" | tee SHA256SUMS.txt
+          # Most downloads will be the zip; test the copy that comes out of it.
+          $out = Join-Path $env:RUNNER_TEMP 'unzip'
+          Expand-Archive (Get-ChildItem artifacts/*.zip)[0].FullName -DestinationPath $out
+          $fixture = Join-Path $env:RUNNER_TEMP 'fixture-zip'
+          $p = Start-Process -FilePath (Join-Path $out 'ClaudeSwitch.exe') `
+                 -ArgumentList '--skip-onboarding', '--fixture', $fixture `
+                 -WorkingDirectory $out -PassThru
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'extracted exe did not exit' }
+          if ($p.ExitCode -ne 0) { throw "extracted exe exited with $($p.ExitCode)" }
+          if (-not (Test-Path (Join-Path $env:CLAUDE_SWITCH_LAYOUT_DIR 'gui-layout.png'))) {
+            throw 'the extracted app never reached first paint'
+          }
 
       - uses: actions/upload-artifact@v4
         with:
           name: ClaudeSwitch-win-x64
-          path: dist/*
+          path: artifacts/*
 
       - name: Create the release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/ClaudeSwitch-*-win-x64.exe
-            dist/SHA256SUMS.txt
+            artifacts/ClaudeSwitch-*-win-x64.zip
+            artifacts/ClaudeSwitch-*-win-x64.exe
+            artifacts/SHA256SUMS.txt
           generate_release_notes: true
           body: |
             ## 安装
 
-            下载下方的 `ClaudeSwitch-*-win-x64.exe`，双击运行。无需安装 .NET 或其它依赖，也没有安装程序——它就是一个可以随便放、随便删的可执行文件。
+            两种都可以，内容一样：
+
+            | 下载 | 适合 |
+            |---|---|
+            | `ClaudeSwitch-*-win-x64.zip` | **推荐**。解压即用，附使用说明与许可证。浏览器对 zip 的拦截比 exe 少 |
+            | `ClaudeSwitch-*-win-x64.exe` | 只要程序本身 |
+
+            无需安装 .NET 或其它依赖，也没有安装程序——放哪都行，删掉就干净。
 
             **首次运行会看到 Windows SmartScreen 警告**——这个程序没有代码签名证书。
             点「更多信息」→「仍要运行」。介意的话可以先核对校验和：
 
             ```powershell
-            Get-FileHash ClaudeSwitch-*-win-x64.exe -Algorithm SHA256
+            Get-FileHash ClaudeSwitch-*-win-x64.* -Algorithm SHA256
             ```
 
             与 `SHA256SUMS.txt` 比对，或自行从源码构建（见 README）。
+
+            > 从 zip 解压出来的文件同样带「来自网络」标记，所以压缩包不会绕过 SmartScreen 提示。

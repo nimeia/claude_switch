@@ -6,13 +6,22 @@
 
 ## 安装
 
-到 [Releases](../../releases) 下载 `ClaudeSwitch-<版本>-win-x64.exe`，双击运行。不需要装 .NET，不需要装 Rust。
+到 [Releases](../../releases) 下载，两种任选，内容一样：
+
+| 下载 | 适合 |
+|---|---|
+| `ClaudeSwitch-<版本>-win-x64.zip` | **推荐**。解压即用，附使用说明与许可证；浏览器对 zip 的拦截比 exe 少 |
+| `ClaudeSwitch-<版本>-win-x64.exe` | 只要程序本身 |
+
+不需要装 .NET，不需要装 Rust。
 
 **没有安装程序**——它是一个绿色可执行文件：不写注册表、不要管理员权限、放哪都行、删掉就干净。开机自启由应用内的复选框控制（写当前用户的启动项，取消勾选即移除）。
 
 唯一的例外：.NET 单文件包首次运行时会把自带运行时解压到 `%TEMP%\.net\ClaudeSwitch\`。这是 .NET 的标准行为，不是安装。
 
 **首次运行 Windows 会弹 SmartScreen 警告**——这个程序没有代码签名证书（一张证书每年几百美元，暂时没买）。点「更多信息」→「仍要运行」。
+
+从 zip 解压出来的文件同样带「来自网络」标记，**压缩包不会绕过这个提示**。
 
 不放心的话，Release 里附了 SHA256，可以先核对：
 
@@ -88,6 +97,12 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
 ```
 
 产物是 `dist/ClaudeSwitch.exe` 一个文件。两步顺序不能反——原生引擎必须先构建，否则 publish 会直接报错拒绝，而不是打出一个启动即崩的包。
+
+要生成和 Release 一样的下载物（exe + zip + 校验和）：
+
+```powershell
+./packaging/pack.ps1 -PublishDir dist -OutDir artifacts
+```
 
 开发时：
 
