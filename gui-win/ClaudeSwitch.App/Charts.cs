@@ -478,7 +478,7 @@ internal sealed class CalendarHeatmap : ChartBase
                 lastMonth = month;
                 TextRenderer.DrawText(
                     g,
-                    month.Length >= 7 ? $"{int.Parse(month[5..7])}月" : month,
+                    month.Length >= 7 ? Loc.T("chart.month", int.Parse(month[5..7])) : month,
                     Theme.FontCaption,
                     new Rectangle(r.X - 2, 0, Step * 5, TopGutter),
                     Theme.TextMuted,
@@ -488,7 +488,12 @@ internal sealed class CalendarHeatmap : ChartBase
 
         // Weekday rail — only alternate rows, so the labels never crowd.
         if (!ShowWeekdayRail) return;
-        string[] names = ["一", "二", "三", "四", "五", "六", "日"];
+        string[] names =
+        [
+            Loc.T("chart.weekday.mon"), Loc.T("chart.weekday.tue"), Loc.T("chart.weekday.wed"),
+            Loc.T("chart.weekday.thu"), Loc.T("chart.weekday.fri"), Loc.T("chart.weekday.sat"),
+            Loc.T("chart.weekday.sun"),
+        ];
         for (int row = 1; row < 7; row += 2)
         {
             TextRenderer.DrawText(
@@ -529,11 +534,18 @@ internal sealed class CalendarHeatmap : ChartBase
     public void PaintLegend(Graphics g, Rectangle bounds)
     {
         int cell = Math.Min(Cell, 16);
-        const int TailWidth = 26; // room for the "多" label past the swatches
-        int x = bounds.Right - (cell + Gap) * 4 - TailWidth;
+        // Both captions are measured: "少 / 多" fitted 20px, "Less / More" did
+        // not, and the fixed boxes rendered them as "ss" and "M".
+        string lessText = Loc.T("chart.legend.less");
+        string moreText = Loc.T("chart.legend.more");
+        int lessW = TextRenderer.MeasureText(lessText, Theme.FontCaption).Width;
+        int moreW = TextRenderer.MeasureText(moreText, Theme.FontCaption).Width;
+
+        int tailWidth = moreW + 6;
+        int x = bounds.Right - (cell + Gap) * 4 - tailWidth;
         TextRenderer.DrawText(
-            g, "少", Theme.FontCaption,
-            new Rectangle(x - 24, bounds.Y, 20, bounds.Height),
+            g, lessText, Theme.FontCaption,
+            new Rectangle(x - lessW - 4, bounds.Y, lessW, bounds.Height),
             Theme.TextMuted,
             TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         foreach (var c in Ramp)
@@ -545,8 +557,8 @@ internal sealed class CalendarHeatmap : ChartBase
             x += cell + Gap;
         }
         TextRenderer.DrawText(
-            g, "多", Theme.FontCaption,
-            new Rectangle(x + 4, bounds.Y, TailWidth - 6, bounds.Height),
+            g, moreText, Theme.FontCaption,
+            new Rectangle(x + 4, bounds.Y, moreW, bounds.Height),
             Theme.TextMuted,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
     }

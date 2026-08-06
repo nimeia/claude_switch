@@ -54,6 +54,9 @@ public class UsageDrawerPlanTests
     [Fact]
     public void Binds_subscription_rows_from_plan_data()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         using var drawer = MakeDrawer();
         drawer.Bind(ProAccount());
 
@@ -83,6 +86,9 @@ public class UsageDrawerPlanTests
     [Fact]
     public void Shows_the_organization_for_a_team_plan()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         using var drawer = MakeDrawer();
         drawer.Bind(new AccountCardModel
         {
@@ -116,6 +122,9 @@ public class UsageDrawerPlanTests
     [Fact]
     public void Section_adds_height_and_stays_above_the_rules_link()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         using var bare = MakeDrawer();
         bare.Bind(new AccountCardModel { Number = 1, Email = "old@example.com" });
         int bareHeight = bare.ContentHeight;
@@ -139,6 +148,9 @@ public class UsageDrawerPlanTests
     [Fact]
     public void Rebinding_a_bare_account_clears_the_previous_rows()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         using var drawer = MakeDrawer();
         drawer.Bind(ProAccount());
         Assert.NotNull(LabelWithText(drawer, "订阅开始"));

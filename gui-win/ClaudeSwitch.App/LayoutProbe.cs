@@ -132,11 +132,10 @@ internal static class LayoutProbe
                         else
                             sb.AppendLine("OK switch_button_fits_text");
                         // Dynamic CTA: 请选择账号 / 当前正在使用 / 切换到该账号 / 正在切换…
-                        if (switchBtn.Text.Contains("请选择账号", StringComparison.Ordinal)
-                            || switchBtn.Text.Contains("当前正在使用", StringComparison.Ordinal)
-                            || switchBtn.Text.Contains("切换到该账号", StringComparison.Ordinal)
-                            || switchBtn.Text.Contains("正在切换", StringComparison.Ordinal)
-                            || switchBtn.Text.Contains("切换", StringComparison.Ordinal))
+                        if (switchBtn.Text.Contains(Loc.T("toolbar.switch.select"), StringComparison.Ordinal)
+                            || switchBtn.Text.Contains(Loc.T("toolbar.switch.current"), StringComparison.Ordinal)
+                            || switchBtn.Text.Contains(Loc.T("toolbar.switch.go"), StringComparison.Ordinal)
+                            || switchBtn.Text.Contains(Loc.T("toolbar.switch.busy"), StringComparison.Ordinal))
                             sb.AppendLine("OK switch_label_complete");
                         else
                             sb.AppendLine("FAIL switch_label_incomplete");

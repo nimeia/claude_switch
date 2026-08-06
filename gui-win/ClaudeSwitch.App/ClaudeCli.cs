@@ -59,10 +59,7 @@ internal static class ClaudeCli
     }
 
     /// <summary>Message to show when the CLI cannot be found.</summary>
-    public const string NotFoundMessage =
-        "找不到 claude 命令。\n\n"
-        + "请先安装 Claude Code，或确认它在 PATH 中。\n"
-        + "安装后可能需要重启本程序，新的 PATH 才会生效。";
+    public static string NotFoundMessage => Loc.T("resume.notFound");
 
     /// <summary>
     /// Open a session in the user's terminal.
@@ -72,7 +69,7 @@ internal static class ClaudeCli
     {
         if (!Directory.Exists(workingDirectory))
         {
-            return $"目录不存在：\n{workingDirectory}\n\n会话记录仍在，但目录已被移动或删除。";
+            return Loc.T("resume.missingDir", workingDirectory);
         }
         if (FindExecutable() is not { } exe)
         {

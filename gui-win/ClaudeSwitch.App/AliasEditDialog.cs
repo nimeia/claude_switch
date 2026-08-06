@@ -9,7 +9,7 @@ internal sealed class AliasEditDialog : Form
 
     public AliasEditDialog(AccountCardModel model)
     {
-        Text = "编辑别名";
+        Text = Loc.T("alias.title");
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MaximizeBox = false;
@@ -24,10 +24,10 @@ internal sealed class AliasEditDialog : Form
         // would clip the last lines once Windows scaling is above 100%.
         var layout = new DialogLayout(this, textWidth: 356, pad: 20, gap: 8);
 
-        var title = layout.Text($"账号 #{model.Number}", Theme.FontHeading, Theme.TextPrimary);
+        var title = layout.Text(Loc.T("alias.account", model.Number), Theme.FontHeading, Theme.TextPrimary);
         var email = layout.Text(model.Email, Theme.FontSmall, Theme.TextSecondary);
         var hint = layout.Text(
-            "别名（字母/数字/._-，不能纯数字；留空清除）",
+            Loc.T("alias.hint"),
             Theme.FontSmall,
             Theme.TextMuted);
 
@@ -43,10 +43,10 @@ internal sealed class AliasEditDialog : Form
         };
         layout.Advance(_input);
 
-        var btnOk = new PrimaryButton { Text = "保存" };
+        var btnOk = new PrimaryButton { Text = Loc.T("alias.save") };
         var btnCancel = new SecondaryButton
         {
-            Text = "取消",
+            Text = Loc.T("common.cancel"),
             DialogResult = DialogResult.Cancel,
         };
         btnOk.Click += (_, _) =>
@@ -61,7 +61,7 @@ internal sealed class AliasEditDialog : Form
             }
             if (!IsValidAlias(raw, out var err))
             {
-                MessageBox.Show(this, err, "别名无效", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, err, Loc.T("alias.invalid"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             AliasResult = raw.ToLowerInvariant();
@@ -81,24 +81,24 @@ internal sealed class AliasEditDialog : Form
         error = "";
         if (name.Length == 0)
         {
-            error = "别名不能为空";
+            error = Loc.T("alias.err.empty");
             return false;
         }
         if (name.All(char.IsDigit))
         {
-            error = "别名不能是纯数字（会与槽位号冲突）";
+            error = Loc.T("alias.err.numeric");
             return false;
         }
         if (name.StartsWith('-'))
         {
-            error = "别名不能以 '-' 开头";
+            error = Loc.T("alias.err.dash");
             return false;
         }
         foreach (var c in name)
         {
             if (char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.')
                 continue;
-            error = "仅允许字母、数字、'-'、'_'、'.'";
+            error = Loc.T("alias.err.chars");
             return false;
         }
         return true;

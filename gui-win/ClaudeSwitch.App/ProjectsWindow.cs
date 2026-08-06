@@ -67,7 +67,7 @@ internal sealed class ProjectsWindow : Form
     public ProjectsWindow(Engine engine)
     {
         _engine = engine;
-        Text = "目录与会话";
+        Text = Loc.T("proj.title");
         StartPosition = FormStartPosition.CenterParent;
         Font = Theme.FontBody;
         ShowIcon = false;
@@ -89,8 +89,14 @@ internal sealed class ProjectsWindow : Form
         // The path carries the name in its tail, so a separate name column spent
         // ~130px repeating it — and left both too narrow to read. Two different
         // directories here are in fact both called "repo".
-        ConfigureList(_dirs, ("目录", -1), ("会话", 48), ("最后活动", 104), ("大小", 74));
-        ConfigureList(_sessions, ("会话", -1), ("开始时间", 104), ("大小", 74));
+        ConfigureList(
+            _dirs,
+            (Loc.T("proj.col.dir"), -1), (Loc.T("proj.col.sessions"), 48),
+            (Loc.T("proj.col.lastActive"), 104), (Loc.T("proj.col.size"), 74));
+        ConfigureList(
+            _sessions,
+            (Loc.T("proj.col.session"), -1), (Loc.T("proj.col.started"), 104),
+            (Loc.T("proj.col.size"), 74));
         // Counts and sizes are numbers; left-aligned they read as ragged text.
         _dirs.RightAlignedColumns.UnionWith([1, 3]);
         _sessions.RightAlignedColumns.Add(2);
@@ -102,8 +108,8 @@ internal sealed class ProjectsWindow : Form
         _sessions.DoubleClick += (_, _) => ResumeSelected();
 
         var sessionMenu = new ContextMenuStrip();
-        sessionMenu.Items.Add("继续此会话", null, (_, _) => ResumeSelected());
-        sessionMenu.Items.Add("复制会话 ID", null, (_, _) =>
+        sessionMenu.Items.Add(Loc.T("proj.menu.resume"), null, (_, _) => ResumeSelected());
+        sessionMenu.Items.Add(Loc.T("proj.menu.copyId"), null, (_, _) =>
         {
             if (SelectedSession is { } s) Clipboard.SetText(s.Id);
         });
@@ -120,16 +126,16 @@ internal sealed class ProjectsWindow : Form
         dirsPane.Controls.Add(dirsCard);
         split.Panel1.Controls.Add(dirsPane);
 
-        _resume.Text = "继续此会话";
+        _resume.Text = Loc.T("proj.resume");
         _resume.Click += (_, _) => ResumeSelected();
-        _tip.SetToolTip(_resume, "在该目录下打开终端并运行 claude --resume <会话 ID>");
+        _tip.SetToolTip(_resume, Loc.T("proj.resume.tip"));
 
-        _openDir.Text = "打开目录";
+        _openDir.Text = Loc.T("proj.openDir");
         _openDir.Click += (_, _) => OpenSelectedDirectory();
 
-        _stats.Text = "统计用量";
+        _stats.Text = Loc.T("proj.stats");
         _stats.Click += (_, _) => ComputeStats();
-        _tip.SetToolTip(_stats, "读取该目录的全部会话记录并累计 token 用量（按需执行）");
+        _tip.SetToolTip(_stats, Loc.T("proj.stats.tip"));
 
         // Stats text gets its own band: inside the button flow it competed with
         // them for width and pushed them off the panel.
@@ -155,7 +161,7 @@ internal sealed class ProjectsWindow : Form
         _sessionsTitle.Height = Theme.FontHeading.Height + Theme.Space2;
         _sessionsTitle.Font = Theme.FontHeading;
         _sessionsTitle.TextAlign = ContentAlignment.MiddleLeft;
-        _sessionsTitle.Text = "会话";
+        _sessionsTitle.Text = Loc.T("proj.sessions");
 
         var sessionsCard = new CardPanel { Dock = DockStyle.Fill };
         sessionsCard.Controls.Add(_sessions);
@@ -174,7 +180,7 @@ internal sealed class ProjectsWindow : Form
         split.Panel2.Controls.Add(right);
 
         // ── Header band, mirroring the main window's brand row ──
-        _title.Text = "目录与会话";
+        _title.Text = Loc.T("proj.title");
         _title.Font = Theme.FontBrand;
         _title.AutoSize = true;
         _title.Location = new Point(Theme.Space4, Theme.Space3);
@@ -246,7 +252,12 @@ internal sealed class ProjectsWindow : Form
             for (int i = 0; i < columns.Length; i++)
             {
                 if (columns[i].Width <= 0) continue;
-                int scaled = Theme.Scale(list, columns[i].Width);
+                // Never narrower than the header itself: the design widths were
+                // set against Chinese headers, and "Sessions" does not fit where
+                // "会话" did.
+                int headerW =
+                    TextRenderer.MeasureText(columns[i].Header, list.Font).Width + Theme.Space4;
+                int scaled = Math.Max(Theme.Scale(list, columns[i].Width), headerW);
                 list.Columns[i].Width = scaled;
                 fixedTotal += scaled;
             }
@@ -316,7 +327,7 @@ internal sealed class ProjectsWindow : Form
         }
         catch (Exception ex)
         {
-            _hint.Text = "读取目录失败：" + ex.Message;
+            _hint.Text = Loc.T("proj.readFailed", ex.Message);
             return;
         }
 
@@ -330,12 +341,12 @@ internal sealed class ProjectsWindow : Form
             {
                 Tag = r,
                 ToolTipText = r.LastPrompt is { Length: > 0 } p
-                    ? $"{r.Name}\n最近一次：{p}"
+                    ? Loc.T("proj.tooltip.recent", r.Name, p)
                     : r.Name,
             };
             item.SubItems.Add(r.SessionCount.ToString());
-            item.SubItems.Add(Theme.FormatCompactEpoch(r.LastActiveMs) ?? "—");
-            item.SubItems.Add(r.TranscriptBytes > 0 ? FormatBytes(r.TranscriptBytes) : "—");
+            item.SubItems.Add(Theme.FormatCompactEpoch(r.LastActiveMs) ?? Loc.T("common.dash"));
+            item.SubItems.Add(r.TranscriptBytes > 0 ? FormatBytes(r.TranscriptBytes) : Loc.T("common.dash"));
             if (r.SessionCount == 0)
                 item.ForeColor = Theme.TextMuted;
             _dirs.Items.Add(item);
@@ -346,8 +357,8 @@ internal sealed class ProjectsWindow : Form
         int sessions = _rows.Sum(r => r.SessionCount);
         // "Registered" and "actually worked in" are different questions, so the
         // count says which is which instead of picking one and looking wrong.
-        _countChip.Text = $"{used} 个目录有会话 · 合计 {sessions} 个会话 · 另有 {_rows.Count - used} 个仅登记过";
-        _hint.Text = "此列表与账号无关——Claude Code 不记录会话属于哪个账号。";
+        _countChip.Text = Loc.T("proj.count", used, sessions, _rows.Count - used);
+        _hint.Text = Loc.T("proj.accountNote");
 
         var restore = keep is null
             ? null
@@ -414,14 +425,16 @@ internal sealed class ProjectsWindow : Form
                             s["modifiedMs"]?.GetValue<long>() ?? 0,
                             s["startedMs"]?.GetValue<long>(),
                             s["bytes"]?.GetValue<long>() ?? 0);
-                        var item = new ListViewItem(row.Title ?? "（无标题）")
+                        var item = new ListViewItem(row.Title ?? Loc.T("proj.untitled"))
                         {
                             Tag = row,
                             // The id has no column of its own — it is what the
                             // resume button uses, not something to read.
-                            ToolTipText = $"会话 ID：{row.Id}",
+                            ToolTipText = Loc.T("proj.sessionId", row.Id),
                         };
-                        item.SubItems.Add(Theme.FormatCompactEpoch(row.StartedMs ?? row.ModifiedMs) ?? "—");
+                        item.SubItems.Add(
+                            Theme.FormatCompactEpoch(row.StartedMs ?? row.ModifiedMs)
+                            ?? Loc.T("common.dash"));
                         item.SubItems.Add(FormatBytes(row.Bytes));
                         _sessions.Items.Add(item);
                     }
@@ -429,7 +442,7 @@ internal sealed class ProjectsWindow : Form
             }
             catch (Exception ex)
             {
-                _statsText.Text = "读取会话失败：" + ex.Message;
+                _statsText.Text = Loc.T("proj.sessionsFailed", ex.Message);
             }
         }
 
@@ -454,10 +467,11 @@ internal sealed class ProjectsWindow : Form
 
         if (ClaudeCli.Resume(project.Path, session.Id) is { } problem)
         {
-            MessageBox.Show(this, problem, "无法继续会话", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, problem, Loc.T("resume.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
-        _hint.Text = $"已在 {project.Name} 恢复会话 {session.Id[..Math.Min(8, session.Id.Length)]}…";
+        _hint.Text = Loc.T(
+            "proj.resumed", project.Name, session.Id[..Math.Min(8, session.Id.Length)]);
     }
 
     private void OpenSelectedDirectory()
@@ -472,7 +486,7 @@ internal sealed class ProjectsWindow : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "打开失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, ex.Message, Loc.T("proj.openFailed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -482,7 +496,7 @@ internal sealed class ProjectsWindow : Form
         if (SelectedProject is not { } project || project.TranscriptDir is not { } dir) return;
 
         _stats.Enabled = false;
-        _statsText.Text = $"正在读取 {FormatBytes(project.TranscriptBytes)} 会话记录…";
+        _statsText.Text = Loc.T("proj.scanning", FormatBytes(project.TranscriptBytes));
         Application.DoEvents();
         var sw = Stopwatch.StartNew();
         try
@@ -499,20 +513,24 @@ internal sealed class ProjectsWindow : Form
             // Two explicit lines beat relying on word wrap, which broke tokens
             // mid-word and crowded the buttons below.
             var text =
-                $"{s["sessions"]?.GetValue<int>() ?? 0} 个会话 · {userMsgs} 条提问 · "
-                + $"读取 {FormatBytes(project.TranscriptBytes)} 用时 {sw.ElapsedMilliseconds} ms\n"
-                + $"输入 {FormatTokens(input)} · 输出 {FormatTokens(output)} · "
-                + $"缓存写 {FormatTokens(cacheWrite)} · 缓存读 {FormatTokens(cacheRead)}";
+                Loc.T(
+                    "proj.stats.line1",
+                    s["sessions"]?.GetValue<int>() ?? 0, userMsgs,
+                    FormatBytes(project.TranscriptBytes), sw.ElapsedMilliseconds)
+                + Loc.T(
+                    "proj.stats.line2",
+                    FormatTokens(input), FormatTokens(output),
+                    FormatTokens(cacheWrite), FormatTokens(cacheRead));
             // A partial read must not be presented as an exact total.
             if (skipped > 0)
-                text += $"\n{skipped} 行无法解析，以上为下限";
+                text += Loc.T("proj.stats.skipped", skipped);
             _statsText.Text = text;
 
             ShowStatsWindow(project.Path, s, sw.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
-            _statsText.Text = "统计失败：" + ex.Message;
+            _statsText.Text = Loc.T("proj.stats.failed", ex.Message);
         }
         finally
         {

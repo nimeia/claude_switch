@@ -32,7 +32,7 @@ internal static class StartupHelper
     {
         using var key = Registry.CurrentUser.OpenSubKey(RunKey, writable: true)
             ?? Registry.CurrentUser.CreateSubKey(RunKey)
-            ?? throw new InvalidOperationException("无法打开注册表 Run 项");
+            ?? throw new InvalidOperationException(Loc.T("startup.registryFailed"));
 
         if (enabled)
         {

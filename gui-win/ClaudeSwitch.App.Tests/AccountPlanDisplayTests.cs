@@ -9,6 +9,10 @@ namespace ClaudeSwitch.App.Tests;
 /// </summary>
 public class AccountPlanDisplayTests
 {
+    // These assert wording, so they must name the language they are asserting.
+    // Without this the result depends on whichever test last called Loc.Use.
+    private static IDisposable Chinese() => Loc.Scoped("zh-Hans");
+
     private static AccountCardModel ProAccount() =>
         new()
         {
@@ -25,6 +29,7 @@ public class AccountPlanDisplayTests
     [Fact]
     public void Sub_line_appends_subscription_start_when_it_fits()
     {
+        using var lang = Chinese();
         var line = AccountCard.BuildSubLine(ProAccount(), int.MaxValue);
         Assert.StartsWith("alice@example.com", line);
         Assert.Contains("订阅开始", line);
@@ -35,6 +40,7 @@ public class AccountPlanDisplayTests
     [Fact]
     public void Sub_line_drops_the_date_rather_than_truncating_the_email()
     {
+        using var lang = Chinese();
         var line = AccountCard.BuildSubLine(ProAccount(), 10);
         Assert.Equal("alice@example.com", line);
         Assert.DoesNotContain("订阅开始", line);
@@ -80,6 +86,9 @@ public class AccountPlanDisplayTests
     [Fact]
     public void Billing_type_is_localized_and_unknown_values_pass_through()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         Assert.Equal("Google Play 订阅", Theme.BillingTypeLabel("google_play_subscription"));
         Assert.Equal("Stripe 订阅", Theme.BillingTypeLabel("stripe_subscription"));
         Assert.Equal("some_new_channel", Theme.BillingTypeLabel("some_new_channel"));
@@ -96,6 +105,7 @@ public class AccountPlanDisplayTests
     [InlineData(null, "暂无")]
     public void Missing_usage_says_why_on_the_card(string? status, string expected)
     {
+        using var lang = Chinese();
         // A blank cell can't be told apart from a broken app — always give a reason.
         Assert.Equal(expected, Theme.UsageLabelCompact(null, status));
         Assert.Equal(expected, Theme.UsageStatusShort(status));
@@ -104,6 +114,7 @@ public class AccountPlanDisplayTests
     [Fact]
     public void Actionable_statuses_tell_the_user_what_to_do()
     {
+        using var lang = Chinese();
         Assert.Contains("重新登录", Theme.UsageStatusLong("needs-login"));
         Assert.Contains("重新添加", Theme.UsageStatusLong("no-credential"));
         Assert.Contains("没有订阅额度", Theme.UsageStatusLong("api-key"));
@@ -118,6 +129,7 @@ public class AccountPlanDisplayTests
     [Fact]
     public void Real_numbers_ignore_the_status_entirely()
     {
+        using var lang = Chinese();
         Assert.Equal("42% · 剩58%", Theme.UsageLabelCompact(42, "ok"));
         // Even a stale status string must never mask a number we actually have.
         Assert.Equal("42% · 剩58%", Theme.UsageLabelCompact(42, "needs-login"));

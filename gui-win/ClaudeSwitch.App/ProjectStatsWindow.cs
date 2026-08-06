@@ -29,13 +29,13 @@ internal sealed class ProjectStatsWindow : Form
 
     public ProjectStatsWindow(string projectPath, JsonNode stats, long scanMs)
     {
-        Text = $"用量统计 · {projectPath}";
+        Text = Loc.T("ps.titleWith", projectPath);
         StartPosition = FormStartPosition.CenterParent;
         Font = Theme.FontBody;
         ShowIcon = false;
         MinimizeBox = false;
 
-        _title.Text = "用量统计";
+        _title.Text = Loc.T("ps.title");
         _title.Font = Theme.FontBrand;
         _title.AutoSize = true;
         _title.Location = new Point(Theme.Space4, Theme.Space3);
@@ -69,8 +69,8 @@ internal sealed class ProjectStatsWindow : Form
             tiles.Controls.Add(t);
         }
 
-        _dailyTitle.Text = "每日提问数";
-        _sessionsTitle.Text = "各会话输出 token";
+        _dailyTitle.Text = Loc.T("ps.dailyTitle");
+        _sessionsTitle.Text = Loc.T("ps.sessionsTitle");
         foreach (var l in new[] { _dailyTitle, _sessionsTitle })
         {
             l.Font = Theme.FontHeading;
@@ -145,13 +145,13 @@ internal sealed class ProjectStatsWindow : Form
     {
         long Num(string key) => s[key]?.GetValue<long>() ?? 0;
 
-        _tileSessions.Set("会话数", Num("sessions").ToString());
-        _tileQuestions.Set("提问数", Num("userMessages").ToString());
-        _tileOutput.Set("输出 token", Compact(Num("outputTokens")));
+        _tileSessions.Set(Loc.T("ps.tile.sessions"), Num("sessions").ToString());
+        _tileQuestions.Set(Loc.T("ps.tile.questions"), Num("userMessages").ToString());
+        _tileOutput.Set(Loc.T("ps.tile.output"), Compact(Num("outputTokens")));
 
         long first = Num("firstMs");
         long last = Num("lastMs");
-        _tileSpan.Set("活跃跨度", SpanText(first, last));
+        _tileSpan.Set(Loc.T("ps.tile.span"), SpanText(first, last));
 
         // ── Daily activity ──
         var daily = new List<ChartPoint>();
@@ -166,7 +166,7 @@ internal sealed class ProjectStatsWindow : Form
                 daily.Add(new ChartPoint(
                     ShortDay(day),
                     q,
-                    $"{day}\n提问 {q} 条 · 输出 {Compact(outTok)} token"));
+                    Loc.T("ov.day", day, q, Compact(outTok))));
             }
         }
         _daily.SetPoints(daily);
@@ -189,8 +189,10 @@ internal sealed class ProjectStatsWindow : Form
                 rows.Add(new ChartPoint(
                     label,
                     outTok,
-                    $"{Theme.FormatEpochMs(start) ?? "时间未知"}\n"
-                    + $"提问 {q} 条 · 输出 {Compact(outTok)} token\n会话 {id}"));
+                    Loc.T(
+                        "ps.sessionTip",
+                        Theme.FormatEpochMs(start) ?? Loc.T("ps.unknownTime"),
+                        q, Compact(outTok), id)));
             }
         }
         // Magnitude reads best ordered by magnitude; the time order lives in the
@@ -204,24 +206,24 @@ internal sealed class ProjectStatsWindow : Form
         _sessions.SetPoints(rows);
         _sessions.Height = _sessions.PreferredHeight;
         _sessionsTitle.Text = silent > 0
-            ? $"各会话输出 token（另有 {silent} 个会话无输出，未列出）"
-            : "各会话输出 token";
+            ? Loc.T("ps.sessionsTitleSilent", silent)
+            : Loc.T("ps.sessionsTitle");
 
         long skipped = Num("skippedLines");
         string note =
-            $"读取 {Bytes(Num("scannedBytes"))} 会话记录，用时 {scanMs} ms。"
-            + "缓存读写 token 未计入上方图表（量级差数百倍，同图会淹没其余数据）。";
+            Loc.T("ov.scanNote", Bytes(Num("scannedBytes")), scanMs)
+            + Loc.T("ps.cacheNote");
         if (skipped > 0)
-            note += $" {skipped} 行无法解析，数值为下限。";
+            note += Loc.T("ov.skipped", skipped);
         _footnote.Text = note;
     }
 
     private static string SpanText(long firstMs, long lastMs)
     {
-        if (firstMs <= 0 || lastMs <= 0) return "—";
+        if (firstMs <= 0 || lastMs <= 0) return Loc.T("common.dash");
         var days = (DateTimeOffset.FromUnixTimeMilliseconds(lastMs)
             - DateTimeOffset.FromUnixTimeMilliseconds(firstMs)).TotalDays;
-        return days < 1 ? "当天" : $"{Math.Round(days)} 天";
+        return days < 1 ? Loc.T("ps.sameDay") : Loc.T("ps.days", Math.Round(days));
     }
 
     /// <summary>`2026-08-05` → `08-05`; the year is in the tooltip.</summary>

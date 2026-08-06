@@ -35,7 +35,7 @@ public static class AccountListFilter
         if (q.Length == 0)
             return null;
         if (matchCount == 0)
-            return $"无匹配账号（0 / {totalCount}）· 关键词「{q}」· 点「清除」或清空搜索框";
-        return $"匹配 {matchCount} / {totalCount} 个账号 · 「{q}」";
+            return Loc.T("filter.none", totalCount, q);
+        return Loc.T("filter.matched", matchCount, totalCount, q);
     }
 }

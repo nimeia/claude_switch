@@ -11,7 +11,7 @@ namespace ClaudeSwitch.App;
 /// </summary>
 internal static class SwitchNotice
 {
-    public const string Title = "已自动切换账号";
+    public static string Title => Loc.T("notice.switched.title");
 
     /// <summary>
     /// Windows on-disk credentials are re-read by Claude Code when the file
@@ -19,7 +19,7 @@ internal static class SwitchNotice
     /// message. Saying so is the difference between "it switched" and "you can
     /// keep working".
     /// </summary>
-    public const string NoRestartLine = "下一条消息即生效，无需重启 Claude Code。";
+    public static string NoRestartLine => Loc.T("notice.noRestart");
 
     /// <summary>Whether an <c>autoswitch_tick</c> payload reports a real switch.</summary>
     public static bool DidSwitch(JsonNode? result) =>
@@ -41,8 +41,8 @@ internal static class SwitchNotice
     public static string Body(string target, string? fromLabel, double? fromUsagePct)
     {
         string why = fromLabel is { Length: > 0 } && fromUsagePct is { } pct
-            ? $"（{fromLabel} 用量已达 {pct:0.#}%）"
+            ? Loc.T("notice.switched.why", fromLabel, $"{pct:0.#}")
             : "";
-        return $"现在使用 {target}{why}\n{NoRestartLine}";
+        return Loc.T("notice.switched.body", target, why);
     }
 }

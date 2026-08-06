@@ -76,11 +76,9 @@ public sealed class UsageDrawer : Panel
     /// <summary>Typical host form height when content is compact (no tall empty middle).</summary>
     public const int PreferredHostHeight = 560;
 
-    public const string UsageLegendText =
-        "百分比 = 已用额度。绿 0–69% 充足 · 橙 70–89% 注意 · 红 ≥90% 临界。竖线 = 自动切换阈值。";
+    public static string UsageLegendText => Loc.T("drawer.rulesBody");
 
-    public const string UsageRulesShort =
-        "绿色：充足　橙色：注意　红色：临界";
+    public static string UsageRulesShort => Loc.T("drawer.legend");
 
     public event EventHandler? SwitchRequested;
     public event EventHandler? AliasRequested;
@@ -125,7 +123,7 @@ public sealed class UsageDrawer : Panel
         };
         _headerTitle = new Label
         {
-            Text = "账号详情",
+            Text = Loc.T("drawer.title"),
             Font = Theme.FontHeading,
             AutoSize = false,
             Dock = DockStyle.Fill,
@@ -138,7 +136,7 @@ public sealed class UsageDrawer : Panel
             Width = 32,
             Cursor = Cursors.Hand,
         };
-        _toolTip.SetToolTip(_btnIconClose, "关闭");
+        _toolTip.SetToolTip(_btnIconClose, Loc.T("drawer.close"));
         _btnIconClose.Click += (_, _) => ClosedByUser?.Invoke(this, EventArgs.Empty);
         _header.Controls.Add(_headerTitle);
         _header.Controls.Add(_btnIconClose);
@@ -172,9 +170,9 @@ public sealed class UsageDrawer : Panel
             Margin = new Padding(0),
         };
 
-        _btnAlias = MakeBtn(secondary: true, "编辑别名");
-        _btnMore = MakeBtn(secondary: true, "更多操作");
-        _btnPrimary = MakeBtn(secondary: false, "完成");
+        _btnAlias = MakeBtn(secondary: true, Loc.T("menu.alias"));
+        _btnMore = MakeBtn(secondary: true, Loc.T("drawer.more"));
+        _btnPrimary = MakeBtn(secondary: false, Loc.T("drawer.done"));
         _btnPrimary.MinWidth = 100;
 
         _btnAlias.Click += (_, _) => AliasRequested?.Invoke(this, EventArgs.Empty);
@@ -226,7 +224,7 @@ public sealed class UsageDrawer : Panel
         _healthBanner.Controls.Add(_healthText);
 
         _fiveTitle = MakeLabel(Theme.FontBody);
-        _fiveTitle.Text = "5 小时额度";
+        _fiveTitle.Text = Loc.T("drawer.fiveTitle");
         _fiveLevel = new StatusTag();
         _fiveUsed = MakeLabel(Theme.FontBody);
         _fiveRemain = MakeLabel(Theme.FontBody);
@@ -237,7 +235,7 @@ public sealed class UsageDrawer : Panel
         _fiveReset = MakeLabel(Theme.FontCaption);
 
         _sevenTitle = MakeLabel(Theme.FontBody);
-        _sevenTitle.Text = "7 天额度";
+        _sevenTitle.Text = Loc.T("drawer.sevenTitle");
         _sevenLevel = new StatusTag();
         _sevenUsed = MakeLabel(Theme.FontBody);
         _sevenRemain = MakeLabel(Theme.FontBody);
@@ -248,12 +246,12 @@ public sealed class UsageDrawer : Panel
         _sevenReset = MakeLabel(Theme.FontCaption);
 
         _planTitle = MakeLabel(Theme.FontBody);
-        _planTitle.Text = "订阅";
+        _planTitle.Text = Loc.T("drawer.planTitle");
         _planTag = new StatusTag();
         _planFoot = MakeLabel(Theme.FontCaption);
 
         _rulesLink = MakeLabel(Theme.FontCaption);
-        _rulesLink.Text = "ⓘ  查看用量和自动切换规则";
+        _rulesLink.Text = Loc.T("drawer.rulesLink");
         _rulesLink.Cursor = Cursors.Hand;
         _toolTip.SetToolTip(_rulesLink, UsageLegendText);
         _rulesLink.Click += (_, _) =>
@@ -261,7 +259,7 @@ public sealed class UsageDrawer : Panel
             MessageBox.Show(
                 FindForm(),
                 UsageLegendText + "\n\n" + UsageRulesShort,
-                "用量及自动切换规则",
+                Loc.T("drawer.rulesTitle"),
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
         };
@@ -341,10 +339,10 @@ public sealed class UsageDrawer : Panel
         _moreMenu.Items.Clear();
 
         var disableItem = new ToolStripMenuItem(
-            _model.Disabled ? "启用账号" : "停用账号");
+            _model.Disabled ? Loc.T("menu.enable") : Loc.T("menu.disableOne"));
         disableItem.Click += (_, _) => ToggleDisableRequested?.Invoke(this, EventArgs.Empty);
 
-        var deleteItem = new ToolStripMenuItem("删除账号")
+        var deleteItem = new ToolStripMenuItem(Loc.T("menu.delete"))
         {
             ForeColor = Theme.Danger,
         };
@@ -482,7 +480,11 @@ public sealed class UsageDrawer : Panel
 
                 // Row box must clear descenders and underscores — values like
                 // `default_claude_ai` lose their underscores in a tight box.
-                const int keyW = 76;
+                //
+                // The key column is measured, not fixed: 76px held four Chinese
+                // characters but cut "Payment" to "Paymen" once the same labels
+                // were rendered in English.
+                int keyW = MeasuredKeyColumn(innerW);
                 int rowH = Math.Max(20, Theme.FontCaption.Height + 6);
                 for (int i = 0; i < _planRowCount; i++)
                 {
@@ -631,11 +633,11 @@ public sealed class UsageDrawer : Panel
 
         // Account status tag (identity)
         if (model.Disabled)
-            _statusTag.Set("已停用", Theme.BgDisabled, Theme.TextMuted);
+            _statusTag.Set(Loc.T("drawer.tag.disabled"), Theme.BgDisabled, Theme.TextMuted);
         else if (model.Active)
-            _statusTag.Set("当前账号", Theme.PrimarySoft, Theme.PrimaryDark);
+            _statusTag.Set(Loc.T("drawer.tag.active"), Theme.PrimarySoft, Theme.PrimaryDark);
         else
-            _statusTag.Set("就绪", Theme.BgRowAlt, Theme.TextSecondary);
+            _statusTag.Set(Loc.T("drawer.tag.ready"), Theme.BgRowAlt, Theme.TextSecondary);
 
         BindHealth(model);
         BindUsageWindow(
@@ -651,9 +653,24 @@ public sealed class UsageDrawer : Panel
         Invalidate(true);
     }
 
+    /// <summary>
+    /// Width of the subscription key column: the widest visible label plus a
+    /// gutter, capped so a long translation cannot squeeze the values out.
+    /// </summary>
+    private int MeasuredKeyColumn(int innerW)
+    {
+        int widest = 0;
+        for (int i = 0; i < _planRowCount; i++)
+        {
+            widest = Math.Max(
+                widest,
+                TextRenderer.MeasureText(_planKeys[i].Text, _planKeys[i].Font).Width);
+        }
+        return Math.Clamp(widest + Theme.Space2, 76, innerW / 2);
+    }
+
     private void BindHealth(AccountCardModel model)
     {
-        var tag = Theme.UsageHealthTag(model.FiveHour, model.SevenDay);
         double? max = model.FiveHour is null && model.SevenDay is null
             ? null
             : Math.Max(model.FiveHour ?? 0, model.SevenDay ?? 0);
@@ -671,12 +688,14 @@ public sealed class UsageDrawer : Panel
             : max >= 70 ? Theme.Warning
             : Theme.PrimaryDark;
 
-        string label = tag switch
+        // Keyed off the reading, not off the translated tag: a language change
+        // must never move an account into a different band.
+        string label = max switch
         {
-            "健康" => "用量健康",
-            "注意" => "用量注意",
-            "临界" => "用量临界",
-            _ => Theme.UsageStatusShort(model.UsageStatus),
+            null => Theme.UsageStatusShort(model.UsageStatus),
+            >= 90 => Loc.T("drawer.health.critical"),
+            >= 70 => Loc.T("drawer.health.watch"),
+            _ => Loc.T("drawer.health.healthy"),
         };
         _healthTag.Set(label, bg, fg);
 
@@ -693,19 +712,19 @@ public sealed class UsageDrawer : Panel
             // "Click refresh" is useless advice when refreshing cannot help.
             return m.UsageStatus is not (null or "ok" or "unknown")
                 ? Theme.UsageStatusLong(m.UsageStatus)
-                : "暂无用量数据，可点击主窗口「刷新」拉取。";
+                : Loc.T("drawer.advice.none");
         }
         if (max >= 90)
             return m.Active
-                ? "接近限流，建议尽快切换到余量更充足的账号"
-                : "接近限流，不建议作为切换目标";
+                ? Loc.T("drawer.advice.criticalActive")
+                : Loc.T("drawer.advice.critical");
         if (max >= 70)
             return m.Active
-                ? "用量偏高，适合短任务；长会话可考虑换号"
-                : "用量偏高，短任务可用";
+                ? Loc.T("drawer.advice.watchActive")
+                : Loc.T("drawer.advice.watch");
         if (m.Active)
-            return "当前账号暂时不需要切换";
-        return "余量充足，适合作为切换目标";
+            return Loc.T("drawer.advice.okActive");
+        return Loc.T("drawer.advice.ok");
     }
 
     /// <summary>
@@ -717,37 +736,39 @@ public sealed class UsageDrawer : Panel
     {
         _planVisible = m.HasPlanInfo;
         _planTitle.Visible = _planVisible;
-        _planTitle.Text = _planVisible ? "订阅" : "";
+        _planTitle.Text = _planVisible ? Loc.T("drawer.planTitle") : "";
         _planTag.Visible = _planVisible && m.HasPlanBadge;
 
         var rows = new List<(string Key, string Value)>();
         if (_planVisible)
         {
             if (!string.IsNullOrWhiteSpace(m.BillingType))
-                rows.Add(("付费方式", Theme.BillingTypeLabel(m.BillingType)));
+                rows.Add((Loc.T("drawer.plan.billing"), Theme.BillingTypeLabel(m.BillingType)));
 
             if (Theme.FormatDate(m.SubscriptionCreatedAt) is { } started)
-                rows.Add(("订阅开始", started));
+                rows.Add((Loc.T("drawer.plan.started"), started));
             if (Theme.FormatDate(m.TrialEndsAt) is { } trialEnds)
-                rows.Add(("试用到期", trialEnds));
+                rows.Add((Loc.T("drawer.plan.trialEnds"), trialEnds));
             if (Theme.FormatDate(m.AccountCreatedAt) is { } created)
-                rows.Add(("账号创建", created));
+                rows.Add((Loc.T("drawer.plan.created"), created));
 
             // Personal plans synthesize "<email>'s Organization" — noise, skip it.
             if (!m.PlanPersonal && !string.IsNullOrWhiteSpace(m.OrganizationName))
             {
                 string org = m.OrganizationName!;
                 if (!string.IsNullOrWhiteSpace(m.OrganizationRole))
-                    org += $"（{m.OrganizationRole}）";
-                rows.Add(("组织", org));
+                    org = Loc.T("drawer.plan.orgRole", org, m.OrganizationRole);
+                rows.Add((Loc.T("drawer.plan.org"), org));
             }
             if (!string.IsNullOrWhiteSpace(m.SeatTier))
-                rows.Add(("席位", m.SeatTier!));
+                rows.Add((Loc.T("drawer.plan.seat"), m.SeatTier!));
 
-            rows.Add(("额外用量", m.ExtraUsageEnabled ? "已开启" : "未开启"));
+            rows.Add((
+                Loc.T("drawer.plan.extraUsage"),
+                m.ExtraUsageEnabled ? Loc.T("drawer.plan.on") : Loc.T("drawer.plan.off")));
 
             if (!string.IsNullOrWhiteSpace(m.RateLimitTier))
-                rows.Add(("限速档", m.RateLimitTier!));
+                rows.Add((Loc.T("drawer.plan.rateTier"), m.RateLimitTier!));
         }
 
         EnsurePlanRows(rows.Count);
@@ -770,7 +791,7 @@ public sealed class UsageDrawer : Panel
         // when — an account upgraded elsewhere still reports its old tier here.
         string? fetched = Theme.FormatEpochMs(m.ProfileFetchedAt);
         _planFoot.Visible = _planVisible && fetched is not null;
-        _planFoot.Text = fetched is null ? "" : $"资料同步于 {fetched}（切换到该账号时更新）";
+        _planFoot.Text = fetched is null ? "" : Loc.T("drawer.plan.fetched", fetched);
     }
 
     /// <summary>Grow the key/value label pool to at least <paramref name="count"/> rows.</summary>
@@ -821,8 +842,8 @@ public sealed class UsageDrawer : Panel
         else
         {
             double rem = Math.Max(0, 100.0 - pct.Value);
-            used.Text = $"已使用 {pct.Value:0.#}%";
-            remain.Text = $"剩余 {rem:0.#}%";
+            used.Text = Loc.T("drawer.usedPct", $"{pct.Value:0.#}");
+            remain.Text = Loc.T("drawer.remainPct", $"{rem:0.#}");
         }
         used.ForeColor = pct is null && status is "needs-login" or "no-credential" or "no-subscription"
             ? Theme.Warning
@@ -836,23 +857,23 @@ public sealed class UsageDrawer : Panel
         if (showThr)
         {
             thrHint.Visible = true;
-            thrHint.Text = $"自动切换 {thr:0.#}%";
+            thrHint.Text = Loc.T("drawer.thrHint", $"{thr:0.#}");
             thrHint.ForeColor = Theme.TextMuted;
-            _toolTip.SetToolTip(bar, $"达到 {thr:0.#}% 后自动切换账号");
-            _toolTip.SetToolTip(thrHint, $"达到 {thr:0.#}% 后自动切换账号");
+            _toolTip.SetToolTip(bar, Loc.T("drawer.thrTip", $"{thr:0.#}"));
+            _toolTip.SetToolTip(thrHint, Loc.T("drawer.thrTip", $"{thr:0.#}"));
         }
         else
         {
             thrHint.Visible = false;
             thrHint.Text = "";
-            _toolTip.SetToolTip(bar, "自动切换已关闭，不显示切换阈值");
+            _toolTip.SetToolTip(bar, Loc.T("drawer.thrOff"));
         }
 
         string? resetRel = Theme.FormatResetsIn(resetsAt);
         if (resetRel is not null)
         {
             reset.Visible = true;
-            reset.Text = $"重置时间：{resetRel}";
+            reset.Text = Loc.T("drawer.reset", resetRel);
         }
         else if (pct is null && status is not (null or "ok" or "unknown"))
         {
@@ -873,16 +894,16 @@ public sealed class UsageDrawer : Panel
 
         if (model.Disabled)
         {
-            _btnPrimary.Text = "启用账号";
+            _btnPrimary.Text = Loc.T("menu.enable");
             // Promote enable; keep edit; more for delete.
         }
         else if (model.Active)
         {
-            _btnPrimary.Text = "完成";
+            _btnPrimary.Text = Loc.T("drawer.done");
         }
         else
         {
-            _btnPrimary.Text = "切换到此账号";
+            _btnPrimary.Text = Loc.T("drawer.switchTo");
         }
 
         // PrimaryButton is always primary green — correct for switch/enable/done.

@@ -28,7 +28,7 @@ internal sealed class OnboardingWizard : Form
         _engine = engine;
         _onFinished = onFinished;
 
-        Text = "欢迎使用 Claude Switch";
+        Text = Loc.T("wizard.title");
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterScreen;
         MaximizeBox = false;
@@ -52,7 +52,7 @@ internal sealed class OnboardingWizard : Form
             AutoSize = true,
             Font = Theme.FontSmall,
             ForeColor = Theme.TextMuted,
-            Text = "步骤 1 / 3",
+            Text = Loc.T("wizard.step", 1),
         };
         // AutoSize only measures once the label joins a parent — measure now so the
         // content panel below can stack from Bottom.
@@ -67,11 +67,11 @@ internal sealed class OnboardingWizard : Form
 
         _btnBack = new SecondaryButton
         {
-            Text = "上一步",
+            Text = Loc.T("wizard.back"),
             Enabled = false,
         };
-        _btnSkip = new SecondaryButton { Text = "跳过引导" };
-        _btnNext = new PrimaryButton { Text = "下一步" };
+        _btnSkip = new SecondaryButton { Text = Loc.T("wizard.skip") };
+        _btnNext = new PrimaryButton { Text = Loc.T("wizard.next") };
 
         _btnBack.Click += (_, _) =>
         {
@@ -100,9 +100,9 @@ internal sealed class OnboardingWizard : Form
                 if (_resultLabel is not null)
                 {
                     _resultLabel.ForeColor = Theme.PrimaryDark;
-                    _resultLabel.Text = "已成功添加当前登录账号。可以开始使用了。";
+                    _resultLabel.Text = Loc.T("wizard.added");
                 }
-                _btnNext.Text = "开始使用";
+                _btnNext.Text = Loc.T("wizard.start");
                 _step = 3;
                 _btnBack.Enabled = false;
                 _btnSkip.Visible = false;
@@ -115,11 +115,9 @@ internal sealed class OnboardingWizard : Form
                 {
                     _resultLabel.ForeColor = Theme.UsageHigh;
                     _resultLabel.Text =
-                        "暂时无法添加：\n" + ex.Message +
-                        "\n\n可先跳过，稍后在主界面点击「添加当前登录」。\n" +
-                        "演示可用：启动参数 --fixture <目录>";
+                        Loc.T("wizard.addFailed", ex.Message);
                 }
-                _btnNext.Text = "仍进入主界面";
+                _btnNext.Text = Loc.T("wizard.continueAnyway");
                 _step = 3;
                 FitFrame();
                 return;
@@ -158,40 +156,32 @@ internal sealed class OnboardingWizard : Form
         switch (_step)
         {
             case 0:
-                _stepLabel.Text = "步骤 1 / 3 · 欢迎";
-                _btnNext.Text = "下一步";
-                AddTitle("用更少心智成本切换 Claude 账号");
+                _stepLabel.Text = Loc.T("wizard.step1");
+                _btnNext.Text = Loc.T("wizard.next");
+                AddTitle(Loc.T("wizard.step1.title"));
                 AddBody(
-                    "Claude Switch 把多账号登录、用量查看和自动切换放在一处。\n\n" +
-                    "· 卡片一览 5 小时 / 7 天用量\n" +
-                    "· 一键切换，接近限流时可自动换号\n" +
-                    "· 托盘常驻，关掉窗口也不会退出（Shift+关闭可退出）");
+                    Loc.T("wizard.step1.body"));
                 break;
             case 1:
-                _stepLabel.Text = "步骤 2 / 3 · 使用方式";
-                _btnNext.Text = "下一步";
-                AddTitle("三步上手");
+                _stepLabel.Text = Loc.T("wizard.step2");
+                _btnNext.Text = Loc.T("wizard.next");
+                AddTitle(Loc.T("wizard.step2.title"));
                 AddBody(
-                    "1. 在本机用 Claude Code 登录某个账号\n" +
-                    "2. 回到这里点「添加当前登录」收入托管列表\n" +
-                    "3. 选中账号后点绿色「切换到该账号」，或双击卡片；也可开启自动切换\n\n" +
-                    "提示：拖拽卡片可调整列表顺序；托盘通知会隐藏邮箱中间字符。");
+                    Loc.T("wizard.step2.body"));
                 break;
             case 2:
-                _stepLabel.Text = "步骤 3 / 3 · 添加账号";
-                _btnNext.Text = "添加当前登录";
-                AddTitle("捕获本机当前登录");
+                _stepLabel.Text = Loc.T("wizard.step3");
+                _btnNext.Text = Loc.T("wizard.addCurrent");
+                AddTitle(Loc.T("wizard.step3.title"));
                 _resultLabel = MakeBody(
-                    "请确认 Claude Code 已登录，然后点击右下角「添加当前登录」。\n\n" +
-                    "若你只想先看演示界面，可点「跳过引导」，\n" +
-                    "或用启动参数 --fixture 打开示例数据。");
+                    Loc.T("wizard.step3.body"));
                 _content.Controls.Add(_resultLabel);
                 break;
             default:
-                _stepLabel.Text = "完成";
-                _btnNext.Text = "开始使用";
-                AddTitle("一切就绪");
-                AddBody("主窗口将打开账号列表。可随时在右上角切换浅色 / 深色主题。");
+                _stepLabel.Text = Loc.T("wizard.doneStep");
+                _btnNext.Text = Loc.T("wizard.start");
+                AddTitle(Loc.T("wizard.done.title"));
+                AddBody(Loc.T("wizard.done.body"));
                 break;
         }
 
@@ -264,6 +254,16 @@ internal static class UiPrefs
     /// <summary>When true, mask emails in list cards (same policy as chrome/status).</summary>
     public static bool HideEmail { get; set; }
 
+    /// <summary>
+    /// Chosen UI language code, or empty to follow the OS.
+    /// </summary>
+    /// <remarks>
+    /// Read by <see cref="Loc"/> before any window exists, so it must survive a
+    /// prefs file that predates this setting — an absent line means "follow the
+    /// OS", which is what an upgrading user expects to keep happening.
+    /// </remarks>
+    public static string Language { get; set; } = "";
+
     private static string Path =>
         System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -282,6 +282,8 @@ internal static class UiPrefs
                     OnboardingDone = line.Contains("1") || line.Contains("true", StringComparison.OrdinalIgnoreCase);
                 if (line.StartsWith("hide_email=", StringComparison.OrdinalIgnoreCase))
                     HideEmail = line.Contains("1") || line.Contains("true", StringComparison.OrdinalIgnoreCase);
+                if (line.StartsWith("language=", StringComparison.OrdinalIgnoreCase))
+                    Language = line["language=".Length..].Trim();
             }
         }
         catch { /* ignore */ }

@@ -170,7 +170,7 @@ internal sealed class AccountCard : Control
         Margin = new Padding(0, 0, 0, 2);
         TabStop = true;
         AllowDrop = true;
-        _tip.SetToolTip(this, "单击选中 · ⋮ 更多操作 · 拖动手柄排序 · 双击切换");
+        _tip.SetToolTip(this, Loc.T("card.tip.short"));
         Theme.Changed += (_, _) =>
         {
             s_metricsReady = false;
@@ -179,6 +179,17 @@ internal sealed class AccountCard : Control
             Invalidate();
         };
     }
+
+    /// <summary>
+    /// Discards the cached measurements so the next card re-measures.
+    /// </summary>
+    /// <remarks>
+    /// The meter column is sized from the widest label it will hold. Those
+    /// labels are translated, so the cache computed under one language sizes
+    /// the column wrong for the next: "5 小时" fitted where "5 hours" rendered
+    /// as "5 ho…".
+    /// </remarks>
+    public static void InvalidateMetrics() => s_metricsReady = false;
 
     private static void EnsureMetrics()
     {
@@ -192,10 +203,10 @@ internal sealed class AccountCard : Control
         var flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
         s_labelW = Math.Max(
             52,
-            TextRenderer.MeasureText("5 小时", Theme.FontSmall, new Size(int.MaxValue, s_subH), flags).Width + 4);
+            TextRenderer.MeasureText(Loc.T("card.window.5h"), Theme.FontSmall, new Size(int.MaxValue, s_subH), flags).Width + 4);
         s_valueW = Math.Max(
             96,
-            TextRenderer.MeasureText("100% · 剩100%", Theme.FontSmall, new Size(int.MaxValue, s_subH), flags).Width + 6);
+            TextRenderer.MeasureText(Loc.T("usage.used", "100", "100"), Theme.FontSmall, new Size(int.MaxValue, s_subH), flags).Width + 6);
         // label + gap + bar area + value
         s_meterW = s_labelW + 8 + s_valueW + 8 + 72; // bar min ~72
 
@@ -214,9 +225,10 @@ internal sealed class AccountCard : Control
         string five = Theme.UsageLabelFull(model.FiveHour, model.UsageStatus);
         string seven = Theme.UsageLabelFull(model.SevenDay, model.UsageStatus);
         _tip.SetToolTip(this,
-            $"{title}\n{email}\n{PlanTooltipLines(model)}5 小时：{five}\n7 天：{seven}\n" +
-            (model.Active ? "● 当前使用中\n" : "") +
-            "单击选中 · 点 ⋮ 打开菜单 · 拖动手柄调整顺序 · 双击切换");
+            $"{title}\n{email}\n{PlanTooltipLines(model)}"
+            + Loc.T("card.tip.windows", five, seven)
+            + (model.Active ? Loc.T("card.tip.inUse") : "")
+            + Loc.T("card.tip.short"));
         Invalidate();
     }
 
@@ -226,14 +238,14 @@ internal sealed class AccountCard : Control
         var sb = new System.Text.StringBuilder();
         if (m.HasPlanBadge)
         {
-            sb.Append("套餐：").Append(m.PlanLabel);
+            sb.Append(Loc.T("card.tip.plan")).Append(m.PlanLabel);
             if (!string.IsNullOrWhiteSpace(m.BillingType))
                 sb.Append(" · ").Append(Theme.BillingTypeLabel(m.BillingType));
             sb.Append('\n');
         }
         string? started = Theme.FormatDate(m.SubscriptionCreatedAt);
         if (started is not null)
-            sb.Append("订阅开始：").Append(started).Append('\n');
+            sb.Append(Loc.T("card.tip.subscribed")).Append(started).Append('\n');
         return sb.ToString();
     }
 
@@ -244,7 +256,7 @@ internal sealed class AccountCard : Control
         var email = m.Email ?? "";
         int at = email.IndexOf('@');
         if (at > 0) return email[..at];
-        return string.IsNullOrWhiteSpace(email) ? "未设置别名" : email;
+        return string.IsNullOrWhiteSpace(email) ? Loc.T("card.noAlias") : email;
     }
 
     public static string DisplayEmail(string email) =>
@@ -540,7 +552,8 @@ internal sealed class AccountCard : Control
         int textLeft = left + badgeSize + Theme.Space2;
         int textW = Math.Max(48, identityRight - textLeft);
 
-        string status = Model.Disabled ? "已停用" : Model.Active ? "当前" : "就绪";
+        string status = Model.Disabled ? Loc.T("card.status.disabled")
+            : Model.Active ? Loc.T("card.status.current") : Loc.T("card.status.ready");
         Color statusBg = Model.Disabled
             ? Theme.BgDisabled
             : Model.Active
@@ -605,9 +618,9 @@ internal sealed class AccountCard : Control
         int meterTop = bounds.Y + Math.Max(padY, (bounds.Height - meterBlockH) / 2);
         if (meterLeft > left && meterW > 80)
         {
-            DrawMeter(g, meterLeft, meterTop, meterW, "5 小时", Model.FiveHour, Model.UsageStatus);
+            DrawMeter(g, meterLeft, meterTop, meterW, Loc.T("card.window.5h"), Model.FiveHour, Model.UsageStatus);
             DrawMeter(
-                g, meterLeft, meterTop + meterRowH, meterW, "7 天", Model.SevenDay, Model.UsageStatus);
+                g, meterLeft, meterTop + meterRowH, meterW, Loc.T("card.window.7d"), Model.SevenDay, Model.UsageStatus);
         }
 
         DrawDropIndicator(g, bounds);
@@ -665,7 +678,7 @@ internal sealed class AccountCard : Control
         string? started = Theme.FormatShortDate(m.SubscriptionCreatedAt);
         if (started is null) return email;
 
-        string full = $"{email} · 订阅开始 {started}";
+        string full = Loc.T("card.subLine", email, started);
         int w = TextRenderer
             .MeasureText(full, Theme.FontSmall, new Size(int.MaxValue, s_subH), MeasureFlags)
             .Width;

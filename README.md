@@ -70,6 +70,26 @@ Get-FileHash ClaudeSwitch.exe -Algorithm SHA256
 - 累计 token 统计按需执行（读全部会话记录，几百毫秒），结果带可视化
 - **这份数据与账号无关**——Claude Code 不记录会话属于哪个账号
 
+### 界面语言
+
+英文 / 简体中文，工具栏右侧的语言按钮随时切换，**不用重启**——切完主窗口、卡片、状态栏立刻换语言，
+其它窗口下次打开时生效。首次启动按系统语言自动选择，选过之后记住你的选择。
+
+需要临时指定一次，可以用环境变量：`CLAUDE_SWITCH_LANG=en`（优先级高于记住的选择）。
+
+<details>
+<summary>想加一门语言？</summary>
+
+复制 `gui-win/ClaudeSwitch.App/Strings/en.json` 改名为你的语言代码（如 `ja.json`），翻译值，
+然后在 `Loc.Available` 里加一行。文件是嵌入资源，不用改构建脚本。
+
+`LocTests` 会强制每份词条与英文**键完全一致**、`{0}` 占位符完全对应——漏翻或写错占位符是测试失败，
+不会变成用户界面上的半句英文。
+
+一句实话：**英文比中文宽 1.5–2 倍**，这个项目为此改过工具栏、卡片量表、订阅字段列和热力图图例的宽度。
+加语言时请把界面渲染出来看一眼，别只看 JSON。
+</details>
+
 ## 网络
 
 请求遵循 `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`，Windows 上还会读系统代理设置——和 Claude Code 走同一条路。
@@ -84,7 +104,7 @@ Get-FileHash ClaudeSwitch.exe -Algorithm SHA256
 | `~/.claude-swap-backup/configs/` | 各槽位 `.claude.json` 快照 |
 | `~/.claude-swap-backup/sequence.json` | 槽位顺序与当前账号 |
 | `~/.claude-swap-backup/cache/` | 用量总览缓存（可随时删除） |
-| `%LOCALAPPDATA%\ClaudeSwitch\ui-prefs.ini` | 界面偏好（主题、隐藏邮箱等） |
+| `%LOCALAPPDATA%\ClaudeSwitch\ui-prefs.ini` | 界面偏好（主题、语言、隐藏邮箱等） |
 | `%TEMP%\.net\ClaudeSwitch\` | 单文件包自解压的运行时 |
 
 格式与 [claude-swap](https://github.com/realiti4/claude-swap)（Python CLI）兼容，两者可以共用同一份备份。
@@ -123,6 +143,7 @@ dotnet run --project gui-win/ClaudeSwitch.App -c Release -- --fixture %TEMP%\csw
 crates/core     claude-switch-core   锁、凭据、切换、用量、自动切换、Engine
 crates/ffi      claude_switch.dll    C ABI（cs_engine_*）
 gui-win/        Windows 托盘 GUI（WinForms）+ FfiSmoke + P/Invoke
+gui-win/ClaudeSwitch.App/Strings/    界面词条（每种语言一份 JSON，嵌入资源）
 ```
 
 - [docs/design-claude-switch.md](docs/design-claude-switch.md) — 架构、FFI、界面设计

@@ -156,6 +156,9 @@ public class ClaudeCliTests
     [Fact]
     public void Resuming_into_a_missing_directory_reports_that_not_a_launch_failure()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         var problem = ClaudeCli.Resume(
             Path.Combine(Path.GetTempPath(), "no-such-dir-" + Guid.NewGuid()), "sess");
         Assert.NotNull(problem);
@@ -165,6 +168,9 @@ public class ClaudeCliTests
     [Fact]
     public void The_not_found_message_says_what_to_do()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         Assert.Contains("安装 Claude Code", ClaudeCli.NotFoundMessage);
         Assert.Contains("PATH", ClaudeCli.NotFoundMessage);
     }

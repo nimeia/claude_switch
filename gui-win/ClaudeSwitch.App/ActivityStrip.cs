@@ -16,6 +16,9 @@ internal sealed class ActivityStrip : Panel
     private readonly Label _summary = new();
     private readonly Label _hint = new();
     private bool _loaded;
+    /// <summary>Last rendered summary, kept so a language change can re-render
+    /// it without re-running the scan.</summary>
+    private string _summaryText = "";
 
     /// <summary>Raised when the strip is clicked — the host opens the full view.</summary>
     public event EventHandler? OpenRequested;
@@ -34,7 +37,7 @@ internal sealed class ActivityStrip : Panel
         _hint.Dock = DockStyle.Right;
         _hint.Width = 96;
         _hint.Font = Theme.FontCaption;
-        _hint.Text = "查看总览 ›";
+        _hint.Text = Loc.T("strip.open");
         _hint.TextAlign = ContentAlignment.MiddleRight;
 
         _heatmap.Dock = DockStyle.Fill;
@@ -70,7 +73,7 @@ internal sealed class ActivityStrip : Panel
     private void ShowSkeleton()
     {
         _heatmap.ShowSkeleton = true;
-        _summary.Text = "正在统计用量…";
+        _summary.Text = Loc.T("strip.loading");
         _hint.Visible = false;
         SyncHeight();
     }
@@ -166,15 +169,27 @@ internal sealed class ActivityStrip : Panel
         _heatmap.SetPoints(cells);
         _hint.Visible = true;
 
-        _summary.Text =
-            $"{Compact(Num("outputTokens"))} token · {Num("sessions")} 个会话 · "
-            + $"{Num("projects")} 个项目 · 最长连续 {Num("longestStreak")} 天";
+        _summaryText = Loc.T(
+            "strip.summary",
+            Compact(Num("outputTokens")), Num("sessions"),
+            Num("projects"), Num("longestStreak"));
+        _summary.Text = _summaryText;
 
         SyncHeight();
     }
 
     /// <summary>True once a payload has been applied, successful or empty.</summary>
     public bool Loaded => _loaded;
+
+    /// <summary>
+    /// Re-labels the strip in the current language. The scan is not repeated:
+    /// the numbers are language-independent, only the sentence around them is.
+    /// </summary>
+    public void ApplyTexts()
+    {
+        _hint.Text = Loc.T("strip.open");
+        _summary.Text = _loaded ? _summaryText : Loc.T("strip.loading");
+    }
 
     private static string Compact(long n) =>
         n >= 1_000_000 ? $"{n / 1_000_000.0:0.#}M"

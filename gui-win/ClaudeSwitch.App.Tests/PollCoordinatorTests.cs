@@ -111,6 +111,9 @@ public class PollCoordinatorTests
     [Fact]
     public void UsageLabel_means_used_share()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         Assert.Equal("暂无", Theme.UsageLabel(null));
         Assert.Equal("已用 25%", Theme.UsageLabel(25));
         Assert.Equal("已用 80%", Theme.UsageLabel(80));
@@ -121,6 +124,9 @@ public class PollCoordinatorTests
     [Fact]
     public void UsageLevel_three_bands()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         Assert.Equal("未知", Theme.UsageLevel(null));
         Assert.Equal("充足", Theme.UsageLevel(25));
         Assert.Equal("注意", Theme.UsageLevel(75));
@@ -133,6 +139,9 @@ public class PollCoordinatorTests
     [Fact]
     public void FormatResetsIn_parses_iso()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         var future = DateTimeOffset.UtcNow.AddHours(2).AddMinutes(18)
             .ToString("o");
         var s = Theme.FormatResetsIn(future);

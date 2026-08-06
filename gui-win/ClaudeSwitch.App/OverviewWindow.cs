@@ -30,13 +30,13 @@ internal sealed class OverviewWindow : Form
 
     public OverviewWindow(JsonNode stats, long scanMs)
     {
-        Text = "用量总览";
+        Text = Loc.T("ov.title");
         StartPosition = FormStartPosition.CenterParent;
         Font = Theme.FontBody;
         ShowIcon = false;
         MinimizeBox = false;
 
-        _title.Text = "用量总览";
+        _title.Text = Loc.T("ov.title");
         _title.Font = Theme.FontBrand;
         _title.AutoSize = true;
         _title.Location = new Point(Theme.Space4, Theme.Space3);
@@ -80,8 +80,8 @@ internal sealed class OverviewWindow : Form
             tiles.Controls.Add(t);
         }
 
-        _heatTitle.Text = "活动日历";
-        _projectsTitle.Text = "各项目输出 token";
+        _heatTitle.Text = Loc.T("ov.heatTitle");
+        _projectsTitle.Text = Loc.T("ov.projectsTitle");
         foreach (var l in new[] { _heatTitle, _projectsTitle })
         {
             l.Font = Theme.FontHeading;
@@ -174,19 +174,20 @@ internal sealed class OverviewWindow : Form
         long Num(string key) => s[key]?.GetValue<long>() ?? 0;
 
         _heroValue.Text = Compact(Num("outputTokens"));
-        _heroLabel.Text = "个 token 由 Claude 为你写出";
+        _heroLabel.Text = Loc.T("ov.heroSuffix");
 
-        _tileProjects.Set("项目", Num("projects").ToString());
-        _tileSessions.Set("会话", Num("sessions").ToString());
-        _tileQuestions.Set("提问", Num("userMessages").ToString());
-        _tileStreak.Set("最长连续", $"{Num("longestStreak")} 天");
+        _tileProjects.Set(Loc.T("ov.tile.projects"), Num("projects").ToString());
+        _tileSessions.Set(Loc.T("ov.tile.sessions"), Num("sessions").ToString());
+        _tileQuestions.Set(Loc.T("ov.tile.questions"), Num("userMessages").ToString());
+        _tileStreak.Set(Loc.T("ov.tile.streak"), Loc.T("ov.tile.days", Num("longestStreak")));
 
         long first = Num("firstMs");
         long last = Num("lastMs");
         _subtitle.Text = first > 0
-            ? $"{Theme.FormatDate(Iso(first))} 至 {Theme.FormatDate(Iso(last))}"
-              + $" · 其中 {Num("activeDays")} 天有活动"
-            : "尚无会话记录";
+            ? Loc.T(
+                "ov.span",
+                Theme.FormatDate(Iso(first)), Theme.FormatDate(Iso(last)), Num("activeDays"))
+            : Loc.T("ov.noSessions");
 
         // ── Calendar heatmap ──
         var cells = new List<ChartPoint>();
@@ -203,8 +204,8 @@ internal sealed class OverviewWindow : Form
                     day,
                     q,
                     q > 0
-                        ? $"{day}\n提问 {q} 条 · 输出 {Compact(outTok)} token"
-                        : $"{day}\n没有活动"));
+                        ? Loc.T("ov.day", day, q, Compact(outTok))
+                        : Loc.T("ov.dayEmpty", day)));
             }
             if (cells.Count > 0 && DateTime.TryParse(cells[0].Label, out var start))
             {
@@ -235,10 +236,12 @@ internal sealed class OverviewWindow : Form
                 rows.Add(new ChartPoint(
                     p["name"]?.GetValue<string>() ?? "",
                     outTok,
-                    $"{p["path"]?.GetValue<string>()}\n"
-                    + $"{p["sessions"]?.GetValue<long>() ?? 0} 个会话 · "
-                    + $"{p["userMessages"]?.GetValue<long>() ?? 0} 条提问 · "
-                    + $"输出 {Compact(outTok)} token"));
+                    Loc.T(
+                        "ov.projectTip",
+                        p["path"]?.GetValue<string>() ?? "",
+                        p["sessions"]?.GetValue<long>() ?? 0,
+                        p["userMessages"]?.GetValue<long>() ?? 0,
+                        Compact(outTok))));
             }
         }
         _projects.SetPoints(rows);
@@ -247,12 +250,12 @@ internal sealed class OverviewWindow : Form
         long busiest = s["busiestDay"]?["userMessages"]?.GetValue<long>() ?? 0;
         string busiestDay = s["busiestDay"]?["day"]?.GetValue<string>() ?? "";
         string note = busiest > 0
-            ? $"最忙的一天是 {busiestDay}，提问 {busiest} 条。"
+            ? Loc.T("ov.busiest", busiestDay, busiest)
             : "";
-        note += $"读取 {Bytes(Num("scannedBytes"))} 会话记录，用时 {scanMs} ms。";
+        note += Loc.T("ov.scanNote", Bytes(Num("scannedBytes")), scanMs);
         long skipped = Num("skippedLines");
-        if (skipped > 0) note += $" {skipped} 行无法解析，数值为下限。";
-        note += " 此统计与账号无关——Claude Code 不记录会话属于哪个账号。";
+        if (skipped > 0) note += Loc.T("ov.skipped", skipped);
+        note += " " + Loc.T("proj.accountNote");
         _footnote.Text = note;
     }
 

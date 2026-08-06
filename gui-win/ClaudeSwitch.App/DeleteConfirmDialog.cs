@@ -5,7 +5,7 @@ internal sealed class DeleteConfirmDialog : Form
 {
     public DeleteConfirmDialog(AccountCardModel model)
     {
-        Text = "删除账号";
+        Text = Loc.T("confirm.delete.title");
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MaximizeBox = false;
@@ -25,25 +25,22 @@ internal sealed class DeleteConfirmDialog : Form
         var layout = new DialogLayout(this, textWidth: 392);
 
         var title = layout.Text(
-            "确定删除此托管账号？",
+            Loc.T("confirm.delete.heading"),
             Theme.FontHeading,
             Theme.UsageHigh);
         var body = layout.Text(
-            $"将移除：#{model.Number}  {name}\n\n" +
-            "• 删除的是 Claude Switch 中的备份与槽位记录\n" +
-            "• 不会登出 Claude 官网账号本身\n" +
-            "• 若该账号正在使用中，请先切换到其他账号",
+            Loc.T("confirm.delete.body", model.Number, name),
             Theme.FontBody,
             Theme.TextSecondary);
 
         var btnDelete = new DangerButton
         {
-            Text = "确认删除",
+            Text = Loc.T("confirm.delete.ok"),
             DialogResult = DialogResult.Yes,
         };
         var btnCancel = new SecondaryButton
         {
-            Text = "取消",
+            Text = Loc.T("common.cancel"),
             DialogResult = DialogResult.Cancel,
         };
 
@@ -59,8 +56,8 @@ internal sealed class DeleteConfirmDialog : Form
         {
             var r = MessageBox.Show(
                 owner,
-                "该账号当前正在使用中。\n建议先切换到其他账号再删除。\n\n仍要继续删除吗？",
-                "删除当前账号",
+                Loc.T("confirm.delete.active"),
+                Loc.T("confirm.delete.activeTitle"),
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning,
                 MessageBoxDefaultButton.Button2);

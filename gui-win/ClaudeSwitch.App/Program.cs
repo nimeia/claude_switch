@@ -1,4 +1,5 @@
-﻿using System.Text.Json.Nodes;
+﻿using System.Text;
+using System.Text.Json.Nodes;
 using ClaudeSwitch.Core;
 
 namespace ClaudeSwitch.App;
@@ -30,11 +31,20 @@ static class Program
         if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CLAUDE_SWITCH_LAYOUT_DIR")))
             skipOnboarding = true;
 
-        using var mutex = new Mutex(true, @"Local\ClaudeSwitch.Gui", out bool created);
+        // One instance per data set, not one per machine. A --fixture run reads a
+        // separate demo home and touches none of the real credentials, so it must
+        // not be blocked by — or block — the instance managing the real accounts.
+        string instanceKey = string.IsNullOrWhiteSpace(fixture)
+            ? @"Local\ClaudeSwitch.Gui"
+            : @"Local\ClaudeSwitch.Gui.fixture."
+              + Convert.ToHexString(
+                  System.Security.Cryptography.MD5.HashData(
+                      Encoding.UTF8.GetBytes(Path.GetFullPath(fixture))));
+        using var mutex = new Mutex(true, instanceKey, out bool created);
         if (!created)
         {
             MessageBox.Show(
-                "Claude Switch 已在运行。\n请从系统托盘打开主窗口。",
+                Loc.T("app.alreadyRunning"),
                 "Claude Switch",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
@@ -57,7 +67,7 @@ static class Program
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.ToString(), "Claude Switch 启动失败",
+            MessageBox.Show(ex.ToString(), Loc.T("app.startFailed"),
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
@@ -92,6 +102,12 @@ sealed class MainForm : Form
     private readonly Label _thrUnit;
     private readonly ToolStripButton _btnSwitch;
     private readonly ToolStripButton _btnTheme;
+    private readonly ToolStripButton _btnRefresh;
+    private readonly ToolStripButton _btnAdd;
+    private readonly ToolStripButton _btnProjects;
+    private readonly ToolStripButton _btnOverview;
+    private readonly ToolStripDropDownButton _btnLang;
+    private bool _fittingSearch;
     private readonly ToolStripTextBox _search;
     private readonly ToolStripButton _btnSearchClear;
     private readonly ToolStripLabel _searchMatchLabel;
@@ -106,12 +122,12 @@ sealed class MainForm : Form
     private AccountCard? _selected;
     private List<AccountCardModel> _models = [];
     /// <summary>Watermark shown while the search box is empty (never in Text).</summary>
-    private const string SearchHint = "搜索邮箱或别名…";
+    private static string SearchHint => Loc.T("toolbar.search.hint");
     private bool _switching;
     private bool _settingsLoading;
     private double _nextPollSeconds = 60;
     private DateTime _nextPollUtc = DateTime.UtcNow.AddSeconds(60);
-    private string _baseStatus = "就绪";
+    private string _baseStatus = "";
     /// <summary>Live Claude login that no managed slot holds, if any.</summary>
     private string? _unmanagedLogin;
     /// <summary>A rebuild was requested during a drag and still owes a redraw.</summary>
@@ -203,7 +219,7 @@ sealed class MainForm : Form
         {
             AutoSize = true,
             Font = Theme.FontBody,
-            Text = "0 个账号",
+            Text = Loc.T("header.count", 0),
             Margin = new Padding(0, 16, Theme.Space3, 0),
             TextAlign = ContentAlignment.MiddleRight,
         };
@@ -213,7 +229,7 @@ sealed class MainForm : Form
             Font = Theme.FontBody,
             Padding = new Padding(Theme.Space3, 5, Theme.Space3, 5),
             Margin = new Padding(0, 10, 0, 0),
-            Text = "当前账号：—",
+            Text = Loc.T("header.active", Loc.T("status.none")),
             TextAlign = ContentAlignment.MiddleCenter,
         };
         headerGrid.Controls.Add(_brand, 0, 0);
@@ -245,13 +261,15 @@ sealed class MainForm : Form
             AutoSize = false,
             Height = Theme.ControlHeight + 4,
         };
-        _btnSwitch = MakeStripBtn("请选择账号", "primary");
-        _btnSwitch.ToolTipText = "将选中的账号设为 Claude Code 当前登录";
-        var btnRefresh = MakeStripBtn("刷新全部", "secondary");
-        btnRefresh.ToolTipText = "刷新全部账号的用量与列表";
-        var btnAdd = MakeStripBtn("添加账号", "secondary");
-        btnAdd.ToolTipText = "托管本机当前 Claude Code 登录（全局）";
-        _btnResume = new ToolStripDropDownButton("继续会话")
+        _btnSwitch = MakeStripBtn(Loc.T("toolbar.switch.select"), "primary");
+        _btnSwitch.ToolTipText = Loc.T("toolbar.switch.tip");
+        _btnRefresh = MakeStripBtn(Loc.T("toolbar.refresh"), "secondary");
+        var btnRefresh = _btnRefresh;
+        btnRefresh.ToolTipText = Loc.T("toolbar.refresh.tip");
+        _btnAdd = MakeStripBtn(Loc.T("toolbar.add"), "secondary");
+        var btnAdd = _btnAdd;
+        btnAdd.ToolTipText = Loc.T("toolbar.add.tip");
+        _btnResume = new ToolStripDropDownButton(Loc.T("toolbar.resume"))
         {
             DisplayStyle = ToolStripItemDisplayStyle.Text,
             AutoSize = true,
@@ -260,18 +278,21 @@ sealed class MainForm : Form
             Font = Theme.FontBody,
             Tag = "secondary",
             Overflow = ToolStripItemOverflow.Never,
-            ToolTipText = "回到最近的会话（在你自己的终端里打开）",
+            ToolTipText = Loc.T("toolbar.resume.tip"),
         };
         // Built on open, not on a timer: the list is only interesting at the
         // moment it is read, and building it costs a directory listing.
         _btnResume.DropDownOpening += (_, _) => FillResumeMenu(_btnResume.DropDownItems);
 
-        var btnProjects = MakeStripBtn("目录", "secondary");
-        btnProjects.ToolTipText = "Claude Code 用过的目录与会话（与账号无关）";
-        var btnOverview = MakeStripBtn("用量总览", "secondary");
-        btnOverview.ToolTipText = "统计本机所有目录的会话与 token 用量（按需扫描）";
+        _btnProjects = MakeStripBtn(Loc.T("toolbar.projects"), "secondary");
+        var btnProjects = _btnProjects;
+        btnProjects.ToolTipText = Loc.T("toolbar.projects.tip");
+        _btnOverview = MakeStripBtn(Loc.T("toolbar.overview"), "secondary");
+        var btnOverview = _btnOverview;
+        btnOverview.ToolTipText = Loc.T("toolbar.overview.tip");
         _btnTheme = MakeStripBtn(ThemeToggleText(), "secondary");
-        _btnTheme.ToolTipText = "切换浅色 / 深色外观";
+        _btnTheme.ToolTipText = Loc.T("toolbar.theme.tip");
+        _btnLang = BuildLanguageButton();
         _search = new ToolStripTextBox("search")
         {
             AutoSize = false,
@@ -283,9 +304,9 @@ sealed class MainForm : Form
             Text = "",
             Alignment = ToolStripItemAlignment.Right,
             Overflow = ToolStripItemOverflow.Never,
-            ToolTipText = "按邮箱或别名过滤列表",
+            ToolTipText = Loc.T("toolbar.search.tip"),
         };
-        _btnSearchClear = new ToolStripButton("清除")
+        _btnSearchClear = new ToolStripButton(Loc.T("toolbar.search.clear"))
         {
             DisplayStyle = ToolStripItemDisplayStyle.Text,
             AutoSize = true,
@@ -293,7 +314,7 @@ sealed class MainForm : Form
             Overflow = ToolStripItemOverflow.Never,
             Font = Theme.FontBody,
             Tag = "secondary",
-            ToolTipText = "清空搜索并显示全部账号",
+            ToolTipText = Loc.T("toolbar.search.clear.tip"),
             Enabled = false,
             Margin = new Padding(0, 0, Theme.Space1, 0),
             Padding = new Padding(Theme.Space2, 5, Theme.Space2, 5),
@@ -308,7 +329,7 @@ sealed class MainForm : Form
         };
         foreach (var item in new ToolStripItem[]
                  { _btnSwitch, btnRefresh, btnAdd, _btnResume, btnProjects, btnOverview, _btnTheme,
-                   _search, _btnSearchClear, _searchMatchLabel })
+                   _btnLang, _search, _btnSearchClear, _searchMatchLabel })
             item.Overflow = ToolStripItemOverflow.Never;
 
         _btnSwitch.Click += (_, _) => DoSwitch();
@@ -348,9 +369,14 @@ sealed class MainForm : Form
             new ToolStripSeparator(),
             _btnResume, btnProjects, btnOverview,
             new ToolStripSeparator(),
-            _btnTheme,
+            _btnTheme, _btnLang,
         ]);
         _actionBar.Controls.Add(_toolStrip);
+        // Every item has Overflow = Never, so anything that does not fit is simply
+        // cut off the right edge — which is what happened the first time the UI
+        // was rendered in English, where the same labels are ~1.7× wider. The
+        // search box is the one item with slack, so it gives that width back.
+        _toolStrip.Layout += (_, _) => FitSearchBox();
 
         // ── Row 2: Auto-switch settings (natural sentence + auto-save) ──
         // Taller band + padding so WinForms checkbox glyphs are not clipped.
@@ -371,7 +397,7 @@ sealed class MainForm : Form
 
         _autoEnabled = new CheckBox
         {
-            Text = "自动切换：",
+            Text = Loc.T("settings.autoswitch"),
             AutoSize = true,
             Margin = new Padding(0, 4, Theme.Space1, 4),
             Padding = new Padding(0, 2, 0, 2),
@@ -382,7 +408,7 @@ sealed class MainForm : Form
         };
         _thrLabel = new Label
         {
-            Text = "5小时或7天用量任一达到",
+            Text = Loc.T("settings.autoswitch.when"),
             AutoSize = true,
             Margin = new Padding(0, 8, Theme.Space1, 0),
             TextAlign = ContentAlignment.MiddleLeft,
@@ -402,7 +428,7 @@ sealed class MainForm : Form
         };
         _thrUnit = new Label
         {
-            Text = "% 时切换到余量最多的可用账号",
+            Text = Loc.T("settings.autoswitch.mid"),
             AutoSize = true,
             Margin = new Padding(0, 8, Theme.Space3, 0),
             TextAlign = ContentAlignment.MiddleLeft,
@@ -425,7 +451,7 @@ sealed class MainForm : Form
         };
         _startupEnabled = new CheckBox
         {
-            Text = "开机自启",
+            Text = Loc.T("settings.startup"),
             AutoSize = true,
             Margin = new Padding(0, 4, Theme.Space3, 4),
             Padding = new Padding(0, 2, 0, 2),
@@ -441,18 +467,18 @@ sealed class MainForm : Form
             {
                 StartupHelper.SetEnabled(_startupEnabled.Checked);
                 FlashSettingsSaved(_startupEnabled.Checked
-                    ? "已开启开机自启"
-                    : "已关闭开机自启");
+                    ? Loc.T("settings.startup.on")
+                    : Loc.T("settings.startup.off"));
             }
             catch (Exception ex)
             {
                 _startupEnabled.Checked = StartupHelper.IsEnabled();
-                MessageBox.Show(this, ex.Message, "开机自启", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, ex.Message, Loc.T("settings.startup"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         };
         _hideEmail = new CheckBox
         {
-            Text = "隐藏邮箱",
+            Text = Loc.T("settings.hideEmail"),
             AutoSize = true,
             Margin = new Padding(0, 4, Theme.Space2, 4),
             Padding = new Padding(0, 2, 0, 2),
@@ -470,7 +496,7 @@ sealed class MainForm : Form
             RebuildCards();
             if (DetailOpen && _selected is not null)
                 _drawer.Bind(_selected.Model);
-            FlashSettingsSaved(_hideEmail.Checked ? "已隐藏邮箱" : "已显示完整邮箱");
+            FlashSettingsSaved(_hideEmail.Checked ? Loc.T("settings.hideEmail.on") : Loc.T("settings.hideEmail.off"));
         };
 
         _autoEnabled.CheckedChanged += (_, _) =>
@@ -556,7 +582,7 @@ sealed class MainForm : Form
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleCenter,
             Font = new Font("Microsoft YaHei UI", 9.5f),
-            Text = "还没有托管账号\n\n请先在本机登录 Claude Code，然后点击「添加账号」。\n或使用 --fixture 打开演示数据。",
+            Text = Loc.T("empty.noAccounts"),
         };
         _emptyState.Controls.Add(emptyInner);
         _listOuter.Controls.Add(_cardHost);
@@ -579,7 +605,7 @@ sealed class MainForm : Form
             TextAlign = ContentAlignment.MiddleLeft,
             Padding = new Padding(Theme.Space4, 0, Theme.Space3, 0),
             Font = Theme.FontSmall,
-            Text = "就绪",
+            Text = Loc.T("status.ready"),
             Margin = new Padding(0),
         };
 
@@ -604,7 +630,7 @@ sealed class MainForm : Form
             if (WindowState == FormWindowState.Minimized)
             {
                 Hide();
-                _tray.ShowBalloonTip(1600, "Claude Switch", "已最小化到托盘，双击图标重新打开。", ToolTipIcon.Info);
+                _tray.ShowBalloonTip(1600, Loc.T("app.name"), Loc.T("tray.minimized"), ToolTipIcon.Info);
             }
         };
 
@@ -677,6 +703,12 @@ sealed class MainForm : Form
                 return _detailForm;
             }));
         }
+        // Switching language re-labels the shell in place. That path has no
+        // other test — a stale label would only ever be noticed by a user.
+        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_LANG") is { Length: > 0 } probeLang)
+        {
+            LayoutProbe.Overlays.Add(("gui-lang-switched.png", () => SetLanguage(probeLang)));
+        }
         if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_RESUME") == "1")
         {
             LayoutProbe.Overlays.Add(("gui-resume-menu.png", () => _btnResume.ShowDropDown()));
@@ -738,13 +770,128 @@ sealed class MainForm : Form
 
     private static bool IsValidSwitchLabel(string? text) =>
         !string.IsNullOrEmpty(text)
-        && (text.Contains("请选择账号", StringComparison.Ordinal)
-            || text.Contains("当前正在使用", StringComparison.Ordinal)
-            || text.Contains("切换到该账号", StringComparison.Ordinal)
-            || text.Contains("正在切换", StringComparison.Ordinal));
+        && (text.Contains(Loc.T("toolbar.switch.select"), StringComparison.Ordinal)
+            || text.Contains(Loc.T("toolbar.switch.current"), StringComparison.Ordinal)
+            || text.Contains(Loc.T("toolbar.switch.go"), StringComparison.Ordinal)
+            || text.Contains(Loc.T("toolbar.switch.busy"), StringComparison.Ordinal));
+
+    /// <summary>
+    /// Gives the search box whatever width the buttons leave, within limits.
+    /// </summary>
+    /// <remarks>
+    /// Below <c>MinSearch</c> the box is too small to read a query in, so it
+    /// stops shrinking and the toolbar clips instead — a visibly broken toolbar
+    /// is better than a search box that silently cannot be used.
+    /// </remarks>
+    private void FitSearchBox()
+    {
+        const int MinSearch = 150;
+        const int MaxSearch = 280;
+        if (_fittingSearch) return;
+
+        int used = 0;
+        foreach (ToolStripItem item in _toolStrip.Items)
+        {
+            if (!item.Available) continue;
+            used += (ReferenceEquals(item, _search) ? 0 : item.Width)
+                + item.Margin.Horizontal;
+        }
+        int free = _toolStrip.DisplayRectangle.Width - used;
+        int want = Math.Clamp(free, MinSearch, MaxSearch);
+        if (want == _search.Width) return;
+
+        // Setting Width re-triggers Layout; the guard keeps that to one pass.
+        _fittingSearch = true;
+        try { _search.Width = want; }
+        finally { _fittingSearch = false; }
+    }
+
+    /// <summary>
+    /// Compact language menu. The label is the language's own name (English,
+    /// 简体中文) — the one string a user always recognises even when the rest of
+    /// the UI is in a language they cannot read.
+    /// </summary>
+    private ToolStripDropDownButton BuildLanguageButton()
+    {
+        var btn = new ToolStripDropDownButton(Loc.T("language.short"))
+        {
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            AutoSize = true,
+            Font = Theme.FontBody,
+            Tag = "secondary",
+            ToolTipText = Loc.T("toolbar.language.tip"),
+            ShowDropDownArrow = true,
+            Margin = new Padding(0, 0, Theme.Space1, 0),
+            Padding = new Padding(Theme.Space2, 5, Theme.Space2, 5),
+        };
+        foreach (var (code, name) in Loc.Available)
+        {
+            var item = new ToolStripMenuItem(name) { Tag = code, Checked = code == Loc.Current };
+            item.Click += (_, _) => SetLanguage(code);
+            btn.DropDownItems.Add(item);
+        }
+        return btn;
+    }
+
+    private void SetLanguage(string code)
+    {
+        if (code == Loc.Current) return;
+        Loc.Use(code);
+        UiPrefs.Language = code;
+        UiPrefs.Save();
+        foreach (ToolStripMenuItem item in _btnLang.DropDownItems)
+            item.Checked = (string?)item.Tag == code;
+        ApplyTexts();
+    }
+
+    /// <summary>
+    /// Re-labels the shell after a language change. Only the persistent chrome
+    /// needs this — cards, the drawer and every secondary window read their
+    /// strings when they are built, and are rebuilt or reopened after this.
+    /// </summary>
+    private void ApplyTexts()
+    {
+        _btnLang.Text = Loc.T("language.short");
+        _btnLang.ToolTipText = Loc.T("toolbar.language.tip");
+
+        _btnRefresh.Text = Loc.T("toolbar.refresh");
+        _btnRefresh.ToolTipText = Loc.T("toolbar.refresh.tip");
+        _btnAdd.Text = Loc.T("toolbar.add");
+        _btnAdd.ToolTipText = Loc.T("toolbar.add.tip");
+        _btnResume.Text = Loc.T("toolbar.resume");
+        _btnResume.ToolTipText = Loc.T("toolbar.resume.tip");
+        _btnProjects.Text = Loc.T("toolbar.projects");
+        _btnProjects.ToolTipText = Loc.T("toolbar.projects.tip");
+        _btnOverview.Text = Loc.T("toolbar.overview");
+        _btnOverview.ToolTipText = Loc.T("toolbar.overview.tip");
+        _btnTheme.Text = ThemeToggleText();
+        _btnTheme.ToolTipText = Loc.T("toolbar.theme.tip");
+        _search.ToolTipText = Loc.T("toolbar.search.tip");
+        _btnSearchClear.Text = Loc.T("toolbar.search.clear");
+        _btnSearchClear.ToolTipText = Loc.T("toolbar.search.clear.tip");
+        SearchBox.AttachCueBanner(_search.TextBox, SearchHint);
+
+        _autoEnabled.Text = Loc.T("settings.autoswitch");
+        _thrLabel.Text = Loc.T("settings.autoswitch.when");
+        _thrUnit.Text = Loc.T("settings.autoswitch.mid");
+        _startupEnabled.Text = Loc.T("settings.startup");
+        _hideEmail.Text = Loc.T("settings.hideEmail");
+
+        // The status line is rebuilt from live state, so a stale sentence in the
+        // previous language would otherwise sit there until the next poll.
+        _baseStatus = "";
+        _activityStrip.ApplyTexts();
+        // Card geometry is measured from translated labels, so the cache from
+        // the previous language would size the meter column wrong.
+        AccountCard.InvalidateMetrics();
+        RebuildCards();
+        ApplyHeaderTexts();
+        ComposeStatusLine();
+        if (DetailOpen && _selected is not null) _drawer.Bind(_selected.Model);
+    }
 
     private static string ThemeToggleText() =>
-        Theme.Mode == ThemeMode.Dark ? "浅色模式" : "深色模式";
+        Theme.Mode == ThemeMode.Dark ? Loc.T("toolbar.theme.light") : Loc.T("toolbar.theme.dark");
 
     /// <param name="role">primary | secondary | danger — read by SageToolStripRenderer.</param>
     private static ToolStripButton MakeStripBtn(string text, string role = "secondary")
@@ -893,7 +1040,7 @@ sealed class MainForm : Form
 
         if (recent.Count == 0)
         {
-            items.Add(new ToolStripMenuItem("还没有可继续的会话") { Enabled = false });
+            items.Add(new ToolStripMenuItem(Loc.T("resume.none")) { Enabled = false });
         }
         else
         {
@@ -901,7 +1048,7 @@ sealed class MainForm : Form
             {
                 var item = new ToolStripMenuItem(RecentSessions.MenuLabel(session))
                 {
-                    ToolTipText = $"{session.Path}{Environment.NewLine}会话 {session.SessionId}",
+                    ToolTipText = Loc.T("resume.tooltip", session.Path, session.SessionId),
                 };
                 item.Click += (_, _) => ResumeSession(session);
                 items.Add(item);
@@ -909,36 +1056,36 @@ sealed class MainForm : Form
         }
 
         items.Add(new ToolStripSeparator());
-        items.Add(new ToolStripMenuItem("全部目录与会话…", null, (_, _) => ShowProjectsWindow()));
+        items.Add(new ToolStripMenuItem(Loc.T("resume.all"), null, (_, _) => ShowProjectsWindow()));
     }
 
     private void ResumeSession(RecentSession session)
     {
         if (ClaudeCli.Resume(session.Path, session.SessionId) is { } problem)
         {
-            MessageBox.Show(this, problem, "无法继续会话", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, problem, Loc.T("resume.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
-        _baseStatus = $"已在 {session.Name} 恢复会话";
+        _baseStatus = Loc.T("status.resumed", session.Name);
         ComposeStatusLine();
     }
 
     private ContextMenuStrip BuildTrayMenu()
     {
         var menu = new ContextMenuStrip();
-        menu.Items.Add("显示主窗口", null, (_, _) => RestoreFromTray());
-        menu.Items.Add("刷新用量", null, (_, _) => Reload());
+        menu.Items.Add(Loc.T("tray.show"), null, (_, _) => RestoreFromTray());
+        menu.Items.Add(Loc.T("tray.refresh"), null, (_, _) => Reload());
         menu.Items.Add(new ToolStripSeparator());
 
         // The tray is where someone returning to their machine actually looks,
         // and the main window is usually closed at that moment.
-        var resume = new ToolStripMenuItem("继续会话");
+        var resume = new ToolStripMenuItem(Loc.T("tray.resume"));
         resume.DropDownOpening += (_, _) => FillResumeMenu(resume.DropDownItems);
         // A submenu with no children never opens, so seed one placeholder.
         resume.DropDownItems.Add(new ToolStripMenuItem("…") { Enabled = false });
         menu.Items.Add(resume);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("退出（Shift+关闭）", null, (_, _) =>
+        menu.Items.Add(Loc.T("tray.exit"), null, (_, _) =>
         {
             _tray.Visible = false;
             Theme.SavePrefs();
@@ -967,34 +1114,34 @@ sealed class MainForm : Form
         if (_switching)
         {
             _btnSwitch.Enabled = false;
-            _btnSwitch.Text = "正在切换…";
-            _btnSwitch.ToolTipText = "正在切换账号，请稍候";
+            _btnSwitch.Text = Loc.T("toolbar.switch.busy");
+            _btnSwitch.ToolTipText = Loc.T("action.switching");
             return;
         }
         if (_selected is null)
         {
             _btnSwitch.Enabled = false;
-            _btnSwitch.Text = "请选择账号";
-            _btnSwitch.ToolTipText = "请先单击选中一张账号卡片";
+            _btnSwitch.Text = Loc.T("toolbar.switch.select");
+            _btnSwitch.ToolTipText = Loc.T("action.selectFirst");
             return;
         }
         if (_selected.Model.Active)
         {
             _btnSwitch.Enabled = false;
-            _btnSwitch.Text = "当前正在使用";
-            _btnSwitch.ToolTipText = "该账号已是 Claude Code 当前登录，无需切换";
+            _btnSwitch.Text = Loc.T("toolbar.switch.current");
+            _btnSwitch.ToolTipText = Loc.T("action.alreadyCurrent");
         }
         else if (_selected.Model.Disabled)
         {
             _btnSwitch.Enabled = true;
-            _btnSwitch.Text = "切换到该账号";
-            _btnSwitch.ToolTipText = "切换到已停用账号（仍可手动切换；自动切换不会选中它）";
+            _btnSwitch.Text = Loc.T("toolbar.switch.go");
+            _btnSwitch.ToolTipText = Loc.T("switch.toDisabled");
         }
         else
         {
             _btnSwitch.Enabled = true;
-            _btnSwitch.Text = "切换到该账号";
-            _btnSwitch.ToolTipText = "将选中的账号设为 Claude Code 当前登录";
+            _btnSwitch.Text = Loc.T("toolbar.switch.go");
+            _btnSwitch.ToolTipText = Loc.T("toolbar.switch.tip");
         }
     }
 
@@ -1117,7 +1264,7 @@ sealed class MainForm : Form
     {
         if (_selected is null)
         {
-            MessageBox.Show(this, "请先选择一张账号卡片。", "用量详情",
+            MessageBox.Show(this, Loc.T("action.selectFirst.detail"), Loc.T("detail.title"),
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -1205,7 +1352,7 @@ sealed class MainForm : Form
 
         var previous = Cursor;
         Cursor = Cursors.WaitCursor;
-        _baseStatus = "正在读取全部会话记录…";
+        _baseStatus = Loc.T("status.overviewRunning");
         ComposeStatusLine();
         Application.DoEvents();
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -1216,12 +1363,12 @@ sealed class MainForm : Form
             _overviewWindow = new OverviewWindow(stats, sw.ElapsedMilliseconds);
             _overviewWindow.FormClosed += (_, _) => _overviewWindow = null;
             _overviewWindow.Show(this);
-            _baseStatus = $"用量总览已生成（{sw.ElapsedMilliseconds} ms）";
+            _baseStatus = Loc.T("status.overviewReady", sw.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "统计失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            _baseStatus = "统计失败";
+            MessageBox.Show(this, ex.Message, Loc.T("status.overviewFailed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            _baseStatus = Loc.T("status.overviewFailed");
         }
         finally
         {
@@ -1259,7 +1406,7 @@ sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "排序失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, ex.Message, Loc.T("reorder.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             Reload();
             return;
         }
@@ -1269,7 +1416,7 @@ sealed class MainForm : Form
         // window for the length of an HTTP round trip.
         _models = reordered;
         RebuildCards();
-        _baseStatus = "已调整账号顺序（拖拽）";
+        _baseStatus = Loc.T("status.reorder");
         ComposeStatusLine();
     }
 
@@ -1398,7 +1545,7 @@ sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            _status.Text = "读取设置失败：" + ex.Message;
+            _status.Text = Loc.T("settings.readFailed", ex.Message);
         }
         finally
         {
@@ -1425,8 +1572,8 @@ sealed class MainForm : Form
             if (DetailOpen && _selected is not null)
                 _drawer.Bind(_selected.Model);
             string msg = _autoEnabled.Checked
-                ? $"已保存：自动切换 · 阈值 {_threshold.Value}%"
-                : "已保存：自动切换已关闭";
+                ? Loc.T("settings.saved.on", _threshold.Value)
+                : Loc.T("settings.saved.off");
             if (auto)
                 FlashSettingsSaved(msg);
             else
@@ -1443,7 +1590,7 @@ sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(ex.Message, "保存设置", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(ex.Message, Loc.T("settings.saveFailed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -1463,7 +1610,7 @@ sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            _baseStatus = "自动刷新失败：" + ex.Message;
+            _baseStatus = Loc.T("status.refreshFailed", ex.Message);
             ComposeStatusLine();
         }
     }
@@ -1483,7 +1630,7 @@ sealed class MainForm : Form
 
         var to = _models.FirstOrDefault(m => m.Number == SwitchNotice.TargetNumber(result));
         string target = to is null
-            ? result?["to"]?["email"]?.GetValue<string>() ?? "另一个账号"
+            ? result?["to"]?["email"]?.GetValue<string>() ?? Loc.T("switch.otherAccount")
             : Pii.MaskAccountLabel(to.Alias, to.Email);
 
         double? fromPct = wasActive is null || (wasActive.FiveHour is null && wasActive.SevenDay is null)
@@ -1499,7 +1646,7 @@ sealed class MainForm : Form
                 fromPct),
             ToolTipIcon.Info);
 
-        _baseStatus = $"已自动切换到 {target}";
+        _baseStatus = Loc.T("status.switchedTo", target);
         ComposeStatusLine();
     }
 
@@ -1517,14 +1664,14 @@ sealed class MainForm : Form
             ApplySnapshotFromEngine(refreshAlreadyDone: true);
             ArmNextPoll(_poll.LastNextPollSeconds, forceShort: force);
             _baseStatus = _autoEnabled.Checked
-                ? $"自动轮询 #{_poll.TickCount}（含 autoswitch）"
-                : $"用量已刷新 · 轮询 #{_poll.TickCount}";
+                ? Loc.T("status.polled.auto", _poll.TickCount)
+                : Loc.T("status.polled", _poll.TickCount);
             ComposeStatusLine();
             NotifyIfSwitched(result, wasActive);
         }
         catch (Exception ex)
         {
-            _baseStatus = "轮询失败：" + ex.Message;
+            _baseStatus = Loc.T("status.pollFailed", ex.Message);
             ArmNextPoll(30, forceShort: false);
             ComposeStatusLine();
         }
@@ -1560,23 +1707,23 @@ sealed class MainForm : Form
         var active = _models.FirstOrDefault(m => m.Active);
         var masked = ActiveLabel();
         int remain = (int)Math.Max(0, Math.Ceiling((_nextPollUtc - DateTime.UtcNow).TotalSeconds));
-        string pollText = $"下次刷新：{Theme.FormatDuration(remain)}";
+        string pollText = Loc.T("status.nextRefresh", Theme.FormatDuration(remain));
         string auto = _autoEnabled.Checked
-            ? $"自动切换：开 · {_threshold.Value}%"
-            : "自动切换：关闭";
+            ? Loc.T("status.autoswitch.on", _threshold.Value)
+            : Loc.T("status.autoswitch.off");
         int total = Math.Max(1, _models.Count);
         int pos = active is null ? 0 : Math.Max(1, _models.FindIndex(m => m.Active) + 1);
         string pollPos = active is null
-            ? $"轮询：{_poll.TickCount}"
-            : $"轮询位置：{pos}/{total}";
+            ? Loc.T("status.poll.count", _poll.TickCount)
+            : Loc.T("status.poll.position", pos, total);
         // Separators for scanability. No slot number when no slot is live.
         string who = active is null ? masked : $"#{active.Number} {masked}";
-        _status.Text = $"当前账号：{who}  ｜  {auto}  ｜  {pollPos}  ｜  {pollText}";
-        if (!string.IsNullOrEmpty(_baseStatus) && _baseStatus != "就绪"
+        _status.Text = $"{Loc.T("status.active", who)}  |  {auto}  |  {pollPos}  |  {pollText}";
+        if (!string.IsNullOrEmpty(_baseStatus) && _baseStatus.Length > 0
             && remain > 0 && _poll.TickCount == 0)
         {
             // Keep one-shot messages visible until first poll completes.
-            _status.Text = $"{_baseStatus}  ｜  {pollText}";
+            _status.Text = $"{_baseStatus}  |  {pollText}";
         }
     }
 
@@ -1600,7 +1747,7 @@ sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            _status.Text = "加载失败：" + ex.Message;
+            _status.Text = Loc.T("status.loadFailed", ex.Message);
         }
         finally
         {
@@ -1616,7 +1763,7 @@ sealed class MainForm : Form
         try { _engine.Call("reconcile_active"); } catch { /* read-only view still works */ }
         var snap = _engine.Snapshot();
         _models = [];
-        string activeEmail = "—";
+        string activeEmail = Loc.T("status.none");
         var accounts = snap["accounts"]?.AsArray();
         if (accounts is not null)
         {
@@ -1676,13 +1823,19 @@ sealed class MainForm : Form
         _unmanagedLogin = snap["unmanagedLoginEmail"]?.GetValue<string>();
 
         RebuildCards();
+        ApplyHeaderTexts();
+    }
+
+    /// <summary>Header chips and tray title, from the current models.</summary>
+    private void ApplyHeaderTexts()
+    {
         var maskedActive = ActiveLabel();
-        _activeChip.Text = $"当前账号：{maskedActive}";
-        _countLabel.Text = $"{_models.Count} 个账号";
+        _activeChip.Text = Loc.T("header.active", maskedActive);
+        _countLabel.Text = Loc.T("header.count", _models.Count);
         var trayLabel = maskedActive.Length > 40
             ? maskedActive[..37] + "…"
             : maskedActive;
-        _tray.Text = "Claude Switch · " + trayLabel;
+        _tray.Text = Loc.T("tray.title", trayLabel);
     }
 
     /// <summary>
@@ -1695,8 +1848,8 @@ sealed class MainForm : Form
         if (active is not null)
             return Pii.MaskAccountLabel(active.Alias, active.Email);
         if (!string.IsNullOrWhiteSpace(_unmanagedLogin))
-            return $"未托管 · {Pii.MaskEmail(_unmanagedLogin!)}";
-        return _models.Count == 0 ? "—" : "未登录";
+            return Loc.T("status.unmanaged", Pii.MaskEmail(_unmanagedLogin!));
+        return _models.Count == 0 ? Loc.T("status.none") : Loc.T("status.loggedOut");
     }
 
     private void RebuildCards()
@@ -1763,7 +1916,7 @@ sealed class MainForm : Form
             foreach (Control c in _emptyState.Controls)
             {
                 if (c is Label lbl)
-                    lbl.Text = $"没有匹配「{q}」的账号\n\n点工具栏「清除」或清空搜索框以显示全部 {_models.Count} 个账号。";
+                    lbl.Text = Loc.T("empty.noMatch", q, _models.Count);
             }
         }
         else if (noData)
@@ -1771,7 +1924,7 @@ sealed class MainForm : Form
             foreach (Control c in _emptyState.Controls)
             {
                 if (c is Label lbl)
-                    lbl.Text = "还没有托管账号\n\n请先在本机登录 Claude Code，然后点击「添加账号」。\n或使用 --fixture 打开演示数据。";
+                    lbl.Text = Loc.T("empty.noAccounts");
             }
         }
 
@@ -1781,7 +1934,7 @@ sealed class MainForm : Form
         _searchMatchLabel.Text = q.Length == 0
             ? ""
             : filtered.Count == 0
-                ? "0 匹配"
+                ? Loc.T("filter.zero")
                 : $"{filtered.Count}/{_models.Count}";
         if (filterMsg is not null)
             _status.Text = filterMsg;
@@ -1864,7 +2017,7 @@ sealed class MainForm : Form
                     MessageBox.Show(
                         this,
                         ex.Message,
-                        "操作失败",
+                        Loc.T("disable.failed.title"),
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning);
                 }
@@ -1872,22 +2025,22 @@ sealed class MainForm : Form
         }
 
         var switchItem = new ToolStripMenuItem(
-            m.Active ? "当前正在使用" : "切换到该账号")
+            m.Active ? Loc.T("toolbar.switch.current") : Loc.T("toolbar.switch.go"))
         {
             Enabled = !m.Active && !_switching,
         };
         switchItem.Click += (_, _) => Run(DoSwitch);
 
-        var aliasItem = new ToolStripMenuItem("编辑别名");
+        var aliasItem = new ToolStripMenuItem(Loc.T("menu.alias"));
         aliasItem.Click += (_, _) => Run(DoEditAlias);
 
-        var detailItem = new ToolStripMenuItem("查看详情");
+        var detailItem = new ToolStripMenuItem(Loc.T("menu.detail"));
         detailItem.Click += (_, _) => Run(OpenDetailSafe);
 
-        var disableItem = new ToolStripMenuItem(m.Disabled ? "启用账号" : "停用账号");
+        var disableItem = new ToolStripMenuItem(m.Disabled ? Loc.T("menu.enable") : Loc.T("menu.disableOne"));
         disableItem.Click += (_, _) => Run(DoToggleDisable);
 
-        var deleteItem = new ToolStripMenuItem("删除账号")
+        var deleteItem = new ToolStripMenuItem(Loc.T("menu.delete"))
         {
             ForeColor = Theme.Danger,
         };
@@ -1920,8 +2073,8 @@ sealed class MainForm : Form
         {
             MessageBox.Show(
                 this,
-                "无法打开详情：\n" + ex.Message,
-                "查看详情",
+                Loc.T("detail.openFailed", ex.Message),
+                Loc.T("menu.detail"),
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
         }
@@ -1931,7 +2084,7 @@ sealed class MainForm : Form
     {
         if (_selected is null)
         {
-            MessageBox.Show(this, "请先点击选择一个账号卡片。", "切换账号",
+            MessageBox.Show(this, Loc.T("action.selectFirst.switch"), Loc.T("switch.title"),
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -1952,17 +2105,17 @@ sealed class MainForm : Form
             Application.DoEvents();
             _engine.SwitchTo(num.ToString());
             var masked = Pii.MaskAccountLabel(to.Alias, to.Email);
-            _status.Text = $"已切换到 #{num} · {masked}";
+            _status.Text = Loc.T("switch.done", num, masked);
             Reload();
             _tray.ShowBalloonTip(
                 2000,
-                "切换成功",
-                $"当前使用 #{num} · {masked}",
+                Loc.T("switch.ok.title"),
+                Loc.T("switch.current", num, masked),
                 ToolTipIcon.Info);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "切换失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, ex.Message, Loc.T("switch.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         finally
         {
@@ -1978,16 +2131,15 @@ sealed class MainForm : Form
         {
             Cursor = Cursors.WaitCursor;
             _engine.Call("add_current", new { });
-            _status.Text = "已添加当前登录账号";
+            _status.Text = Loc.T("add.done");
             Reload();
         }
         catch (Exception ex)
         {
             MessageBox.Show(
                 this,
-                "无法添加当前账号。\n\n" + ex.Message +
-                "\n\n请先登录 Claude Code，或使用 --fixture 打开演示数据。",
-                "添加账号",
+                Loc.T("add.failed", ex.Message + Loc.T("add.failed.hint")),
+                Loc.T("toolbar.add"),
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
         }
@@ -2001,7 +2153,7 @@ sealed class MainForm : Form
     {
         if (_selected is null)
         {
-            MessageBox.Show(this, "请先选择账号卡片。", "停用 / 启用",
+            MessageBox.Show(this, Loc.T("action.selectFirst.alias"), Loc.T("menu.disable"),
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -2009,12 +2161,12 @@ sealed class MainForm : Form
         try
         {
             _engine.Call("set_disabled", new { id = m.Number.ToString(), disabled = !m.Disabled });
-            _status.Text = m.Disabled ? $"已重新启用 #{m.Number}" : $"已停用 #{m.Number}（仍可手动切换）";
+            _status.Text = m.Disabled ? Loc.T("enable.done", m.Number) : Loc.T("disable.done", m.Number);
             Reload();
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "操作失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, ex.Message, Loc.T("disable.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -2022,7 +2174,7 @@ sealed class MainForm : Form
     {
         if (_selected is null)
         {
-            MessageBox.Show(this, "请先选择账号卡片。", "编辑别名",
+            MessageBox.Show(this, Loc.T("action.selectFirst.alias"), Loc.T("menu.alias"),
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -2034,13 +2186,13 @@ sealed class MainForm : Form
             // null or empty clears alias — send empty string for clear.
             _engine.Call("set_alias", new { id = m.Number.ToString(), alias = alias ?? "" });
             _status.Text = string.IsNullOrEmpty(alias)
-                ? $"已清除 #{m.Number} 的别名"
-                : $"已设置别名：{alias}";
+                ? Loc.T("alias.cleared", m.Number)
+                : Loc.T("alias.set", alias);
             Reload();
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "别名保存失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, ex.Message, Loc.T("alias.saveFailed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -2048,7 +2200,7 @@ sealed class MainForm : Form
     {
         if (_selected is null)
         {
-            MessageBox.Show(this, "请先选择要删除的账号。", "删除账号",
+            MessageBox.Show(this, Loc.T("action.selectFirst.delete"), Loc.T("menu.delete"),
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -2062,13 +2214,13 @@ sealed class MainForm : Form
             CloseDetailWindow();
             _selected = null;
             var masked = Pii.MaskAccountLabel(m.Alias, m.Email);
-            _status.Text = $"已删除 #{m.Number} · {masked}";
-            _tray.ShowBalloonTip(1800, "账号已删除", $"已移除 #{m.Number} · {masked}", ToolTipIcon.Info);
+            _status.Text = Loc.T("delete.done", m.Number, masked);
+            _tray.ShowBalloonTip(1800, Loc.T("delete.title"), Loc.T("delete.removed", m.Number, masked), ToolTipIcon.Info);
             Reload();
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, ex.Message, "删除失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, ex.Message, Loc.T("delete.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         finally
         {

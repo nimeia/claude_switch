@@ -196,14 +196,14 @@ public static class Theme
 
     /// <summary>Percent is utilization (used share of the window).</summary>
     public static string UsageLabel(double? pct) =>
-        pct is null ? "暂无" : $"已用 {pct:0.#}%";
+        pct is null ? Loc.T("usage.none") : Loc.T("usage.usedOnly", $"{pct:0.#}");
 
     /// <summary>Compact used+remain for dense card meters (must fit ~120px).</summary>
     public static string UsageLabelCompact(double? pct, string? status = null)
     {
         if (pct is null) return UsageStatusShort(status);
         double remain = Math.Max(0, 100.0 - pct.Value);
-        return $"{pct:0.#}% · 剩{remain:0.#}%";
+        return Loc.T("usage.used", $"{pct:0.#}", $"{remain:0.#}");
     }
 
     /// <summary>Full used+remain for detail drawer / tooltips.</summary>
@@ -211,7 +211,7 @@ public static class Theme
     {
         if (pct is null) return UsageStatusLong(status);
         double remain = Math.Max(0, 100.0 - pct.Value);
-        return $"已用 {pct:0.#}% · 剩余 {remain:0.#}%";
+        return Loc.T("usage.usedFull", $"{pct:0.#}", $"{remain:0.#}");
     }
 
     /// <summary>
@@ -220,63 +220,73 @@ public static class Theme
     /// </summary>
     public static string UsageStatusShort(string? status) => status switch
     {
-        "needs-login" => "需重新登录",
-        "no-credential" => "无凭据",
-        "no-subscription" => "无订阅额度",
-        "api-key" => "API Key",
-        "unavailable" => "获取失败",
-        _ => "暂无",
+        "needs-login" => Loc.T("usage.needsLogin"),
+        "no-credential" => Loc.T("usage.noCredential"),
+        "no-subscription" => Loc.T("usage.noSubscription"),
+        "api-key" => Loc.T("usage.apiKey"),
+        "unavailable" => Loc.T("usage.unavailable"),
+        _ => Loc.T("usage.none"),
     };
 
     /// <summary>Drawer/tooltip wording — says what the user should do about it.</summary>
     public static string UsageStatusLong(string? status) => status switch
     {
-        "needs-login" => "凭据已失效（登录被清除或刷新令牌已失效）。请重新登录该账号后用「添加账号」覆盖此槽位。",
-        "no-credential" => "该槽位没有存储凭据，请重新添加账号。",
+        "needs-login" => Loc.T("usage.needsLoginLong"),
+        "no-credential" => Loc.T("usage.noCredentialLong"),
         // The API reports no windows for either case and gives no way to tell
         // them apart, so the wording covers both instead of guessing.
-        "no-subscription" => "该账号没有可用的订阅额度（订阅已到期，或从未订阅）。自动切换会跳过它，并在它是当前账号时切走。",
-        "api-key" => "API Key 账号没有订阅额度，不统计用量。",
-        "unavailable" => "暂时获取失败（网络或接口限流），稍后会自动重试。",
-        _ => "暂无数据",
+        "no-subscription" => Loc.T("usage.noSubscriptionLong"),
+        "api-key" => Loc.T("usage.apiKeyLong"),
+        "unavailable" => Loc.T("usage.unavailableLong"),
+        _ => Loc.T("usage.noneLong"),
     };
 
     /// <summary>
-    /// Per-window level: 充足 0–69 · 注意 70–89 · 临界 ≥90.
+    /// Per-window level: ample 0–69 · watch 70–89 · critical ≥90.
     /// </summary>
-    public static string UsageLevel(double? pct) =>
-        pct is null ? "未知"
-        : pct >= 90 ? "临界"
-        : pct >= 70 ? "注意"
-        : "充足";
+    public static string UsageLevel(double? pct) => Loc.T(LevelKey(pct));
+
+    private static string LevelKey(double? pct) =>
+        pct is null ? "level.unknown"
+        : pct >= 90 ? "level.critical"
+        : pct >= 70 ? "level.watch"
+        : "level.ample";
 
     /// <summary>Overall account health from max known window (same bands as UsageLevel).</summary>
     public static string UsageHealth(double? fiveHour, double? sevenDay)
     {
-        if (fiveHour is null && sevenDay is null) return "未知";
+        if (fiveHour is null && sevenDay is null) return Loc.T("level.unknown");
         double max = Math.Max(fiveHour ?? 0, sevenDay ?? 0);
         return UsageLevel(max);
     }
 
-    /// <summary>Short health tag for detail banner: 健康 / 注意 / 临界 / 未知.</summary>
+    /// <summary>
+    /// Short health tag for the detail banner: healthy / watch / critical / unknown.
+    /// </summary>
+    /// <remarks>
+    /// Derived from the numbers, not from <see cref="UsageHealth"/>'s text: a
+    /// translated word must never decide which band an account is in.
+    /// </remarks>
     public static string UsageHealthTag(double? fiveHour, double? sevenDay)
     {
-        var level = UsageHealth(fiveHour, sevenDay);
-        return level == "充足" ? "健康" : level;
+        if (fiveHour is null && sevenDay is null) return Loc.T("level.unknown");
+        double max = Math.Max(fiveHour ?? 0, sevenDay ?? 0);
+        string key = LevelKey(max);
+        return Loc.T(key == "level.ample" ? "level.healthy" : key);
     }
 
     /// <summary>Format remaining seconds for humans: 148 → 2分28秒.</summary>
     public static string FormatDuration(int totalSeconds)
     {
         if (totalSeconds < 0) totalSeconds = 0;
-        if (totalSeconds < 60) return $"{totalSeconds}秒";
+        if (totalSeconds < 60) return Loc.T("duration.s", totalSeconds);
         int m = totalSeconds / 60;
         int s = totalSeconds % 60;
         if (m < 60)
-            return s == 0 ? $"{m}分" : $"{m}分{s}秒";
+            return s == 0 ? Loc.T("duration.m", m) : Loc.T("duration.ms", m, s);
         int h = m / 60;
         m %= 60;
-        return m == 0 ? $"{h}小时" : $"{h}小时{m}分";
+        return m == 0 ? Loc.T("duration.h", h) : Loc.T("duration.hm", h, m);
     }
 
     /// <summary>
@@ -287,21 +297,21 @@ public static class Theme
         if (string.IsNullOrWhiteSpace(isoUtcOrOffset)) return null;
         if (!DateTimeOffset.TryParse(isoUtcOrOffset, out var when)) return null;
         var rem = when - DateTimeOffset.UtcNow;
-        if (rem.TotalSeconds <= 0) return "即将重置";
+        if (rem.TotalSeconds <= 0) return Loc.T("resets.soon");
         if (rem.TotalDays >= 1)
         {
             int d = (int)rem.TotalDays;
             int h = rem.Hours;
-            return h > 0 ? $"{d} 天 {h} 小时后" : $"{d} 天后";
+            return h > 0 ? Loc.T("resets.dh", d, h) : Loc.T("resets.d", d);
         }
         if (rem.TotalHours >= 1)
         {
             int h = (int)rem.TotalHours;
             int m = rem.Minutes;
-            return m > 0 ? $"{h} 小时 {m} 分后" : $"{h} 小时后";
+            return m > 0 ? Loc.T("resets.hm", h, m) : Loc.T("resets.h", h);
         }
         int mins = Math.Max(1, (int)Math.Ceiling(rem.TotalMinutes));
-        return $"{mins} 分后";
+        return Loc.T("resets.m", mins);
     }
 
 
@@ -360,16 +370,16 @@ public static class Theme
     }
 
     /// <summary>
-    /// Claude's <c>billingType</c> in Chinese; unknown values pass through raw so a
-    /// new payment channel shows up as itself rather than disappearing.
+    /// Claude's <c>billingType</c>, translated; unknown values pass through raw so
+    /// a new payment channel shows up as itself rather than disappearing.
     /// </summary>
     public static string BillingTypeLabel(string? billingType) =>
-        string.IsNullOrWhiteSpace(billingType) ? "未知" : billingType switch
+        string.IsNullOrWhiteSpace(billingType) ? Loc.T("billing.unknown") : billingType switch
         {
-            "stripe_subscription" => "Stripe 订阅",
-            "google_play_subscription" => "Google Play 订阅",
-            "apple_subscription" or "app_store_subscription" => "App Store 订阅",
-            "invoice" => "发票/对公",
+            "stripe_subscription" => Loc.T("billing.stripe"),
+            "google_play_subscription" => Loc.T("billing.googlePlay"),
+            "apple_subscription" or "app_store_subscription" => Loc.T("billing.appStore"),
+            "invoice" => Loc.T("billing.invoice"),
             _ => billingType,
         };
 

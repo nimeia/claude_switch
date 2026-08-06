@@ -25,6 +25,9 @@ public class AccountListFilterTests
     [Fact]
     public void Filters_by_email_substring()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         var all = DemoAccounts();
         var got = AccountListFilter.Filter(all, "alice");
         Assert.Single(got);
@@ -46,6 +49,9 @@ public class AccountListFilterTests
     [Fact]
     public void Zero_match_message_is_explicit()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         var all = DemoAccounts();
         var got = AccountListFilter.Filter(all, "zzz-no-such");
         Assert.Empty(got);

@@ -38,6 +38,9 @@ public class SwitchNoticeTests
     [Fact]
     public void The_body_says_where_why_and_that_work_continues()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         var body = SwitchNotice.Body("work", "personal", 92.4);
         Assert.Contains("work", body);
         Assert.Contains("personal", body);
@@ -63,6 +66,9 @@ public class SwitchNoticeTests
     [Fact]
     public void The_body_stays_short_enough_for_a_balloon()
     {
+        // Asserts wording, so it must name the language it asserts — the
+        // active one is process-wide and another test may have changed it.
+        using var lang = Loc.Scoped("zh-Hans");
         // Windows truncates balloon text; two lines is the budget.
         var body = SwitchNotice.Body("someone@example.com", "another@example.com", 100);
         Assert.Equal(2, body.Split('\n').Length);
