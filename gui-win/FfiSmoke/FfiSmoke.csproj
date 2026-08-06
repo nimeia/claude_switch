@@ -8,4 +8,15 @@
   <ItemGroup>
     <ProjectReference Include="..\ClaudeSwitch.Core\ClaudeSwitch.Core.csproj" />
   </ItemGroup>
+  <!-- Load path for DllImport("claude_switch") is the app directory. -->
+  <Target Name="CopyNativeDll" AfterTargets="Build">
+    <PropertyGroup>
+      <_NativeDll>$(MSBuildThisFileDirectory)..\..\target\release\claude_switch.dll</_NativeDll>
+    </PropertyGroup>
+    <Copy SourceFiles="$(_NativeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"
+          Condition="Exists('$(_NativeDll)')" />
+    <Warning Text="claude_switch.dll missing — run: cargo build -p claude-switch-ffi --release"
+             Condition="!Exists('$(_NativeDll)')" />
+  </Target>
 </Project>
+

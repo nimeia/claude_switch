@@ -76,9 +76,9 @@ var schema = snap["schemaVersion"]?.GetValue<int>() ?? 0;
 var accounts = snap["accounts"]?.AsArray()?.Count ?? 0;
 var active = snap["activeAccountNumber"]?.GetValue<int>() ?? -1;
 
-// Snapshot schema 2 added accounts[].plan; older 1 is still accepted here since
-// the smoke only reads fields both versions carry.
-if (schema is not (1 or 2) || accounts < 2 || active != 2)
+// Schema 2 added accounts[].plan; schema 3 added warmup. This smoke only reads
+// fields every version carries, so any schema ≥ 1 is fine.
+if (schema < 1 || accounts < 2 || active != 2)
 {
     Console.Error.WriteLine($"FAIL: schema={schema} accounts={accounts} active={active}");
     return 2;
