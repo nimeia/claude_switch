@@ -1,141 +1,127 @@
 # Claude Switch
 
-在多个 Claude Code 账号之间切换的 Windows 托盘工具。**额度用满时自动换号，不用重启 Claude Code，正在进行的会话直接继续。**
+A Windows tray app for switching between Claude Code accounts. **When a rate limit is hit, it switches for you — no Claude Code restart, and the session in progress keeps going.**
 
-<!-- 截图占位：主窗口（账号列表 + 活动条带）。见 docs/screenshots/ -->
+<!-- Screenshot placeholder: main window (account list + activity strip). See docs/screenshots/ -->
 
-## 安装
+## Install
 
-到 [Releases](../../releases) 下载，两种任选，内容一样：
+Download from [Releases](../../releases). Either option is the same build:
 
-| 下载 | 适合 |
+| Download | Best for |
 |---|---|
-| `ClaudeSwitch-<版本>-win-x64.zip` | **推荐**。解压即用，附使用说明与许可证；浏览器对 zip 的拦截比 exe 少 |
-| `ClaudeSwitch-<版本>-win-x64.exe` | 只要程序本身 |
+| `ClaudeSwitch-<version>-win-x64.zip` | **Recommended.** Unzip and run; includes quick-start notes and license. Browsers warn less on zip than on bare exe |
+| `ClaudeSwitch-<version>-win-x64.exe` | Just the program |
 
-不需要装 .NET，不需要装 Rust。
+No .NET install. No Rust install.
 
-**没有安装程序**——它是一个绿色可执行文件：不写注册表、不要管理员权限、放哪都行、删掉就干净。开机自启由应用内的复选框控制（写当前用户的启动项，取消勾选即移除）。
+**There is no installer** — it is a portable executable: no registry writes, no admin rights, put it anywhere, delete it to uninstall. Launch-at-login is controlled by a checkbox in the app (current-user Startup shortcut; uncheck to remove).
 
-唯一的例外：.NET 单文件包首次运行时会把自带运行时解压到 `%TEMP%\.net\ClaudeSwitch\`。这是 .NET 的标准行为，不是安装。
+The one exception: the .NET single-file bundle extracts its runtime on first launch to `%TEMP%\.net\ClaudeSwitch\`. That is normal .NET behavior, not an install.
 
-**首次运行 Windows 会弹 SmartScreen 警告**——这个程序没有代码签名证书（一张证书每年几百美元，暂时没买）。点「更多信息」→「仍要运行」。
+**Windows SmartScreen will warn on first run** — this program is not code-signed (a cert costs hundreds of dollars a year; we have not bought one yet). Click **More info** → **Run anyway**.
 
-从 zip 解压出来的文件同样带「来自网络」标记，**压缩包不会绕过这个提示**。
+Files extracted from the zip also carry the Mark of the Web, so **the zip does not bypass that prompt**.
 
-不放心的话，Release 里附了 SHA256，可以先核对：
+If you want to double-check the download, Releases include SHA256 checksums:
 
 ```powershell
 Get-FileHash ClaudeSwitch.exe -Algorithm SHA256
 ```
 
-或者直接[从源码构建](#从源码构建)——构建步骤和 CI 用的完全一样。
+Or [build from source](#build-from-source) — the steps are the same ones CI uses.
 
-## 它解决什么问题
+## What problem it solves
 
-你有多个 Claude 账号（个人 + 工作，或者几个订阅）。写着代码，5 小时额度满了，Claude Code 停在那里。你得手动导出凭据、换文件、重启。
+You have several Claude accounts (personal + work, or multiple subscriptions). Mid-session the 5-hour limit hits and Claude Code stops. You export credentials, swap files, restart.
 
-这个工具把这件事变成：**它自己换，你继续写。**
+This tool turns that into: **it switches; you keep writing.**
 
-- **切换对运行中的会话立即生效** — Windows 上凭据是文件，Claude Code 在文件变化时会重新读取，下一条消息就走新账号。不用重启，不用重开 VS Code 标签页。
-- **自动切换** — 任一账号 5 小时或 7 天额度达到阈值，自动切到余量最多的可用账号。也会在当前账号**坏掉**时切走（登录失效、订阅到期、槽位为空），这是单纯看阈值永远不会触发的情况。
-- **用量一目了然** — 每个账号的 5 小时 / 7 天余量、套餐（Pro / Max 20× / Team）、订阅开始日期。
-- **用量总览** — 你在 Claude Code 上到底干了多少：token 总量、活动日历、各项目分布。
+- **Switches take effect on the running session** — on Windows credentials are files; Claude Code re-reads them on change, so the next message uses the new account. No restart, no reopening VS Code tabs.
+- **Auto-switch** — when any account’s 5-hour or 7-day usage reaches the threshold, it moves to the healthiest available account. It also fails over when the current account is **broken** (login dead, subscription gone, empty slot) — cases a threshold alone would never catch.
+- **Usage at a glance** — per-account 5-hour / 7-day headroom, plan (Pro / Max 20× / Team), subscription start date.
+- **Usage overview** — what you actually did in Claude Code: total tokens, activity calendar, project breakdown.
 
-## 功能
+## Features
 
-### 账号
+### Accounts
 
-- 托管本机当前登录（「添加账号」），支持多槽位、别名、拖拽排序、停用
-- **当前账号由实时登录反查**，不是回放上次切换的记录——`claude /login` 或其它工具切换都能被正确识别
-- 套餐信息从各槽位自己的凭据 + `.claude.json` 备份读回，**不发任何请求**。不显示续费日期：OAuth token 没有账单权限，这个日期拿不到
+- Capture the machine’s current login (**Add account**); multi-slot, aliases, drag reorder, disable
+- **The active account is resolved from the live login**, not replayed from the last switch this app made — `claude /login` or other tools are recognized correctly
+- Plan info is read from each slot’s own credentials + `.claude.json` backup — **no network request**. Renewal dates are not shown: OAuth tokens have no billing scope, so that date is unavailable
 
-### 用量
+### Usage
 
-- 每个槽位单独获取，过期的 OAuth token 会先自动刷新（**当前登录账号的 token 不动**——轮换它会把你正在用的会话踢下线）
-- 取不到时明确说明原因（`需重新登录` / `无凭据` / `无订阅额度` / `API Key` / `获取失败`），而不是显示空白
+- Fetched per slot; expired OAuth tokens are refreshed first (**the currently logged-in account’s token is never rotated** — that would kick your live session)
+- When usage cannot be loaded, the reason is explicit (`Needs login` / `No credentials` / `No subscription quota` / `API Key` / `Fetch failed`) instead of a blank
 
-### 自动切换
+### Auto-switch
 
-- **只会切到有实测用量的账号**。没有数据的槽位被跳过，绝不当成"0% 已用、100% 空闲"——否则唯一那个不能干活的账号会排名第一
-- 当前账号坏掉时的等待策略按"等下去有没有意义"区分：登录被清除立即切走，网络抖动则等满 `unhealthyTicks` 次
-- 没有 access token 的凭据**拒绝激活**，手动切换也一样——那不是切换，是把你登出
+- **Only switches to accounts with measured usage.** Unmeasured slots are skipped and never ranked as “0% used / 100% free” — otherwise the one account that cannot work would rank first
+- Failover wait policy depends on whether waiting can help: wiped login fails over immediately; transient network faults wait for `unhealthyTicks`
+- Credentials without an access token **refuse activation**, including manual switch — that is not a switch, it is a logout
 
-### 并行会话
+### Parallel sessions
 
-**在不同终端里同时用不同账号。** 卡片右键「用此账号打开终端」，选一个目录就开一个新终端，
-里面的 Claude Code 以该账号登录——**默认登录、其它终端、VS Code 扩展全都不受影响**。
+**Use different accounts in different terminals at the same time.** Right-click a card → **Open terminal with this account**, pick a directory, and a new terminal runs Claude Code logged into that account — **the default login, other terminals, and the VS Code extension are unaffected**.
 
-原理是给每个账号准备一份独立的配置目录（`<备份目录>/sessions/<槽位>-<邮箱>/`），
-启动时用 `CLAUDE_CONFIG_DIR` 指过去。Claude Code 的配置和凭据查找都认这个变量，所以隔离是完整的。
+Each account gets its own config directory (`<backup root>/sessions/<slot>-<email>/`), pointed at with `CLAUDE_CONFIG_DIR` on launch. Claude Code resolves config and credentials through that variable, so isolation is complete.
 
-- **目录可以绑定账号**——「目录」窗口里右键 →「绑定到账号」。绑定后从「继续会话」或「目录」窗口打开，
-  自动用该账号，不用每次选。子目录继承最近的上级绑定
-- **共享你自己的配置**：`settings.json` / `CLAUDE.md` / `skills/` / `commands/` / `agents/` 和
-  用户级 MCP 服务器每次启动都从 `~/.claude` 同步过去。会话里改的会在下次启动被覆盖——改就改 `~/.claude`
-- **对话历史不复制**（复制等于分叉）。「目录」窗口、用量总览、「继续会话」会把每个会话配置**一起扫描并合并**，
-  所以哪个账号做的事都看得见，同一个目录只出现一次
-- **自动切换会跳过有终端在跑的账号**——它的额度本来就在被消耗，再把它设成默认登录会让同一个
-  refresh token 出现在两个配置目录里
-- 要打开的账号如果**就是当前默认登录**，直接起裸 `claude`，不建第二份凭据副本
-- 账号删除时，它的会话配置和目录绑定一起清掉；有终端在跑时拒绝删除
+- **Directories can be bound to an account** — in the **Directories** window, right-click → **Bind to account**. Opens from **Resume session** or **Directories** then use that account automatically. Subdirectories inherit the nearest bound ancestor
+- **Your own config is shared**: `settings.json` / `CLAUDE.md` / `skills/` / `commands/` / `agents/` and user-level MCP servers are re-synced from `~/.claude` on every session start. Edits inside the session profile are overwritten next launch — change them in `~/.claude`
+- **Transcript history is not copied** (copying would fork). **Directories**, usage overview, and **Resume session** scan every session profile and **merge** results, so work done under any account is visible and each directory appears once
+- **Auto-switch skips accounts that already have a live terminal** — their quota is already being spent, and promoting them to the default login would put the same refresh token in two config dirs
+- If the target account **is already the default login**, a bare `claude` is started with no second credentials copy
+- Deleting an account removes its session profile and directory bindings; deletion is refused while a terminal is still running
 
-### 目录与会话
+### Directories and sessions
 
-- 工具栏「继续会话」下拉和托盘菜单直接列出各目录最近的会话，**一步回到上次的对话**
-- 「目录」窗口里可以浏览全部目录与每个目录的完整会话列表
-- 恢复会话时**直接运行 `claude`，不经 cmd**——终端由你自己的「默认终端应用」设置决定，
-  Claude 退出后窗口正常关闭，不会留一个 cmd 提示符
-- 累计 token 统计按需执行（读全部会话记录，几百毫秒），结果带可视化
-- **目录本身与账号无关**——Claude Code 不记录一段对话属于哪个账号。「账号」列显示的是你给这个目录
-  设的绑定（决定从这里打开时用哪个账号），不是从对话记录里读出来的
+- The toolbar **Resume session** dropdown and the tray menu list recent sessions per directory — **one step back into the last conversation**
+- The **Directories** window browses every directory and its full session list
+- Resume runs **`claude` directly, not via cmd** — the terminal is whatever your **default terminal app** is set to; when Claude exits the window closes cleanly (no leftover cmd prompt)
+- Aggregate token stats run on demand (reads all transcripts, typically a few hundred ms) with visualization
+- **Directories themselves are account-agnostic** — Claude Code does not record which account owned a conversation. The **Account** column is the binding you set for that directory (which account opens from there), not something read from the transcript
 
-### 界面语言
+### UI language
 
-英文 / 简体中文，工具栏右侧的语言按钮随时切换，**不用重启**——切完主窗口、卡片、状态栏立刻换语言，
-其它窗口下次打开时生效。首次启动按系统语言自动选择，选过之后记住你的选择。
+English / Simplified Chinese via the language button on the right of the toolbar — **no restart**. Main window, cards, and status bar update immediately; other windows pick it up the next time they open. First launch follows the system language; after you pick one, that choice is remembered.
 
-需要临时指定一次，可以用环境变量：`CLAUDE_SWITCH_LANG=en`（优先级高于记住的选择）。
+For a one-off override: `CLAUDE_SWITCH_LANG=en` (takes priority over the remembered choice).
 
 <details>
-<summary>想加一门语言？</summary>
+<summary>Want to add a language?</summary>
 
-复制 `gui-win/ClaudeSwitch.App/Strings/en.json` 改名为你的语言代码（如 `ja.json`），翻译值，
-然后在 `Loc.Available` 里加一行。文件是嵌入资源，不用改构建脚本。
+Copy `gui-win/ClaudeSwitch.App/Strings/en.json` to your language code (e.g. `ja.json`), translate the values, and add a row in `Loc.Available`. Catalogs are embedded resources — no build-script changes.
 
-`LocTests` 会强制每份词条与英文**键完全一致**、`{0}` 占位符完全对应——漏翻或写错占位符是测试失败，
-不会变成用户界面上的半句英文。
+`LocTests` requires every catalog to match English **keys exactly** and `{0}` placeholders exactly — a missing string or wrong placeholder fails the test instead of shipping half-English UI.
 
-一句实话：**英文比中文宽 1.5–2 倍**，这个项目为此改过工具栏、卡片量表、订阅字段列和热力图图例的宽度。
-加语言时请把界面渲染出来看一眼，别只看 JSON。
+Practical note: **English is often 1.5–2× wider than Chinese**. This project already widened the toolbar, card meters, subscription columns, and heatmap legend for that. Render the UI when you add a language; do not judge from the JSON alone.
 </details>
 
-## 网络
+## Networking
 
-请求遵循 `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`，Windows 上还会读系统代理设置——和 Claude Code 走同一条路。
+Requests honor `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, and on Windows also read the system proxy settings — the same path Claude Code uses.
 
-> 如果你的网络只能通过代理访问 Anthropic，直连会收到 `403 "Request not allowed"`。这个错误**看起来像鉴权失败，其实是网络不通**。代理配置在启动时读取，改了要重启。
+> If your network can only reach Anthropic through a proxy, a direct connection returns `403 "Request not allowed"`. That error **looks like auth failure but is network reachability**. Proxy settings are read at startup; restart after changing them.
 
-## 数据存放
+## Where data lives
 
-| 位置 | 内容 |
+| Location | Contents |
 |---|---|
-| `~/.claude-swap-backup/credentials/` | 各槽位凭据（加密存储） |
-| `~/.claude-swap-backup/configs/` | 各槽位 `.claude.json` 快照 |
-| `~/.claude-swap-backup/sequence.json` | 槽位顺序与当前账号 |
-| `~/.claude-swap-backup/sessions/` | 各账号的会话配置（含它们自己的对话历史） |
-| `~/.claude-swap-backup/mappings.json` | 目录 → 账号绑定（本机专有） |
-| `~/.claude-swap-backup/cache/` | 用量总览缓存（可随时删除） |
-| `%LOCALAPPDATA%\ClaudeSwitch\ui-prefs.ini` | 界面偏好（主题、语言、隐藏邮箱等） |
-| `%TEMP%\.net\ClaudeSwitch\` | 单文件包自解压的运行时 |
+| `~/.claude-swap-backup/credentials/` | Per-slot credentials (encrypted) |
+| `~/.claude-swap-backup/configs/` | Per-slot `.claude.json` snapshots |
+| `~/.claude-swap-backup/sequence.json` | Slot order and current account |
+| `~/.claude-swap-backup/sessions/` | Per-account session profiles (including their own transcript history) |
+| `~/.claude-swap-backup/mappings.json` | Directory → account bindings (machine-local) |
+| `~/.claude-swap-backup/cache/` | Usage-overview cache (safe to delete) |
+| `%LOCALAPPDATA%\ClaudeSwitch\ui-prefs.ini` | UI prefs (theme, language, hide email, etc.) |
+| `%TEMP%\.net\ClaudeSwitch\` | Self-extracted single-file runtime |
 
-格式与 [claude-swap](https://github.com/realiti4/claude-swap)（Python CLI）兼容，两者可以共用同一份备份。
-会话配置的布局也和它的 `cswap run` 一致，只有内部标记文件名不同（`.cswitch-*` 对 `.cswap-*`）——
-两边都能读同一批 profile，但各自管各自的标记。
+Layout is compatible with [claude-swap](https://github.com/realiti4/claude-swap) (Python CLI); both can share the same backup tree. Session profile layout matches its `cswap run` layout; only internal marker filenames differ (`.cswitch-*` vs `.cswap-*`) — both can read the same profiles, each managing its own markers.
 
-## 从源码构建
+## Build from source
 
-需要 Rust 1.80+ 和 .NET 8 SDK。
+Requires Rust 1.80+ and the .NET 8 SDK.
 
 ```bash
 cargo build -p claude-switch-ffi --release
@@ -143,15 +129,15 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
   -c Release -p:PublishSingleFileBundle=true -o dist
 ```
 
-产物是 `dist/ClaudeSwitch.exe` 一个文件。两步顺序不能反——原生引擎必须先构建，否则 publish 会直接报错拒绝，而不是打出一个启动即崩的包。
+Output is a single `dist/ClaudeSwitch.exe`. Order matters — the native engine must be built first, or publish fails hard instead of shipping a binary that dies on launch.
 
-要生成和 Release 一样的下载物（exe + zip + 校验和）：
+To produce the same artifacts as a Release (exe + zip + checksums):
 
 ```powershell
 ./packaging/pack.ps1 -PublishDir dist -OutDir artifacts
 ```
 
-开发时：
+For development:
 
 ```bash
 cargo test --workspace
@@ -159,44 +145,44 @@ dotnet test gui-win/ClaudeSwitch.App.Tests/ClaudeSwitch.App.Tests.csproj
 dotnet run --project gui-win/ClaudeSwitch.App -c Release -- --fixture %TEMP%\cswitch-demo
 ```
 
-`--fixture` 用一份隔离的演示数据启动（六个账号，覆盖各种套餐），不碰你真实的 Claude 登录。
+`--fixture` starts with isolated demo data (six accounts across plan types) and does not touch your real Claude login.
 
-## 项目结构
+## Project layout
 
 ```
-crates/core     claude-switch-core   锁、凭据、切换、用量、自动切换、会话模式、Engine
-crates/ffi      claude_switch.dll    C ABI（cs_engine_*）
-gui-win/        Windows 托盘 GUI（WinForms）+ FfiSmoke + P/Invoke
-gui-win/ClaudeSwitch.App/Strings/    界面词条（每种语言一份 JSON，嵌入资源）
+crates/core     claude-switch-core   locks, credentials, switch, usage, autoswitch, session mode, Engine
+crates/ffi      claude_switch.dll    C ABI (cs_engine_*)
+gui-win/        Windows tray GUI (WinForms) + FfiSmoke + P/Invoke
+gui-win/ClaudeSwitch.App/Strings/    UI catalogs (one JSON per language, embedded)
 ```
 
-- [docs/design-claude-switch.md](docs/design-claude-switch.md) — 架构、FFI、界面设计
-- 行为规范来自上游 Python CLI [claude-swap](https://github.com/realiti4/claude-swap)——凭据处理、三锁切换事务、自动切换、轮询策略都以它为准。
-  开发时可把它 clone 到 `reference/claude-swap/`（该目录不纳入版本控制）。
+- [docs/design-claude-switch.md](docs/design-claude-switch.md) — architecture, FFI, UI design
+- Behavior is specified by the upstream Python CLI [claude-swap](https://github.com/realiti4/claude-swap) — credentials, three-lock switch transactions, autoswitch, and poll policy follow it.
+  For development you can clone it to `reference/claude-swap/` (that path is not version-controlled).
 
-版本号以根目录 `VERSION` 为准，必须与 `Cargo.toml` 的 `[workspace.package].version` 一致。
+Version is the root `VERSION` file and must match `Cargo.toml` `[workspace.package].version`.
 
-## CI 与发布
+## CI and release
 
-每个 push / PR 在 Windows 上跑完整门禁：Rust（fmt / clippy / test）→ GUI 测试 → 单文件 publish → 打包（exe + zip + SHA256）→ 启动冒烟。产物作为 workflow artifact 保留 14 天。
+Every push / PR runs a full Windows gate: Rust (fmt / clippy / test) → GUI tests → single-file publish → package (exe + zip + SHA256) → launch smoke. Artifacts are kept as workflow artifacts for 14 days.
 
-发版（维护者）：
+To cut a release (maintainers):
 
 ```powershell
-# 1. 改 VERSION，并同步 Cargo.toml 的 workspace.package.version
-# 2. 提交后打 tag 并推送（tag 去掉 v 前缀必须等于 VERSION）
+# 1. Bump VERSION and the matching Cargo.toml workspace.package.version
+# 2. Commit, then tag and push (tag without the leading v must equal VERSION)
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-推送 `v*` tag 会触发 [release](.github/workflows/release.yml) workflow：构建 → 冒烟 → 创建 GitHub Release 并上传 `ClaudeSwitch-<版本>-win-x64.zip` / `.exe` / `SHA256SUMS.txt`。
+Pushing a `v*` tag runs the [release](.github/workflows/release.yml) workflow: build → smoke → create a GitHub Release and upload `ClaudeSwitch-<version>-win-x64.zip` / `.exe` / `SHA256SUMS.txt`.
 
-预演（不发版）：Actions → **release** → Run workflow，保持 `dry_run=true`。
+Dry run (no publish): Actions → **release** → Run workflow, leave `dry_run=true`.
 
-## 平台
+## Platforms
 
-目前只有 Windows。核心是跨平台的 Rust，macOS / Linux 的原生外壳在设计文档里但还没做。
+Windows only for now. The core is cross-platform Rust; macOS / Linux native shells are in the design doc but not built yet.
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。备份格式与 claude-swap 保持互通。
+MIT — see [LICENSE](LICENSE). Backup format stays interoperable with claude-swap.
