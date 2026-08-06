@@ -14,6 +14,7 @@ pub mod plan;
 pub mod projects;
 pub mod proxy;
 pub mod sequence;
+pub mod session;
 pub mod settings;
 pub mod switcher;
 pub mod usage;

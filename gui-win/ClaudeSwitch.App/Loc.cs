@@ -119,6 +119,23 @@ internal static class Loc
         }
     }
 
+    /// <summary>
+    /// Look up a count-dependent string: <c>&lt;key&gt;.one</c> or <c>&lt;key&gt;.other</c>.
+    /// </summary>
+    /// <remarks>
+    /// English needs the distinction and writing "1 terminal(s)" to avoid it
+    /// looks like a placeholder that was never finished. Two keys is the whole
+    /// mechanism: languages without a plural form (Chinese among them) simply
+    /// give both the same text, and the key-parity test still requires both to
+    /// exist so a new language cannot ship half of one.
+    ///
+    /// Deliberately not a full CLDR plural-category implementation — no shipped
+    /// language needs "few"/"many", and inventing the machinery before there is
+    /// a language that uses it would be untested code.
+    /// </remarks>
+    public static string Plural(string key, int count) =>
+        T(count == 1 ? $"{key}.one" : $"{key}.other", count);
+
     /// <summary>Every key in a catalogue — used by the completeness test.</summary>
     public static IReadOnlyCollection<string> Keys(string code) => Load(code).Keys;
 

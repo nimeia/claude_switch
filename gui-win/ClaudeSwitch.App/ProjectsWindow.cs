@@ -54,8 +54,18 @@ internal sealed class ProjectsWindow : Form
         long? LastActiveMs,
         string? LastPrompt,
         bool Registered,
-        string? TranscriptDir,
-        long TranscriptBytes);
+        /// <summary>
+        /// Every folder holding this directory's transcripts.
+        ///
+        /// More than one once session mode is used: the default profile and each
+        /// session profile keep their own. Reading only the first would hide
+        /// whole conversations from the list and undercount the totals.
+        /// </summary>
+        IReadOnlyList<string> TranscriptDirs,
+        long TranscriptBytes)
+    {
+        public bool HasTranscripts => TranscriptDirs.Count > 0;
+    }
 
     private sealed record SessionRow(
         string Id,
@@ -91,14 +101,15 @@ internal sealed class ProjectsWindow : Form
         // directories here are in fact both called "repo".
         ConfigureList(
             _dirs,
-            (Loc.T("proj.col.dir"), -1), (Loc.T("proj.col.sessions"), 48),
+            (Loc.T("proj.col.dir"), -1), (Loc.T("proj.col.account"), 118),
+            (Loc.T("proj.col.sessions"), 48),
             (Loc.T("proj.col.lastActive"), 104), (Loc.T("proj.col.size"), 74));
         ConfigureList(
             _sessions,
             (Loc.T("proj.col.session"), -1), (Loc.T("proj.col.started"), 104),
             (Loc.T("proj.col.size"), 74));
         // Counts and sizes are numbers; left-aligned they read as ragged text.
-        _dirs.RightAlignedColumns.UnionWith([1, 3]);
+        _dirs.RightAlignedColumns.UnionWith([2, 4]);
         _sessions.RightAlignedColumns.Add(2);
 
         _dirs.ShowItemToolTips = true;
@@ -114,6 +125,18 @@ internal sealed class ProjectsWindow : Form
             if (SelectedSession is { } s) Clipboard.SetText(s.Id);
         });
         _sessions.ContextMenuStrip = sessionMenu;
+
+        // Binding lives on the directory, because "which account does this work
+        // belong to" is a property of the project, not of one conversation.
+        var dirMenu = new ContextMenuStrip();
+        dirMenu.Opening += (_, e) =>
+        {
+            if (SelectedProject is null) { e.Cancel = true; return; }
+            BuildDirectoryMenu(dirMenu);
+        };
+        // A menu with no items never opens, so seed one the Opening handler replaces.
+        dirMenu.Items.Add(new ToolStripMenuItem("…") { Enabled = false });
+        _dirs.ContextMenuStrip = dirMenu;
 
         // Each list sits inside a rounded surface, like the account cards.
         var dirsCard = new CardPanel { Dock = DockStyle.Fill };
@@ -323,6 +346,7 @@ internal sealed class ProjectsWindow : Form
         {
             var node = _engine.Call("list_projects");
             _rows = ParseProjects(node);
+            _bindings = DirectoryBindings.Load(_engine);
             _loaded = true;
         }
         catch (Exception ex)
@@ -344,6 +368,7 @@ internal sealed class ProjectsWindow : Form
                     ? Loc.T("proj.tooltip.recent", r.Name, p)
                     : r.Name,
             };
+            item.SubItems.Add(_bindings.Label(r.Path));
             item.SubItems.Add(r.SessionCount.ToString());
             item.SubItems.Add(Theme.FormatCompactEpoch(r.LastActiveMs) ?? Loc.T("common.dash"));
             item.SubItems.Add(r.TranscriptBytes > 0 ? FormatBytes(r.TranscriptBytes) : Loc.T("common.dash"));
@@ -390,11 +415,20 @@ internal sealed class ProjectsWindow : Form
                 p["lastActiveMs"]?.GetValue<long>(),
                 p["lastPrompt"]?.GetValue<string>(),
                 p["registered"]?.GetValue<bool>() ?? false,
-                p["transcriptDir"]?.GetValue<string>(),
+                (p["transcriptDirs"] as JsonArray ?? [])
+                    .Select(d => d?.GetValue<string>())
+                    .Where(d => !string.IsNullOrEmpty(d))
+                    .Select(d => d!)
+                    .ToList(),
                 p["transcriptBytes"]?.GetValue<long>() ?? 0));
         }
         return list;
     }
+
+    /// <summary>
+    /// Directory → account bindings, refreshed with the directory list.
+    /// </summary>
+    private DirectoryBindings _bindings = DirectoryBindings.Empty;
 
     private ProjectRow? SelectedProject =>
         _dirs.SelectedItems.Count > 0 ? _dirs.SelectedItems[0].Tag as ProjectRow : null;
@@ -409,11 +443,12 @@ internal sealed class ProjectsWindow : Form
         _sessions.Items.Clear();
 
         var project = SelectedProject;
-        if (project?.TranscriptDir is { } dir)
+        if (project is { HasTranscripts: true })
         {
             try
             {
-                var node = _engine.Call("list_sessions", new { transcriptDir = dir });
+                var node = _engine.Call(
+                    "list_sessions", new { transcriptDirs = project.TranscriptDirs });
                 if (node["sessions"] is JsonArray arr)
                 {
                     foreach (var s in arr)
@@ -457,21 +492,165 @@ internal sealed class ProjectsWindow : Form
         var project = SelectedProject;
         _resume.Enabled = SelectedSession is not null && project is not null;
         _openDir.Enabled = project is not null && Directory.Exists(project.Path);
-        _stats.Enabled = project?.TranscriptDir is not null;
+        _stats.Enabled = project is { HasTranscripts: true };
     }
 
     /// <summary>Resume the selected conversation in the user's own terminal.</summary>
     private void ResumeSelected()
     {
         if (SelectedProject is not { } project || SelectedSession is not { } session) return;
+        string shortId = session.Id[..Math.Min(8, session.Id.Length)];
+
+        // A bound directory resumes under its own account; anything else keeps
+        // the original behaviour of plain `claude --resume`.
+        if (_bindings.Resolve(project.Path).Binding?.Number is { } number)
+        {
+            var result = SessionMode.Launch(_engine, number.ToString(), project.Path, session.Id);
+            if (!result.Launched)
+            {
+                MessageBox.Show(
+                    this, result.Problem, Loc.T("resume.failed.title"),
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            _hint.Text = result.Note ?? Loc.T("proj.resumedAs", project.Name, shortId, number);
+            return;
+        }
 
         if (ClaudeCli.Resume(project.Path, session.Id) is { } problem)
         {
             MessageBox.Show(this, problem, Loc.T("resume.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
-        _hint.Text = Loc.T(
-            "proj.resumed", project.Name, session.Id[..Math.Min(8, session.Id.Length)]);
+        _hint.Text = Loc.T("proj.resumed", project.Name, shortId);
+    }
+
+    /// <summary>Per-directory actions: open a terminal, and manage the binding.</summary>
+    private void BuildDirectoryMenu(ContextMenuStrip menu)
+    {
+        menu.Items.Clear();
+        if (SelectedProject is not { } project) return;
+
+        var match = _bindings.Resolve(project.Path);
+
+        var open = new ToolStripMenuItem(Loc.T("proj.menu.openTerminal"))
+        {
+            Enabled = Directory.Exists(project.Path),
+            ToolTipText = Loc.T("proj.menu.openTerminal.tip"),
+        };
+        open.Click += (_, _) => OpenTerminalHere(project, match.Binding);
+        menu.Items.Add(open);
+        menu.Items.Add(new ToolStripSeparator());
+
+        // Every non-disabled account, so binding is one click rather than a
+        // dialog. The list is short by construction — these are the user's own
+        // Claude subscriptions, not an arbitrary collection.
+        var bind = new ToolStripMenuItem(Loc.T("proj.menu.bind"));
+        foreach (var (number, email) in Accounts())
+        {
+            var choice = new ToolStripMenuItem(Loc.T("proj.bindChoice", number, Pii.MaskEmail(email)))
+            {
+                Checked = match.Binding?.Number == number && !match.Inherited,
+                CheckOnClick = false,
+            };
+            int slot = number;
+            choice.Click += (_, _) => SetBinding(project.Path, slot.ToString());
+            bind.DropDownItems.Add(choice);
+        }
+        if (bind.DropDownItems.Count == 0)
+        {
+            bind.DropDownItems.Add(new ToolStripMenuItem(Loc.T("proj.bindNone")) { Enabled = false });
+        }
+        menu.Items.Add(bind);
+
+        var unbind = new ToolStripMenuItem(Loc.T("proj.menu.unbind"))
+        {
+            // Only an exact binding can be removed here: the inherited one
+            // belongs to an ancestor row, and deleting it from this row would
+            // silently change every sibling directory too.
+            Enabled = match.Found && !match.Inherited,
+        };
+        unbind.Click += (_, _) => ClearBinding(project.Path);
+        menu.Items.Add(unbind);
+    }
+
+    /// <summary>Slots available to bind, newest snapshot order.</summary>
+    private List<(int Number, string Email)> Accounts()
+    {
+        var list = new List<(int, string)>();
+        try
+        {
+            if (_engine.Snapshot()["accounts"] is not JsonArray arr) return list;
+            foreach (var a in arr)
+            {
+                if (a is null) continue;
+                if (a["disabled"]?.GetValue<bool>() == true) continue;
+                list.Add((a["number"]?.GetValue<int>() ?? 0, a["email"]?.GetValue<string>() ?? ""));
+            }
+        }
+        catch (Exception)
+        {
+            // An unreadable snapshot leaves the submenu empty, which the caller
+            // labels; it must not take the whole context menu down with it.
+        }
+        return list;
+    }
+
+    private void SetBinding(string path, string id)
+    {
+        try
+        {
+            _engine.Call("mapping_set", new { path, id });
+            _bindings = DirectoryBindings.Load(_engine);
+            Reload();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, Loc.T("proj.bindFailed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void ClearBinding(string path)
+    {
+        try
+        {
+            _engine.Call("mapping_remove", new { path });
+            _bindings = DirectoryBindings.Load(_engine);
+            Reload();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, Loc.T("proj.bindFailed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    /// <summary>
+    /// Open a terminal in this directory — as its bound account, or the default login.
+    /// </summary>
+    private void OpenTerminalHere(ProjectRow project, Binding? binding)
+    {
+        if (binding?.Number is { } number)
+        {
+            var result = SessionMode.Launch(_engine, number.ToString(), project.Path);
+            _hint.Text = result.Launched
+                ? result.Note ?? Loc.T("proj.openedAs", project.Name, number)
+                : result.Problem ?? "";
+            if (!result.Launched)
+            {
+                MessageBox.Show(
+                    this, result.Problem, Loc.T("session.failed.title"),
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            return;
+        }
+
+        // Unbound: exactly what typing `claude` here would do.
+        if (ClaudeCli.Resume(project.Path) is { } problem)
+        {
+            MessageBox.Show(this, problem, Loc.T("session.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        _hint.Text = Loc.T("proj.openedDefault", project.Name);
     }
 
     private void OpenSelectedDirectory()
@@ -493,7 +672,7 @@ internal sealed class ProjectsWindow : Form
     /// <summary>On-demand cumulative scan — the only path that reads whole transcripts.</summary>
     private void ComputeStats()
     {
-        if (SelectedProject is not { } project || project.TranscriptDir is not { } dir) return;
+        if (SelectedProject is not { HasTranscripts: true } project) return;
 
         _stats.Enabled = false;
         _statsText.Text = Loc.T("proj.scanning", FormatBytes(project.TranscriptBytes));
@@ -501,7 +680,8 @@ internal sealed class ProjectsWindow : Form
         var sw = Stopwatch.StartNew();
         try
         {
-            var s = _engine.Call("project_stats", new { transcriptDir = dir });
+            var s = _engine.Call(
+                "project_stats", new { transcriptDirs = project.TranscriptDirs });
             sw.Stop();
             long input = s["inputTokens"]?.GetValue<long>() ?? 0;
             long output = s["outputTokens"]?.GetValue<long>() ?? 0;

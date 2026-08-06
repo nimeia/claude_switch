@@ -1059,8 +1059,37 @@ sealed class MainForm : Form
         items.Add(new ToolStripMenuItem(Loc.T("resume.all"), null, (_, _) => ShowProjectsWindow()));
     }
 
+    /// <summary>
+    /// Reopen a conversation, under the directory's bound account when it has one.
+    /// </summary>
+    /// <remarks>
+    /// A binding is the answer to "which account does this directory belong to",
+    /// so resuming there without honouring it would use the wrong one. An
+    /// unbound directory keeps the original behaviour exactly: plain
+    /// <c>claude --resume</c> on the default login.
+    /// </remarks>
     private void ResumeSession(RecentSession session)
     {
+        if (SessionMode.BoundAccount(_engine, session.Path) is { } bound)
+        {
+            var result = SessionMode.Launch(
+                _engine, bound.Number.ToString(), session.Path, session.SessionId);
+            if (!result.Launched)
+            {
+                MessageBox.Show(
+                    this,
+                    result.Problem,
+                    Loc.T("resume.failed.title"),
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+            _baseStatus = Loc.T("status.resumedAs", session.Name, Pii.MaskEmail(bound.Email));
+            ComposeStatusLine();
+            Reload();
+            return;
+        }
+
         if (ClaudeCli.Resume(session.Path, session.SessionId) is { } problem)
         {
             MessageBox.Show(this, problem, Loc.T("resume.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -1068,6 +1097,34 @@ sealed class MainForm : Form
         }
         _baseStatus = Loc.T("status.resumed", session.Name);
         ComposeStatusLine();
+    }
+
+    /// <summary>Open a terminal running one account, leaving the default login alone.</summary>
+    private void DoOpenSessionTerminal(AccountCardModel model)
+    {
+        if (SessionMode.AskDirectory(this) is not { } directory)
+        {
+            return;
+        }
+
+        var result = SessionMode.Launch(_engine, model.Number.ToString(), directory);
+        if (!result.Launched)
+        {
+            MessageBox.Show(
+                this,
+                result.Problem,
+                Loc.T("session.failed.title"),
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        _baseStatus = result.Note
+            ?? Loc.T("status.sessionOpened", model.Number, Pii.MaskEmail(model.Email));
+        ComposeStatusLine();
+        // The new terminal writes its PID file as it starts, so the card's
+        // session count only becomes true on the next snapshot.
+        Reload();
     }
 
     private ContextMenuStrip BuildTrayMenu()
@@ -1431,10 +1488,18 @@ sealed class MainForm : Form
 
         static string Cred(string email, string token, string? sub, string? rate)
         {
+            // Shaped like a real credential, expiry included: a session profile
+            // seeded from this is what Claude Code would actually be handed, and
+            // without `expiresAt` it reads the profile as logged out — which
+            // would make the demo misrepresent the feature.
+            long expires = DateTimeOffset.UtcNow.AddHours(8).ToUnixTimeMilliseconds();
             var oauth = new JsonObject
             {
                 ["accessToken"] = token,
                 ["refreshToken"] = "r",
+                ["expiresAt"] = expires,
+                ["refreshTokenExpiresAt"] = expires + 30L * 24 * 3600 * 1000,
+                ["scopes"] = new JsonArray("user:inference", "user:profile"),
                 ["emailAddress"] = email,
             };
             if (sub is not null) oauth["subscriptionType"] = sub;
@@ -1526,6 +1591,83 @@ sealed class MainForm : Form
                 "2025-12-20T00:00:00Z", orgName: "Globex", role: "member", seat: "premium"),
             alias = "lab",
         });
+
+        SeedFixtureSession(eng, Path.Combine(root, ".claude"));
+    }
+
+    /// <summary>
+    /// A session profile with a live terminal, so the demo shows that state.
+    /// </summary>
+    /// <remarks>
+    /// Liveness is read from Claude Code's own <c>sessions/&lt;pid&gt;.json</c>
+    /// files and verified against the running process, so a made-up pid would be
+    /// filtered out immediately. The fixture claims its own process id — the one
+    /// pid guaranteed to still be alive when the window paints.
+    /// </remarks>
+    private static void SeedFixtureSession(Engine eng, string defaultHome)
+    {
+        try
+        {
+            var launch = eng.Call("session_prepare", new { id = "3" });
+            if (launch["configDir"]?.GetValue<string>() is not { Length: > 0 } dir) return;
+
+            var pids = Path.Combine(dir, "sessions");
+            Directory.CreateDirectory(pids);
+            int pid = Environment.ProcessId;
+            File.WriteAllText(
+                Path.Combine(pids, $"{pid}.json"),
+                new JsonObject
+                {
+                    ["pid"] = pid,
+                    ["sessionId"] = "demo-session",
+                    ["cwd"] = @"D:\work\acme",
+                    ["startedAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ["entrypoint"] = "cli",
+                }.ToJsonString());
+
+            eng.Call("mapping_set", new { path = @"D:\work\acme", id = "3" });
+
+            // One directory worked in from both the default login and this
+            // session profile — the case the directory list has to merge rather
+            // than show twice, and the one that regresses silently if the
+            // scanners ever go back to a single root.
+            SeedTranscript(defaultHome, @"D:\work\acme", "s-default");
+            SeedTranscript(dir, @"D:\work\acme", "s-session");
+            SeedTranscript(defaultHome, @"D:\personal\notes", "s-notes");
+        }
+        catch (Exception)
+        {
+            // The fixture is a demo; a slot that cannot host a session profile
+            // just shows the app without one.
+        }
+    }
+
+    /// <summary>Write one transcript under a config home, as Claude Code would.</summary>
+    private static void SeedTranscript(string configHome, string cwd, string sessionId)
+    {
+        // Claude Code encodes the directory into the folder name; the scanners
+        // read the real path out of the transcript, so any stable slug will do.
+        string slug = cwd.Replace('\\', '-').Replace(':', '-').Replace('/', '-');
+        string dir = Path.Combine(configHome, "projects", slug);
+        Directory.CreateDirectory(dir);
+
+        var lines = new List<string>();
+        for (int i = 0; i < 3; i++)
+        {
+            lines.Add(new JsonObject
+            {
+                ["type"] = "user",
+                ["cwd"] = cwd,
+                ["sessionId"] = sessionId,
+                ["timestamp"] = DateTimeOffset.UtcNow.AddDays(-i).ToString("o"),
+                ["message"] = new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = $"demo prompt {i} in {Path.GetFileName(cwd)}",
+                },
+            }.ToJsonString());
+        }
+        File.WriteAllLines(Path.Combine(dir, $"{sessionId}.jsonl"), lines);
     }
 
     private void LoadSettingsUi()
@@ -1792,6 +1934,7 @@ sealed class MainForm : Form
                     Alias = alias,
                     Active = active,
                     Disabled = disabled,
+                    LiveSessions = a["liveSessions"]?.GetValue<int>() ?? 0,
                     FiveHour = five,
                     SevenDay = seven,
                     FiveHourResetsAt = fiveReset,
@@ -1830,7 +1973,14 @@ sealed class MainForm : Form
     private void ApplyHeaderTexts()
     {
         var maskedActive = ActiveLabel();
-        _activeChip.Text = Loc.T("header.active", maskedActive);
+        // The chip keeps meaning "the default login". Session terminals are
+        // counted beside it rather than folded in: with sessions open there is
+        // no single "current account" any more, and quietly redefining the chip
+        // would make the header lie in exactly the case it matters most.
+        int sessions = _models.Sum(m => m.LiveSessions);
+        _activeChip.Text = sessions > 0
+            ? Loc.T("header.activeWithSessions", maskedActive, Loc.Plural("header.sessions", sessions))
+            : Loc.T("header.active", maskedActive);
         _countLabel.Text = Loc.T("header.count", _models.Count);
         var trayLabel = maskedActive.Length > 40
             ? maskedActive[..37] + "…"
@@ -2031,6 +2181,17 @@ sealed class MainForm : Form
         };
         switchItem.Click += (_, _) => Run(DoSwitch);
 
+        // Opening a terminal is a peer of switching, not a variant of it: one
+        // moves the default login, the other leaves it alone. It sits in the
+        // menu rather than on the card's main button so the primary action
+        // stays unambiguous.
+        var sessionItem = new ToolStripMenuItem(Loc.T("menu.openTerminal"))
+        {
+            Enabled = !m.Disabled,
+            ToolTipText = Loc.T("menu.openTerminal.tip"),
+        };
+        sessionItem.Click += (_, _) => Run(() => DoOpenSessionTerminal(m));
+
         var aliasItem = new ToolStripMenuItem(Loc.T("menu.alias"));
         aliasItem.Click += (_, _) => Run(DoEditAlias);
 
@@ -2047,6 +2208,7 @@ sealed class MainForm : Form
         deleteItem.Click += (_, _) => Run(DoDelete);
 
         menu.Items.Add(switchItem);
+        menu.Items.Add(sessionItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(aliasItem);
         menu.Items.Add(detailItem);

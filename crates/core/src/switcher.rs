@@ -112,6 +112,7 @@ impl Switcher {
         self.store.write_slot(num, &email, &creds)?;
         self.store
             .write_slot_config(&self.paths.configs_dir, num, &email, &config_json)?;
+        self.post_backup_write(num, &email);
 
         let rec = AccountRecord {
             email: email.clone(),
@@ -141,6 +142,7 @@ impl Switcher {
         self.store.write_slot(num, email, credentials)?;
         self.store
             .write_slot_config(&self.paths.configs_dir, num, email, config_json)?;
+        self.post_backup_write(num, email);
         let mut seq = self.load_sequence()?;
         seq.upsert_account(
             num,
@@ -236,6 +238,7 @@ impl Switcher {
                     // Keep the stored credential; still refresh the config copy.
                 } else {
                     let _ = self.store.write_slot(cur, &cur_rec.email, live);
+                    self.post_backup_write(cur, &cur_rec.email);
                 }
                 if let Some(ref cfg) = live_config {
                     let _ = self.store.write_slot_config(
@@ -301,15 +304,69 @@ impl Switcher {
         })
     }
 
+    /// A slot's session profile directory (whether or not it exists).
+    fn session_dir(&self, num: u32, email: &str) -> std::path::PathBuf {
+        crate::session::session_dir_for(&self.paths.backup_root, num, email)
+    }
+
+    /// Invalidate a slot's session profile after its backup credentials change.
+    ///
+    /// The single chokepoint for every path that rewrites a slot's backup
+    /// (re-add, import, switching out, a usage refresh that rotated the token).
+    /// A profile seeded from the previous generation now holds a credential that
+    /// still looks locally valid but may already be spent, so drop its credential
+    /// material and let the next launch re-seed from the fresh backup — history
+    /// and shared settings survive, only the token goes.
+    ///
+    /// A *live* profile keeps its copy: Claude Code is managing that token right
+    /// now, and pulling it out from under a running process is worse than the
+    /// drift. It gets a marker instead, honoured on the first launch that finds
+    /// the profile quiescent.
+    fn post_backup_write(&self, num: u32, email: &str) {
+        let dir = self.session_dir(num, email);
+        if !dir.is_dir() {
+            return;
+        }
+        if crate::session::live_sessions_for(&dir).is_empty() {
+            crate::session::invalidate_credentials(&dir);
+        } else {
+            crate::session::mark_session_stale(&dir);
+        }
+    }
+
+    /// Remove an account: backups, session profile, and directory bindings.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::SessionInUse`] while a session-mode Claude Code is running
+    /// against the slot — deleting its profile would break a session in
+    /// progress, and the credential backing it is about to be erased.
     pub fn remove_account(&self, num: u32) -> Result<()> {
         let mut seq = self.load_sequence()?;
         let rec = seq
             .account(num)
             .ok_or_else(|| Error::AccountNotFound(num.to_string()))?
             .clone();
+
+        let session_dir = self.session_dir(num, &rec.email);
+        let live = crate::session::live_sessions_for(&session_dir);
+        if !live.is_empty() {
+            return Err(Error::SessionInUse(format!(
+                "Account-{num} ({}) has {} running session(s); close them first",
+                rec.email,
+                live.len()
+            )));
+        }
+
         self.store.delete_slot(num, &rec.email)?;
         let cfg = crate::credentials::slot_config_path(&self.paths.configs_dir, num, &rec.email);
         let _ = std::fs::remove_file(cfg);
+        // A profile that outlived its account would keep answering as an
+        // account no slot holds, and its transcripts would stay in the scans.
+        let _ = crate::session::remove_profile(&session_dir);
+        let _ = crate::session::MappingStore::new(&self.paths.backup_root)
+            .prune_account(&rec.email, &rec.org_uuid);
+
         seq.remove_account(num);
         self.save_sequence(&seq)?;
         Ok(())

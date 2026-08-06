@@ -16,6 +16,7 @@ use crate::oauth;
 use crate::paths::{PathEnv, Paths};
 use crate::plan::{plan_for_slot, PlanInfo};
 use crate::sequence::SequenceData;
+use crate::session;
 use crate::settings::{AutoSwitchSettings, Settings};
 use crate::switcher::{AccountRef, SwitchResult, Switcher};
 use crate::usage::{
@@ -23,8 +24,8 @@ use crate::usage::{
 };
 use std::time::Duration;
 
-/// Bumped to 2 when `accounts[].plan` was added (additive; older readers ignore it).
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+/// Bumped to 3 when `accounts[].liveSessions` was added (additive; older readers ignore it).
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 pub const FFI_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize)]
@@ -43,6 +44,13 @@ pub struct AccountSnapshot {
     /// Subscription facts read back from the slot's own backups (see [`crate::plan`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<PlanInfo>,
+    /// Claude Code instances running against this account's session profile.
+    ///
+    /// Session terminals are invisible once opened, so the count is carried on
+    /// every snapshot: it labels the card, and it is the reason a switch or a
+    /// delete can be refused.
+    #[serde(default)]
+    pub live_sessions: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -63,6 +71,63 @@ pub struct Snapshot {
     pub is_leader: bool,
     /// Seconds until the next adaptive usage poll (from last [`Engine::refresh_usage`]).
     pub next_poll_seconds: f64,
+}
+
+/// Required string parameter, named in the error so a typo is obvious.
+fn str_param<'a>(params: &'a serde_json::Value, key: &str) -> Result<&'a str> {
+    params
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| Error::Validation(format!("missing {key}")))
+}
+
+/// Transcript folders for one directory.
+///
+/// Accepts `transcriptDirs` (the complete set, since session mode can spread one
+/// directory's history over several profiles) and still honours a lone
+/// `transcriptDir` so a caller built against the single-root shape keeps working.
+fn transcript_dirs_param(params: &serde_json::Value) -> Result<Vec<PathBuf>> {
+    if let Some(list) = params.get("transcriptDirs").and_then(|v| v.as_array()) {
+        let dirs: Vec<PathBuf> = list
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(PathBuf::from)
+            .collect();
+        if !dirs.is_empty() {
+            return Ok(dirs);
+        }
+    }
+    Ok(vec![PathBuf::from(str_param(params, "transcriptDir")?)])
+}
+
+/// Everything the shell needs to launch one session terminal.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLaunch {
+    /// Value for the child's `CLAUDE_CONFIG_DIR`; empty when
+    /// [`SessionLaunch::use_default_login`] is set.
+    pub config_dir: String,
+    /// Launch with the ordinary default login and no profile at all.
+    ///
+    /// Set when the requested account already *is* the default login. Giving it
+    /// a profile too would put one account's rotating refresh token in two
+    /// config directories, and the copy that is not in use goes stale the first
+    /// time the server rotates — the exact drift this feature exists to avoid.
+    /// Running plain `claude` reaches the same account with no second copy.
+    pub use_default_login: bool,
+    pub number: u32,
+    pub email: String,
+    /// False when the profile had to be seeded from backup for this launch.
+    pub reused: bool,
+    /// Instances already running against this profile — a second terminal for
+    /// the same account is allowed, and the caller may want to say so.
+    pub live_sessions: u32,
+    /// Shared items that could not be copied, usually because the profile has
+    /// its own version. A degraded session, not a failed one.
+    pub share_problems: Vec<String>,
+    /// Variables the caller must remove from the child environment: each one
+    /// would override the account this launch is explicitly asking for.
+    pub scrub_env: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -500,6 +565,8 @@ impl Engine {
                 usage: self.usage.get(num),
                 usage_status: self.usage.status(num),
                 plan: self.plan_for(num, &rec.email),
+                live_sessions: u32::try_from(self.live_sessions(num, &rec.email).len())
+                    .unwrap_or(u32::MAX),
             });
         }
         // Only report a foreign login when it is genuinely unmanaged.
@@ -523,6 +590,289 @@ impl Engine {
         serde_json::to_string(&snap).map_err(|e| Error::Internal(e.to_string()))
     }
 
+    // -- session mode ------------------------------------------------------
+
+    /// Profile directory for a slot (whether or not it exists yet).
+    fn session_dir(&self, num: u32, email: &str) -> PathBuf {
+        session::session_dir_for(&self.paths.backup_root, num, email)
+    }
+
+    /// Claude Code instances running against a slot's session profile.
+    fn live_sessions(&self, num: u32, email: &str) -> Vec<session::LiveSession> {
+        session::live_sessions_for(&self.session_dir(num, email))
+    }
+
+    /// The slot's session-profile credential, when the profile still holds
+    /// *this* account's token family.
+    ///
+    /// An in-session `/login` can re-point a profile at a different account.
+    /// Its credential then measures that account's usage, which recorded under
+    /// this slot's label would be a plausible-looking lie — so drift falls back
+    /// to the backup, which is both the right identity and safe to refresh.
+    fn session_credential(&self, num: u32, email: &str) -> Option<String> {
+        let dir = self.session_dir(num, email);
+        let cred = session::read_session_credentials(&dir)?;
+        let org = self
+            .switcher
+            .load_sequence()
+            .ok()
+            .and_then(|s| s.account(num).map(|a| a.org_uuid.clone()))
+            .unwrap_or_default();
+        if session::session_identity_drifted(&dir, email, &org) {
+            return None;
+        }
+        Some(cred)
+    }
+
+    /// Slots with a session terminal open, which an automatic switch must not
+    /// land on (see [`crate::autoswitch::AutoSwitchEngine::rank`]).
+    fn session_busy(&self, seq: &SequenceData) -> Vec<u32> {
+        seq.sequence
+            .iter()
+            .copied()
+            .filter(|&n| {
+                seq.account(n)
+                    .is_some_and(|rec| !self.live_sessions(n, &rec.email).is_empty())
+            })
+            .collect()
+    }
+
+    /// Config homes whose transcripts belong to this machine (see
+    /// [`crate::projects::scan_envs`]).
+    fn scan_envs(&self) -> Vec<PathEnv> {
+        crate::projects::scan_envs(&self.paths.env, &self.paths.backup_root)
+    }
+
+    /// Directory → account bindings.
+    fn mappings(&self) -> session::MappingStore {
+        session::MappingStore::new(&self.paths.backup_root)
+    }
+
+    /// Make a slot's session profile ready to launch, and say how.
+    ///
+    /// Reuses an existing profile when it is still valid for the account —
+    /// re-seeding would replace the credential Claude Code has been rotating in
+    /// place with the backup's older generation, which is exactly the drift this
+    /// feature has to avoid. Sharing is re-synced either way, because a copy of
+    /// `settings.json` goes stale the moment the original is edited.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::AccountNotFound`] for an unknown slot, [`Error::Validation`]
+    /// for a disabled or API-key account, [`Error::Credential`] when the slot
+    /// has nothing to seed from.
+    pub fn session_prepare(&self, identifier: &str, share: bool) -> Result<SessionLaunch> {
+        let seq = self.switcher.load_sequence()?;
+        let num = seq.resolve_identifier(identifier)?;
+        let rec = seq
+            .account(num)
+            .ok_or_else(|| Error::AccountNotFound(identifier.to_string()))?;
+        let email = rec.email.clone();
+        let org_uuid = rec.org_uuid.clone();
+
+        if rec.disabled {
+            return Err(Error::Validation(format!(
+                "Account-{num} ({email}) is disabled"
+            )));
+        }
+
+        let dir = self.session_dir(num, &email);
+        let stored = self.switcher.store.read_slot(num, &email)?;
+        let Some(stored) = stored.filter(|c| !c.trim().is_empty()) else {
+            return Err(Error::Credential(format!(
+                "Account-{num} ({email}) has no stored credentials"
+            )));
+        };
+        // Session bootstrap is OAuth-shaped: it seeds `.credentials.json` and
+        // validates an access token. An API-key account would fail that check
+        // opaquely, so refuse it by name instead.
+        if crate::credentials::looks_like_api_key(&stored) {
+            return Err(Error::Validation(format!(
+                "Account-{num} ({email}) is an API-key account; session mode needs an OAuth login"
+            )));
+        }
+
+        // Already the default login: reach it the plain way (see
+        // `SessionLaunch::use_default_login`). Checked against the *resolved*
+        // live account rather than the recorded one, so a `/login` outside this
+        // tool cannot make us open a redundant profile.
+        if self.resolve_active(&seq).number == Some(num) {
+            return Ok(SessionLaunch {
+                config_dir: String::new(),
+                use_default_login: true,
+                number: num,
+                email,
+                reused: true,
+                live_sessions: 0,
+                share_problems: Vec::new(),
+                scrub_env: Vec::new(),
+            });
+        }
+
+        // A stale marker set while the profile was live only applies once the
+        // last instance has exited — never pull credentials out from under a
+        // running Claude Code.
+        let live = session::live_sessions_for(&dir);
+        if session::is_stale(&dir) && live.is_empty() {
+            session::invalidate_credentials(&dir);
+        }
+
+        let reused = session::profile_is_valid(&dir, &email, &org_uuid);
+        if !reused {
+            if live.is_empty() {
+                let config = self
+                    .switcher
+                    .store
+                    .read_slot_config(&self.paths.configs_dir, num, &email)?
+                    .unwrap_or_default();
+                session::bootstrap(&dir, &stored, &config)?;
+            } else {
+                // Re-seeding under a running instance would swap the credential
+                // it is holding. Launch into the profile as it stands; the
+                // stale marker survives for the next quiescent launch.
+                self.emit(CoreEvent::Error {
+                    message: format!(
+                        "Account-{num} ({email}) has {} running session(s); \
+                         launching without re-seeding the profile",
+                        live.len()
+                    ),
+                    retryable: false,
+                });
+            }
+        }
+
+        let default_home = {
+            let mut base = self.paths.env.clone();
+            base.claude_config_dir = None;
+            base.claude_config_home()
+        };
+        let share_problems = session::sync_sharing(&dir, &default_home, share);
+        session::sync_mcp_servers(&dir, &self.paths.env.default_global_config_path(), share);
+
+        Ok(SessionLaunch {
+            config_dir: dir.to_string_lossy().to_string(),
+            use_default_login: false,
+            number: num,
+            email,
+            reused,
+            live_sessions: u32::try_from(live.len()).unwrap_or(u32::MAX),
+            share_problems,
+            scrub_env: session::AUTH_OVERRIDE_ENV_VARS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        })
+    }
+
+    /// Live sessions for every slot, plus which profiles exist on disk.
+    pub fn session_status(&self) -> Result<serde_json::Value> {
+        let seq = self.switcher.load_sequence()?;
+        let mut out = Vec::new();
+        for &num in &seq.sequence {
+            let Some(rec) = seq.account(num) else {
+                continue;
+            };
+            let dir = self.session_dir(num, &rec.email);
+            out.push(json!({
+                "number": num,
+                "email": rec.email,
+                "profileExists": dir.is_dir(),
+                "configDir": dir.to_string_lossy(),
+                "live": self.live_sessions(num, &rec.email),
+            }));
+        }
+        Ok(json!({ "accounts": out }))
+    }
+
+    /// Delete a slot's session profile, with its history and settings.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::SessionInUse`] while an instance is still running against it —
+    /// removing the directory under a live Claude Code would break the session
+    /// it is in the middle of.
+    pub fn session_remove(&self, identifier: &str) -> Result<()> {
+        let seq = self.switcher.load_sequence()?;
+        let num = seq.resolve_identifier(identifier)?;
+        let rec = seq
+            .account(num)
+            .ok_or_else(|| Error::AccountNotFound(identifier.to_string()))?;
+        let dir = self.session_dir(num, &rec.email);
+        let live = session::live_sessions_for(&dir);
+        if !live.is_empty() {
+            return Err(Error::SessionInUse(format!(
+                "Account-{num} ({}) has {} running session(s)",
+                rec.email,
+                live.len()
+            )));
+        }
+        session::remove_profile(&dir)?;
+        self.emit(CoreEvent::SnapshotUpdated);
+        Ok(())
+    }
+
+    /// Bind a directory to an account, so opening it picks that account.
+    pub fn mapping_set(&self, path: &str, identifier: &str) -> Result<u32> {
+        let seq = self.switcher.load_sequence()?;
+        let num = seq.resolve_identifier(identifier)?;
+        let rec = seq
+            .account(num)
+            .ok_or_else(|| Error::AccountNotFound(identifier.to_string()))?;
+        self.mappings().set(path, &rec.email, &rec.org_uuid)?;
+        self.emit(CoreEvent::SnapshotUpdated);
+        Ok(num)
+    }
+
+    /// Remove a directory binding; `false` when there was none.
+    pub fn mapping_remove(&self, path: &str) -> Result<bool> {
+        let removed = self.mappings().remove(path)?;
+        if removed {
+            self.emit(CoreEvent::SnapshotUpdated);
+        }
+        Ok(removed)
+    }
+
+    /// Every binding, resolved to the slot that currently holds each identity.
+    ///
+    /// Bindings store `(email, org)` rather than a slot number because slots are
+    /// reused; a binding whose account is gone is reported with a null slot
+    /// rather than dropped, so the UI can say so.
+    pub fn mapping_list(&self) -> Result<serde_json::Value> {
+        let seq = self.switcher.load_sequence()?;
+        let mut out = Vec::new();
+        for (key, entry) in self.mappings().all() {
+            let slot = seq.sequence.iter().copied().find(|n| {
+                seq.account(*n)
+                    .is_some_and(|a| a.email == entry.email && a.org_uuid == entry.org_uuid)
+            });
+            out.push(json!({
+                "key": key,
+                "path": entry.path,
+                "email": entry.email,
+                "number": slot,
+            }));
+        }
+        Ok(json!({ "mappings": out }))
+    }
+
+    /// The account bound to a directory (itself or its nearest bound ancestor).
+    pub fn mapping_resolve(&self, path: &str) -> Result<serde_json::Value> {
+        let Some(entry) = self.mappings().resolve(path) else {
+            return Ok(json!({ "matched": false }));
+        };
+        let seq = self.switcher.load_sequence()?;
+        let slot = seq.sequence.iter().copied().find(|n| {
+            seq.account(*n)
+                .is_some_and(|a| a.email == entry.email && a.org_uuid == entry.org_uuid)
+        });
+        Ok(json!({
+            "matched": true,
+            "path": entry.path,
+            "email": entry.email,
+            "number": slot,
+        }))
+    }
+
     /// Usage for one slot, refreshing its OAuth token first when needed.
     ///
     /// Two rules keep this honest:
@@ -533,6 +883,14 @@ impl Engine {
     /// - **The live slot is never refreshed by us.** A grant rotates the refresh
     ///   token, and rotating the one Claude Code is holding would log the user
     ///   out of the session they are using right now.
+    ///
+    /// A session profile is a third source and outranks the backup for a slot
+    /// that has one. Claude Code rotates the token family inside the profile and
+    /// nothing syncs it back, so after the first session the backup's refresh
+    /// token is a spent generation the server will 401 forever — reading it
+    /// would freeze this account's usage at its last pre-session measurement.
+    /// The profile's credential is used strictly read-only for the same reason
+    /// the live slot is: rotating it would log the next session launch out.
     fn fetch_slot_usage(
         &self,
         num: u32,
@@ -551,6 +909,16 @@ impl Engine {
             stored.clone()
         };
 
+        // Read-only source: never refreshed, never persisted.
+        let mut profile_owned = false;
+        let mut cred = cred;
+        if !is_active {
+            if let Some(from_profile) = self.session_credential(num, email) {
+                profile_owned = true;
+                cred = Some(from_profile);
+            }
+        }
+
         let Some(mut cred) = cred else {
             return (None, UsageStatus::NoCredential);
         };
@@ -558,7 +926,14 @@ impl Engine {
             return (None, UsageStatus::ApiKey);
         }
 
-        if !is_active && oauth::needs_refresh(&cred, oauth::now_ms()) {
+        if profile_owned && oauth::needs_refresh(&cred, oauth::now_ms()) {
+            // The profile's own Claude Code refreshes lazily on its next API
+            // call. Asking now would 401, and refreshing it ourselves would
+            // rotate the family out from under it.
+            return (None, UsageStatus::NeedsLogin);
+        }
+
+        if !is_active && !profile_owned && oauth::needs_refresh(&cred, oauth::now_ms()) {
             match oauth::try_refresh(self.http.as_ref(), &cred) {
                 Ok(rotated) => {
                     // Persist before use: the response may carry a rotated
@@ -779,7 +1154,12 @@ impl Engine {
         self.reconcile_active()?;
         let seq = self.switcher.load_sequence()?;
         let settings = self.settings.lock().autoswitch.clone();
-        let decision = self.autoswitch.decide(&seq, &self.usage, &settings);
+        let decision = self.autoswitch.decide_with_sessions(
+            &seq,
+            &self.usage,
+            &settings,
+            &self.session_busy(&seq),
+        );
         if decision.should_switch {
             if let Some(t) = decision.target {
                 let r = self.switch_to(&t.to_string())?;
@@ -847,30 +1227,54 @@ impl Engine {
             // `project_stats` reads every transcript byte, so it is only ever
             // run when the user asks for it.
             "list_projects" => {
-                let list = crate::projects::list_projects(&self.paths.env)?;
+                let list = crate::projects::list_projects_in(&self.scan_envs())?;
                 Ok(json!({ "projects": list }))
             }
             "list_sessions" => {
-                let dir = params
-                    .get("transcriptDir")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| Error::Validation("missing transcriptDir".into()))?;
-                let list = crate::projects::list_sessions(Path::new(dir))?;
+                let dirs = transcript_dirs_param(params)?;
+                let list = crate::projects::list_sessions_in(&dirs)?;
                 Ok(json!({ "sessions": list }))
             }
             "overview_stats" => {
-                let o =
-                    crate::projects::scan_overview_cached(&self.paths.env, &self.paths.cache_dir)?;
+                let o = crate::projects::scan_overview_cached_in(
+                    &self.scan_envs(),
+                    &self.paths.cache_dir,
+                )?;
                 Ok(serde_json::to_value(o).map_err(|e| Error::Internal(e.to_string()))?)
             }
             "project_stats" => {
-                let dir = params
-                    .get("transcriptDir")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| Error::Validation("missing transcriptDir".into()))?;
-                let stats = crate::projects::scan_stats(Path::new(dir))?;
+                let dirs = transcript_dirs_param(params)?;
+                let stats = crate::projects::scan_stats_in(&dirs)?;
                 Ok(serde_json::to_value(stats).map_err(|e| Error::Internal(e.to_string()))?)
             }
+            // Session mode: one account per terminal, in parallel.
+            "session_prepare" => {
+                let id = str_param(params, "id")?;
+                // Sharing defaults on: a session without the user's settings and
+                // CLAUDE.md is a stranger's Claude Code, not theirs.
+                let share = params
+                    .get("share")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+                let launch = self.session_prepare(id, share)?;
+                Ok(serde_json::to_value(launch).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "session_status" => self.session_status(),
+            "session_remove" => {
+                self.session_remove(str_param(params, "id")?)?;
+                Ok(json!({ "ok": true }))
+            }
+            "mapping_set" => {
+                let number =
+                    self.mapping_set(str_param(params, "path")?, str_param(params, "id")?)?;
+                Ok(json!({ "ok": true, "number": number }))
+            }
+            "mapping_remove" => {
+                let removed = self.mapping_remove(str_param(params, "path")?)?;
+                Ok(json!({ "removed": removed }))
+            }
+            "mapping_list" => self.mapping_list(),
+            "mapping_resolve" => self.mapping_resolve(str_param(params, "path")?),
             "reconcile_active" => {
                 let n = self.reconcile_active()?;
                 Ok(json!({ "activeAccountNumber": n }))
@@ -1789,5 +2193,263 @@ mod tests {
         // Invalid permutation rejected
         assert!(eng.reorder_accounts(&[1, 1]).is_err());
         assert!(eng.reorder_accounts(&[1, 3]).is_err());
+    }
+
+    // -- session mode ------------------------------------------------------
+
+    /// Two slots, both with usable OAuth credentials and config backups.
+    fn engine_with_two_accounts(root: &Path) -> (Engine, Arc<MockHttp>) {
+        let (eng, mock) = test_engine_with_mock(root.to_path_buf()).unwrap();
+        for (n, email, tok) in [(1u32, "a@x.com", "tok-a"), (2, "b@x.com", "tok-b")] {
+            eng.add_raw(n, email, &oauth_cred(email, tok), &oauth_cfg(email), None)
+                .unwrap();
+        }
+        (eng, mock)
+    }
+
+    #[test]
+    fn the_account_that_is_already_the_default_login_gets_no_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        eng.switch_to("1").unwrap();
+
+        // A second copy of one account's token would drift the moment the
+        // server rotates the refresh token; plain `claude` reaches it already.
+        let launch = eng.session_prepare("1", true).unwrap();
+        assert!(launch.use_default_login);
+        assert_eq!(launch.config_dir, "");
+        assert!(!session::session_dir_for(&eng.paths.backup_root, 1, "a@x.com").exists());
+
+        // The other account still gets one.
+        let other = eng.session_prepare("2", true).unwrap();
+        assert!(!other.use_default_login);
+        assert!(!other.config_dir.is_empty());
+    }
+
+    #[test]
+    fn preparing_a_session_seeds_a_profile_and_then_reuses_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+
+        let first = eng.session_prepare("2", true).unwrap();
+        assert!(!first.reused, "a fresh profile has to be seeded");
+        assert_eq!(first.email, "b@x.com");
+        let dir = PathBuf::from(&first.config_dir);
+        assert!(dir.join(".credentials.json").exists());
+
+        // Claude Code rotates the token in place; re-seeding would put the
+        // backup's older generation back over that newer one.
+        std::fs::write(
+            dir.join(".credentials.json"),
+            oauth_cred("b@x.com", "rotated"),
+        )
+        .unwrap();
+        let second = eng.session_prepare("2", true).unwrap();
+        assert!(second.reused);
+        assert!(std::fs::read_to_string(dir.join(".credentials.json"))
+            .unwrap()
+            .contains("rotated"));
+    }
+
+    #[test]
+    fn a_profile_logged_into_another_account_is_re_seeded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        let dir = PathBuf::from(&eng.session_prepare("2", true).unwrap().config_dir);
+
+        // An in-session `/login` re-points the profile at someone else.
+        std::fs::write(dir.join(".claude.json"), oauth_cfg("other@x.com")).unwrap();
+        let again = eng.session_prepare("2", true).unwrap();
+        assert!(!again.reused, "a drifted profile must go back to its slot");
+        assert_eq!(session::read_session_identity(&dir).unwrap().0, "b@x.com");
+    }
+
+    #[test]
+    fn rewriting_a_slots_backup_invalidates_its_quiescent_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        let dir = PathBuf::from(&eng.session_prepare("2", true).unwrap().config_dir);
+        assert!(dir.join(".credentials.json").exists());
+
+        // Re-adding the account writes a new backup generation, which makes the
+        // profile's copy a possibly-spent one.
+        eng.add_raw(
+            2,
+            "b@x.com",
+            &oauth_cred("b@x.com", "tok-b2"),
+            &oauth_cfg("b@x.com"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !dir.join(".credentials.json").exists(),
+            "the profile's stale credential must be dropped"
+        );
+        // Everything that is not a credential survives.
+        assert!(dir.join(".claude.json").exists());
+    }
+
+    #[test]
+    fn usage_prefers_the_session_profiles_credential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, mock) = engine_with_two_accounts(tmp.path());
+        let dir = PathBuf::from(&eng.session_prepare("2", true).unwrap().config_dir);
+
+        // Once a session has run, the backup's token is a spent generation and
+        // only the profile's answer describes the account.
+        std::fs::write(
+            dir.join(".credentials.json"),
+            oauth_cred("b@x.com", "profile-tok"),
+        )
+        .unwrap();
+        mock.set_usage("tok-b", 90.0, 90.0);
+        mock.set_usage("profile-tok", 12.0, 5.0);
+
+        eng.refresh_usage().unwrap();
+        let snap = eng.snapshot().unwrap();
+        let slot2 = snap.accounts.iter().find(|a| a.number == 2).unwrap();
+        assert_eq!(slot2.usage.as_ref().unwrap().binding_pct(), Some(12.0));
+    }
+
+    #[test]
+    fn a_drifted_profile_does_not_report_its_usage_under_our_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, mock) = engine_with_two_accounts(tmp.path());
+        let dir = PathBuf::from(&eng.session_prepare("2", true).unwrap().config_dir);
+
+        std::fs::write(
+            dir.join(".credentials.json"),
+            oauth_cred("other@x.com", "someone-else"),
+        )
+        .unwrap();
+        std::fs::write(dir.join(".claude.json"), oauth_cfg("other@x.com")).unwrap();
+        mock.set_usage("tok-b", 42.0, 10.0);
+        mock.set_usage("someone-else", 99.0, 99.0);
+
+        eng.refresh_usage().unwrap();
+        let snap = eng.snapshot().unwrap();
+        let slot2 = snap.accounts.iter().find(|a| a.number == 2).unwrap();
+        assert_eq!(
+            slot2.usage.as_ref().unwrap().binding_pct(),
+            Some(42.0),
+            "a profile pointing elsewhere must fall back to the backup"
+        );
+    }
+
+    #[test]
+    fn transcripts_inside_session_profiles_are_still_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        let profile = PathBuf::from(&eng.session_prepare("2", true).unwrap().config_dir);
+
+        // One working directory, worked in from both the default login and a
+        // session terminal: one project, both histories.
+        let default_dir = eng
+            .paths
+            .env
+            .claude_config_home()
+            .join("projects")
+            .join("d-work");
+        let session_dir = profile.join("projects").join("d-work");
+        for (dir, id) in [(&default_dir, "s-default"), (&session_dir, "s-session")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{id}.jsonl")),
+                format!(
+                    "{}\n",
+                    json!({"type":"user","cwd":"D:\\work","timestamp":"2026-01-02T03:04:05.000Z",
+                           "message":{"role":"user","content":"hi"}})
+                ),
+            )
+            .unwrap();
+        }
+
+        let projects = crate::projects::list_projects_in(&eng.scan_envs()).unwrap();
+        let work = projects
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case("work"))
+            .expect("the directory must appear once, not twice");
+        assert_eq!(work.session_count, 2);
+        assert_eq!(work.transcript_dirs.len(), 2);
+
+        let dirs: Vec<PathBuf> = work.transcript_dirs.iter().map(PathBuf::from).collect();
+        let sessions = crate::projects::list_sessions_in(&dirs).unwrap();
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"s-default") && ids.contains(&"s-session"));
+    }
+
+    #[test]
+    fn removing_an_account_takes_its_profile_and_bindings_with_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        let dir = PathBuf::from(&eng.session_prepare("2", true).unwrap().config_dir);
+        eng.mapping_set("D:\\work", "2").unwrap();
+        assert_eq!(
+            eng.mapping_resolve("D:\\work\\src").unwrap()["matched"],
+            json!(true)
+        );
+
+        eng.remove_account("2").unwrap();
+        assert!(!dir.exists(), "a profile must not outlive its account");
+        assert_eq!(
+            eng.mapping_resolve("D:\\work\\src").unwrap()["matched"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn api_key_accounts_are_refused_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = test_engine_with_mock(tmp.path().to_path_buf()).unwrap();
+        eng.add_raw(
+            1,
+            "k@x.com",
+            "sk-ant-api03-xxx",
+            &oauth_cfg("k@x.com"),
+            None,
+        )
+        .unwrap();
+        let err = eng.session_prepare("1", true).unwrap_err();
+        assert!(err.message().contains("API-key"), "got {}", err.message());
+    }
+
+    #[test]
+    fn bindings_store_identity_not_a_slot_number() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        eng.mapping_set("D:\\work", "b@x.com").unwrap();
+        let resolved = eng.mapping_resolve("D:\\work").unwrap();
+        assert_eq!(resolved["number"], json!(2));
+        assert_eq!(resolved["email"], json!("b@x.com"));
+    }
+
+    #[test]
+    fn autoswitch_will_not_land_on_an_account_with_a_session_open() {
+        use crate::autoswitch::AutoSwitchEngine;
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, mock) = engine_with_two_accounts(tmp.path());
+        eng.switch_to("1").unwrap();
+        mock.set_usage("tok-a", 95.0, 20.0);
+        mock.set_usage("tok-b", 10.0, 10.0);
+        eng.refresh_usage().unwrap();
+
+        let seq = eng.switcher.load_sequence().unwrap();
+        let mut settings = eng.settings.lock().autoswitch.clone();
+        settings.enabled = true;
+        let auto = AutoSwitchEngine::new();
+
+        // Nothing running: slot 2 is the obvious target.
+        let free = auto.decide_with_sessions(&seq, &eng.usage, &settings, &[]);
+        assert_eq!(free.target, Some(2));
+
+        // A session terminal on slot 2 is already consuming its quota, and
+        // making it the default login too would fork its refresh token.
+        let busy = auto.decide_with_sessions(&seq, &eng.usage, &settings, &[2]);
+        assert!(!busy.should_switch);
+        assert!(
+            busy.detail.contains("session terminal"),
+            "the reason must be explainable: {}",
+            busy.detail
+        );
     }
 }

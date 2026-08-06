@@ -136,6 +136,37 @@ public class LocTests
         Assert.NotNull(Loc.T("app.name", "unused"));
     }
 
+    [Fact]
+    public void Every_plural_key_has_both_forms()
+    {
+        // Half a plural renders as the key itself on screen for exactly the
+        // counts nobody tests by hand. Key parity across languages is already
+        // enforced above, so checking the base catalogue covers all of them.
+        var keys = Loc.Keys(Loc.BaseLanguage).ToHashSet();
+        var stems = keys
+            .Where(k => k.EndsWith(".one", StringComparison.Ordinal)
+                     || k.EndsWith(".other", StringComparison.Ordinal))
+            .Select(k => k[..k.LastIndexOf('.')])
+            .ToHashSet();
+
+        Assert.NotEmpty(stems);
+        foreach (var stem in stems)
+        {
+            Assert.True(keys.Contains($"{stem}.one"), $"{stem} is missing its .one form");
+            Assert.True(keys.Contains($"{stem}.other"), $"{stem} is missing its .other form");
+        }
+    }
+
+    [Fact]
+    public void Plural_picks_the_singular_only_for_one()
+    {
+        using var lang = Loc.Scoped("en");
+        Assert.Equal("1 terminal", Loc.Plural("card.terminals", 1));
+        Assert.Equal("2 terminals", Loc.Plural("card.terminals", 2));
+        // Zero takes the plural form in English, which is what ".other" means.
+        Assert.Equal("0 terminals", Loc.Plural("card.terminals", 0));
+    }
+
     private static HashSet<string> Placeholders(string s) =>
         Regex.Matches(s, @"\{(\d+)\}").Select(m => m.Groups[1].Value).ToHashSet();
 }

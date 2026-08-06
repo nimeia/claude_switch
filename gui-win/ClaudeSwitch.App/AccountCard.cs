@@ -11,6 +11,16 @@ public sealed class AccountCardModel
     public string? Alias { get; init; }
     public bool Active { get; init; }
     public bool Disabled { get; init; }
+    /// <summary>
+    /// Terminals running this account in session mode.
+    /// </summary>
+    /// <remarks>
+    /// A session terminal is invisible once opened — the user can easily forget
+    /// three of them are running. The count is drawn on the card so the state is
+    /// discoverable, and so "this account has a live session" is already on
+    /// screen when a delete or an auto-switch is refused for that reason.
+    /// </remarks>
+    public int LiveSessions { get; init; }
     public double? FiveHour { get; init; }
     public double? SevenDay { get; init; }
     /// <summary>ISO timestamp when the 5h window resets (if known).</summary>
@@ -567,17 +577,29 @@ internal sealed class AccountCard : Control
         int pillW = PillWidth(status);
         int pillH = Math.Min(s_nameH - 2, Math.Max(16, Theme.FontSmall.Height + 4));
 
-        // Plan badge sits after the status pill, in neutral colors so it never
-        // competes with the green "当前". Dropped first when the row is tight —
-        // identity and state matter more than the tier.
+        // Open session terminals. Accented rather than neutral: this is live
+        // state the user may need to act on, and it is the only place a session
+        // announces itself once its window is behind something else.
+        string sessions = Model.LiveSessions > 0
+            ? Loc.Plural("card.terminals", Model.LiveSessions)
+            : "";
+        int sessW = sessions.Length == 0 ? 0 : PillWidth(sessions);
+
+        // Plan badge sits last, in neutral colors so it never competes with the
+        // green "当前". Dropped first when the row is tight — identity and live
+        // state both matter more than a tier that never changes.
         string plan = Model.HasPlanBadge ? Model.PlanLabel! : "";
         int planW = plan.Length == 0 ? 0 : PillWidth(plan);
-        if (planW > 0 && textW - pillW - planW - Theme.Space1 * 2 < MinNameW)
+        if (planW > 0 && textW - pillW - sessW - planW - Theme.Space1 * 3 < MinNameW)
             planW = 0;
+        if (sessW > 0 && textW - pillW - sessW - Theme.Space1 * 2 < MinNameW)
+            sessW = 0;
 
         int nameW = Math.Max(
             40,
-            textW - pillW - Theme.Space2 - (planW > 0 ? planW + Theme.Space1 : 0));
+            textW - pillW - Theme.Space2
+                - (sessW > 0 ? sessW + Theme.Space1 : 0)
+                - (planW > 0 ? planW + Theme.Space1 : 0));
 
         string title = DisplayTitle(Model);
         string emailLine = BuildSubLine(Model, textW);
@@ -593,12 +615,24 @@ internal sealed class AccountCard : Control
         int pillY = top + Math.Max(0, (s_nameH - pillH) / 2);
         int pillX = textLeft + nameW + Theme.Space1;
         DrawPill(g, new Rectangle(pillX, pillY, pillW, pillH), status, statusBg, statusFg);
+        pillX += pillW + Theme.Space1;
+
+        if (sessW > 0)
+        {
+            DrawPill(
+                g,
+                new Rectangle(pillX, pillY, sessW, pillH),
+                sessions,
+                Theme.BgActive,
+                Theme.Accent);
+            pillX += sessW + Theme.Space1;
+        }
 
         if (planW > 0)
         {
             DrawPill(
                 g,
-                new Rectangle(pillX + pillW + Theme.Space1, pillY, planW, pillH),
+                new Rectangle(pillX, pillY, planW, pillH),
                 plan,
                 Model.Disabled ? Theme.BgDisabled : Theme.BgRowAlt,
                 Model.Disabled ? Theme.TextMuted : Theme.TextSecondary);

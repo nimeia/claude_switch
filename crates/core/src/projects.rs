@@ -10,10 +10,17 @@
 //!   the only source of history, and reading it costs real I/O (tens of MB), so
 //!   totals are computed on demand via [`scan_stats`] rather than on every list.
 //!
-//! None of this is per-account: `projects` lives in the global config, which a
-//! switch leaves alone apart from `oauthAccount`, and transcripts record no
-//! account identity at all. A directory therefore belongs to the machine, not to
-//! a managed slot.
+//! Neither source records *which account* did the work, and a switch leaves the
+//! registry alone apart from `oauthAccount`. A directory therefore belongs to
+//! the machine, not to a managed slot.
+//!
+//! Session mode (see [`crate::session`]) breaks the single-root assumption: a
+//! session-mode Claude Code writes its registry and transcripts inside its own
+//! profile, so history accumulates in several places at once. Every scan here
+//! therefore takes a *list* of roots ([`scan_envs`]) — the default `~/.claude`
+//! plus one per profile — and merges them per directory. Merging rather than
+//! copying is deliberate: a copy would fork the history it was meant to unify,
+//! which is exactly why session profiles do not share `projects/` on disk.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read};
@@ -50,8 +57,19 @@ pub struct ProjectSummary {
     /// Present in the global config's `projects` map.
     pub registered: bool,
     /// Directory holding this project's transcripts, when it has any.
+    ///
+    /// The newest one when several roots hold history for this directory; see
+    /// [`ProjectSummary::transcript_dirs`] for the complete set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcript_dir: Option<String>,
+    /// Every transcript folder for this directory, newest first.
+    ///
+    /// More than one once session mode is used: the default profile and each
+    /// session profile keep their own transcripts, and the same directory can
+    /// have been worked in under several accounts. Reading only the first would
+    /// silently drop whole conversations from the totals.
+    #[serde(default)]
+    pub transcript_dirs: Vec<String>,
     /// Total size of this directory's transcripts — what a scan would cost.
     pub transcript_bytes: u64,
 
@@ -380,71 +398,150 @@ struct TranscriptDir {
     newest: SessionSummary,
 }
 
+/// Every Claude config home whose history belongs to this machine.
+///
+/// The default profile first, then one per session profile. Session profiles
+/// are discovered from disk rather than from the account list so a removed
+/// account's conversations stay visible until its profile is deleted.
+#[must_use]
+pub fn scan_envs(env: &PathEnv, backup_root: &Path) -> Vec<PathEnv> {
+    let mut out = vec![default_env(env)];
+    for profile in crate::session::list_profiles(backup_root) {
+        out.push(crate::session::profile_env(env, &profile.dir));
+    }
+    out
+}
+
+/// The default profile's env, ignoring any inherited `CLAUDE_CONFIG_DIR`.
+///
+/// The tray process could itself have been launched from inside a session
+/// terminal, and the default profile's history must not be missed because of it.
+fn default_env(env: &PathEnv) -> PathEnv {
+    let mut base = env.clone();
+    base.claude_config_dir = None;
+    base
+}
+
 /// Every directory Claude Code has worked in, newest activity first.
 ///
 /// Registered-but-never-used directories are included and flagged: "opened once"
 /// and "worked in" are different questions, and collapsing them would make the
 /// count unexplainable.
 pub fn list_projects(env: &PathEnv) -> Result<Vec<ProjectSummary>> {
-    let mut by_key: BTreeMap<String, ProjectSummary> = BTreeMap::new();
+    list_projects_in(std::slice::from_ref(env))
+}
 
-    // 1. The registry: paths plus last-session facts.
-    let config_path = env.global_config_path();
-    if let Ok(text) = std::fs::read_to_string(&config_path) {
-        let cfg: Value = serde_json::from_str(&text)
-            .map_err(|e| Error::Config(format!("parse global config: {e}")))?;
-        if let Some(projects) = cfg.get("projects").and_then(Value::as_object) {
-            for (path, entry) in projects {
-                let key = path_key(path);
-                let item = by_key.entry(key).or_insert_with(|| ProjectSummary {
-                    path: path.clone(),
-                    name: display_name(path),
-                    ..Default::default()
-                });
-                item.registered = true;
-                // Prefer whichever spelling of the path looks native.
-                if path.contains('\\') && !item.path.contains('\\') {
-                    // keep the forward-slash form already stored
-                } else if item.path.contains('\\') && !path.contains('\\') {
-                    item.path.clone_from(path);
-                    item.name = display_name(path);
-                }
-                item.last_session_id = entry
-                    .get("lastSessionId")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string);
-                // The registry's own copy is captured before the injected
-                // preamble is stripped, so it needs the same filter.
-                item.last_prompt = entry
-                    .get("lastSessionFirstPrompt")
-                    .and_then(Value::as_str)
-                    .filter(|s| !is_synthetic_prompt(s))
-                    .map(trim_prompt);
-                item.last_cost_usd = entry
-                    .get("lastCost")
-                    .and_then(Value::as_f64)
-                    .filter(|c| *c > 0.0);
-                item.last_duration_ms = i64_field(entry, "lastDuration");
-                item.last_lines_added = i64_field(entry, "lastLinesAdded");
-                item.last_lines_removed = i64_field(entry, "lastLinesRemoved");
-                let registry_time =
-                    i64_field(entry, "lastSessionModified").max(i64_field(entry, "lastStartTime"));
-                item.last_active_ms = item.last_active_ms.max(registry_time);
-            }
-        }
+/// [`list_projects`] merged across several config homes.
+pub fn list_projects_in(envs: &[PathEnv]) -> Result<Vec<ProjectSummary>> {
+    let mut by_key: BTreeMap<String, ProjectSummary> = BTreeMap::new();
+    // How fresh the stored "most recent session" facts are, per directory. With
+    // several roots the last one scanned is not the most recent one, so every
+    // overwrite has to earn it.
+    let mut facts_ms: BTreeMap<String, i64> = BTreeMap::new();
+
+    // 1. The registries: paths plus last-session facts.
+    for env in envs {
+        merge_registry(env, &mut by_key, &mut facts_ms)?;
     }
 
     // 2. The transcripts: the only evidence a directory was actually used.
+    for env in envs {
+        merge_transcripts(env, &mut by_key, &mut facts_ms);
+    }
+
+    let mut out: Vec<ProjectSummary> = by_key.into_values().collect();
+    for item in &mut out {
+        // Newest first, so `transcript_dir` (the single-folder answer) is the
+        // one a caller that ignores the list would most want.
+        item.transcript_dir = item.transcript_dirs.first().cloned();
+    }
+    out.sort_by(|a, b| {
+        b.last_active_ms
+            .cmp(&a.last_active_ms)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(out)
+}
+
+fn merge_registry(
+    env: &PathEnv,
+    by_key: &mut BTreeMap<String, ProjectSummary>,
+    facts_ms: &mut BTreeMap<String, i64>,
+) -> Result<()> {
+    let Ok(text) = std::fs::read_to_string(env.global_config_path()) else {
+        return Ok(());
+    };
+    let cfg: Value = serde_json::from_str(&text)
+        .map_err(|e| Error::Config(format!("parse global config: {e}")))?;
+    let Some(projects) = cfg.get("projects").and_then(Value::as_object) else {
+        return Ok(());
+    };
+
+    for (path, entry) in projects {
+        let key = path_key(path);
+        let item = by_key.entry(key.clone()).or_insert_with(|| ProjectSummary {
+            path: path.clone(),
+            name: display_name(path),
+            ..Default::default()
+        });
+        item.registered = true;
+        // Prefer whichever spelling of the path looks native.
+        if path.contains('\\') && !item.path.contains('\\') {
+            // keep the forward-slash form already stored
+        } else if item.path.contains('\\') && !path.contains('\\') {
+            item.path.clone_from(path);
+            item.name = display_name(path);
+        }
+
+        let registry_time =
+            i64_field(entry, "lastSessionModified").max(i64_field(entry, "lastStartTime"));
+        item.last_active_ms = item.last_active_ms.max(registry_time);
+
+        // Only the freshest root gets to describe "the last session".
+        let stamp = registry_time.unwrap_or(0);
+        if stamp < *facts_ms.get(&key).unwrap_or(&i64::MIN) {
+            continue;
+        }
+        facts_ms.insert(key, stamp);
+        item.last_session_id = entry
+            .get("lastSessionId")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        // The registry's own copy is captured before the injected
+        // preamble is stripped, so it needs the same filter.
+        item.last_prompt = entry
+            .get("lastSessionFirstPrompt")
+            .and_then(Value::as_str)
+            .filter(|s| !is_synthetic_prompt(s))
+            .map(trim_prompt);
+        item.last_cost_usd = entry
+            .get("lastCost")
+            .and_then(Value::as_f64)
+            .filter(|c| *c > 0.0);
+        item.last_duration_ms = i64_field(entry, "lastDuration");
+        item.last_lines_added = i64_field(entry, "lastLinesAdded");
+        item.last_lines_removed = i64_field(entry, "lastLinesRemoved");
+    }
+    Ok(())
+}
+
+fn merge_transcripts(
+    env: &PathEnv,
+    by_key: &mut BTreeMap<String, ProjectSummary>,
+    facts_ms: &mut BTreeMap<String, i64>,
+) {
     for (key, t) in scan_transcript_dirs(&transcripts_root(env)) {
-        let item = by_key.entry(key).or_insert_with(|| ProjectSummary {
+        let item = by_key.entry(key.clone()).or_insert_with(|| ProjectSummary {
             path: t.path.clone(),
             name: display_name(&t.path),
             ..Default::default()
         });
-        item.session_count = t.session_count;
-        item.transcript_dir = Some(t.dir);
-        item.transcript_bytes = t.bytes;
+        // Sums, not assignments: this root is one of several.
+        item.session_count = item.session_count.saturating_add(t.session_count);
+        item.transcript_bytes = item.transcript_bytes.saturating_add(t.bytes);
+        item.transcript_dirs.push(t.dir);
+
         // Last *activity* is the transcript's mtime. The timestamp inside the
         // file marks when the session started, which for a long conversation can
         // be days before the last thing said in it.
@@ -454,33 +551,72 @@ pub fn list_projects(env: &PathEnv) -> Result<Vec<ProjectSummary>> {
             t.newest.started_ms
         };
         item.last_active_ms = item.last_active_ms.max(newest);
-        if item.last_session_id.is_none() && !t.newest.id.is_empty() {
-            item.last_session_id = Some(t.newest.id.clone());
-        }
-        if item.last_prompt.is_none() {
-            item.last_prompt.clone_from(&t.newest.first_prompt);
+
+        let stamp = newest.unwrap_or(0);
+        if stamp >= *facts_ms.get(&key).unwrap_or(&i64::MIN) {
+            facts_ms.insert(key, stamp);
+            if !t.newest.id.is_empty() {
+                item.last_session_id = Some(t.newest.id.clone());
+            }
+            if t.newest.first_prompt.is_some() {
+                item.last_prompt.clone_from(&t.newest.first_prompt);
+            }
         }
     }
 
-    let mut out: Vec<ProjectSummary> = by_key.into_values().collect();
-    out.sort_by(|a, b| {
-        b.last_active_ms
-            .cmp(&a.last_active_ms)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    Ok(out)
+    // Newest folder first, so the primary `transcript_dir` names the live one.
+    for item in by_key.values_mut() {
+        if item.transcript_dirs.len() > 1 {
+            item.transcript_dirs
+                .sort_by_key(|d| std::cmp::Reverse(newest_mtime_in(Path::new(d))));
+            item.transcript_dirs.dedup();
+        }
+    }
+}
+
+fn newest_mtime_in(dir: &Path) -> i64 {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| mtime_ms(&m))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Sessions of one directory, newest first.
 ///
 /// `transcript_dir` is the folder from [`ProjectSummary::transcript_dir`].
 pub fn list_sessions(transcript_dir: &Path) -> Result<Vec<SessionSummary>> {
-    let entries = std::fs::read_dir(transcript_dir).map_err(Error::Io)?;
-    let mut files: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
-        .collect();
+    list_sessions_in(std::slice::from_ref(&transcript_dir.to_path_buf()))
+}
+
+/// [`list_sessions`] merged across every folder holding this directory's history.
+///
+/// A missing folder is skipped rather than fatal: profiles come and go, and a
+/// stale path in the caller's list must not hide the conversations that remain.
+pub fn list_sessions_in(transcript_dirs: &[PathBuf]) -> Result<Vec<SessionSummary>> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut any = false;
+    for dir in transcript_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        any = true;
+        files.extend(
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "jsonl")),
+        );
+    }
+    if !any {
+        // Every folder was unreadable — report it rather than an empty history.
+        let first = transcript_dirs.first().cloned().unwrap_or_default();
+        std::fs::read_dir(&first).map_err(Error::Io)?;
+    }
     files.sort();
 
     let mut out: Vec<SessionSummary> = files.iter().map(|p| read_head(p)).collect();
@@ -493,12 +629,29 @@ pub fn list_sessions(transcript_dir: &Path) -> Result<Vec<SessionSummary>> {
 /// Deliberately not called while listing: a directory here can hold tens of MB,
 /// and most people never ask for the totals.
 pub fn scan_stats(transcript_dir: &Path) -> Result<ProjectStats> {
-    let entries = std::fs::read_dir(transcript_dir).map_err(Error::Io)?;
-    let files: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
-        .collect();
+    scan_stats_in(std::slice::from_ref(&transcript_dir.to_path_buf()))
+}
+
+/// [`scan_stats`] over every folder holding this directory's history.
+pub fn scan_stats_in(transcript_dirs: &[PathBuf]) -> Result<ProjectStats> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut any = false;
+    for dir in transcript_dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        any = true;
+        files.extend(
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "jsonl")),
+        );
+    }
+    if !any {
+        let first = transcript_dirs.first().cloned().unwrap_or_default();
+        std::fs::read_dir(&first).map_err(Error::Io)?;
+    }
 
     let mut stats = ProjectStats {
         sessions: u32::try_from(files.len()).unwrap_or(u32::MAX),
@@ -671,14 +824,20 @@ pub struct ProjectTotal {
 /// action — the same reason [`scan_stats`] is behind a button, multiplied by the
 /// number of directories.
 pub fn scan_overview(env: &PathEnv) -> Result<OverviewStats> {
+    scan_overview_in(std::slice::from_ref(env))
+}
+
+/// [`scan_overview`] across every config home on the machine.
+pub fn scan_overview_in(envs: &[PathEnv]) -> Result<OverviewStats> {
     let mut out = OverviewStats::default();
     let mut merged: BTreeMap<String, DayStats> = BTreeMap::new();
 
-    for project in list_projects(env)? {
-        let Some(dir) = project.transcript_dir.as_ref() else {
+    for project in list_projects_in(envs)? {
+        if project.transcript_dirs.is_empty() {
             continue;
-        };
-        let Ok(stats) = scan_stats(Path::new(dir)) else {
+        }
+        let dirs: Vec<PathBuf> = project.transcript_dirs.iter().map(PathBuf::from).collect();
+        let Ok(stats) = scan_stats_in(&dirs) else {
             continue;
         };
 
@@ -731,27 +890,39 @@ pub fn scan_overview(env: &PathEnv) -> Result<OverviewStats> {
 /// and the mtime, so a stale cache cannot survive a change.
 #[must_use]
 pub fn overview_key(env: &PathEnv) -> String {
+    overview_key_in(std::slice::from_ref(env))
+}
+
+/// [`overview_key`] over every config home the overview covers.
+///
+/// The root count is part of the key: starting to use session mode adds
+/// transcripts the previous key never saw, and a cache written before that must
+/// not survive it.
+#[must_use]
+pub fn overview_key_in(envs: &[PathEnv]) -> String {
     let mut files = 0u64;
     let mut bytes = 0u64;
     let mut newest = 0i64;
-    let root = transcripts_root(env);
-    for dir in std::fs::read_dir(&root).into_iter().flatten().flatten() {
-        for entry in std::fs::read_dir(dir.path())
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            // `is_none_or` reads better but postdates this crate's MSRV.
-            if !entry.path().extension().is_some_and(|e| e == "jsonl") {
-                continue;
+    for env in envs {
+        let root = transcripts_root(env);
+        for dir in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+            for entry in std::fs::read_dir(dir.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                // `is_none_or` reads better but postdates this crate's MSRV.
+                if !entry.path().extension().is_some_and(|e| e == "jsonl") {
+                    continue;
+                }
+                let Ok(meta) = entry.metadata() else { continue };
+                files += 1;
+                bytes += meta.len();
+                newest = newest.max(mtime_ms(&meta));
             }
-            let Ok(meta) = entry.metadata() else { continue };
-            files += 1;
-            bytes += meta.len();
-            newest = newest.max(mtime_ms(&meta));
         }
     }
-    format!("v1:{files}:{bytes}:{newest}")
+    format!("v2:{}:{files}:{bytes}:{newest}", envs.len())
 }
 
 /// Overview served from `<cache_dir>/overview.json` when the transcripts have
@@ -761,7 +932,12 @@ pub fn overview_key(env: &PathEnv) -> String {
 /// draw one strip would be rude to the disk. The key makes a stale answer
 /// impossible, so the cache is safe to trust rather than merely fast.
 pub fn scan_overview_cached(env: &PathEnv, cache_dir: &Path) -> Result<OverviewStats> {
-    let key = overview_key(env);
+    scan_overview_cached_in(std::slice::from_ref(env), cache_dir)
+}
+
+/// [`scan_overview_cached`] across every config home on the machine.
+pub fn scan_overview_cached_in(envs: &[PathEnv], cache_dir: &Path) -> Result<OverviewStats> {
+    let key = overview_key_in(envs);
     let path = cache_dir.join("overview.json");
 
     if let Ok(text) = std::fs::read_to_string(&path) {
@@ -772,7 +948,7 @@ pub fn scan_overview_cached(env: &PathEnv, cache_dir: &Path) -> Result<OverviewS
         }
     }
 
-    let stats = scan_overview(env)?;
+    let stats = scan_overview_in(envs)?;
     // A cache that cannot be written is a performance loss, not a failure.
     if std::fs::create_dir_all(cache_dir).is_ok() {
         if let Ok(text) = serde_json::to_string(&CachedOverview {

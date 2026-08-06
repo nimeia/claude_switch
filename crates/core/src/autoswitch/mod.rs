@@ -68,6 +68,10 @@ struct Ranked {
     api_key_fallback: Option<u32>,
     /// Candidates skipped for having no usable usage — reported, not hidden.
     skipped_unmeasured: u32,
+    /// Candidates skipped for running a session terminal — also reported, since
+    /// "nothing to switch to" reads very differently when the reason is that
+    /// every spare account is already in use.
+    skipped_session_busy: u32,
 }
 
 /// Stand-in utilization for an active account whose real figure is unusable.
@@ -193,22 +197,35 @@ impl AutoSwitchEngine {
     /// target in the list — switching to it logs Claude Code out, precisely when
     /// the active account is at its limit and the user needs the switch to work
     /// (ref: `autoswitch.py` `_rank_candidates`, which skips `headroom is None`).
+    ///
+    /// `session_busy` lists slots with a live session terminal. They are skipped:
+    /// a `cswitch` session already owns that account's token in its own profile,
+    /// and making it the default login too would put one rotating refresh token
+    /// in two config directories — the stale-copy failure, with nobody watching.
+    /// Its quota is being consumed by that terminal anyway, so it is the last
+    /// account an automatic switch should land on. A manual switch still may.
     fn rank(
         seq: &SequenceData,
         usage: &UsageCache,
         settings: &AutoSwitchSettings,
         active: u32,
         active_pct: f64,
+        session_busy: &[u32],
     ) -> Ranked {
         let active_headroom = 100.0 - active_pct;
         let mut out = Ranked {
             best: None,
             api_key_fallback: None,
             skipped_unmeasured: 0,
+            skipped_session_busy: 0,
         };
 
         for &num in &seq.sequence {
             if num == active || seq.account(num).is_some_and(|a| a.disabled) {
+                continue;
+            }
+            if session_busy.contains(&num) {
+                out.skipped_session_busy += 1;
                 continue;
             }
 
@@ -247,6 +264,17 @@ impl AutoSwitchEngine {
         seq: &SequenceData,
         usage: &UsageCache,
         settings: &AutoSwitchSettings,
+    ) -> AutoswitchDecision {
+        self.decide_with_sessions(seq, usage, settings, &[])
+    }
+
+    /// [`Self::decide`], told which slots already have a session terminal.
+    pub fn decide_with_sessions(
+        &self,
+        seq: &SequenceData,
+        usage: &UsageCache,
+        settings: &AutoSwitchSettings,
+        session_busy: &[u32],
     ) -> AutoswitchDecision {
         if self.state.lock().observe_only {
             return AutoswitchDecision {
@@ -297,7 +325,8 @@ impl AutoSwitchEngine {
             best,
             api_key_fallback,
             skipped_unmeasured,
-        } = Self::rank(seq, usage, settings, active, active_pct);
+            skipped_session_busy,
+        } = Self::rank(seq, usage, settings, active, active_pct, session_busy);
 
         if let Some((num, h)) = best {
             return AutoswitchDecision {
@@ -319,10 +348,21 @@ impl AutoSwitchEngine {
         // Nothing to move to. Say whether that is because the active account is
         // broken with no healthy peer (the user must fix an account) or simply
         // because no peer has more headroom (normal, nothing to do).
-        let skipped_note = if skipped_unmeasured > 0 {
-            format!(" ({skipped_unmeasured} skipped: no usable usage data)")
-        } else {
+        let mut notes: Vec<String> = Vec::new();
+        if skipped_unmeasured > 0 {
+            notes.push(format!(
+                "{skipped_unmeasured} skipped: no usable usage data"
+            ));
+        }
+        if skipped_session_busy > 0 {
+            notes.push(format!(
+                "{skipped_session_busy} skipped: running a session terminal"
+            ));
+        }
+        let skipped_note = if notes.is_empty() {
             String::new()
+        } else {
+            format!(" ({})", notes.join("; "))
         };
         AutoswitchDecision {
             should_switch: false,

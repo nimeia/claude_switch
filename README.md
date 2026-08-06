@@ -61,6 +61,25 @@ Get-FileHash ClaudeSwitch.exe -Algorithm SHA256
 - 当前账号坏掉时的等待策略按"等下去有没有意义"区分：登录被清除立即切走，网络抖动则等满 `unhealthyTicks` 次
 - 没有 access token 的凭据**拒绝激活**，手动切换也一样——那不是切换，是把你登出
 
+### 并行会话
+
+**在不同终端里同时用不同账号。** 卡片右键「用此账号打开终端」，选一个目录就开一个新终端，
+里面的 Claude Code 以该账号登录——**默认登录、其它终端、VS Code 扩展全都不受影响**。
+
+原理是给每个账号准备一份独立的配置目录（`<备份目录>/sessions/<槽位>-<邮箱>/`），
+启动时用 `CLAUDE_CONFIG_DIR` 指过去。Claude Code 的配置和凭据查找都认这个变量，所以隔离是完整的。
+
+- **目录可以绑定账号**——「目录」窗口里右键 →「绑定到账号」。绑定后从「继续会话」或「目录」窗口打开，
+  自动用该账号，不用每次选。子目录继承最近的上级绑定
+- **共享你自己的配置**：`settings.json` / `CLAUDE.md` / `skills/` / `commands/` / `agents/` 和
+  用户级 MCP 服务器每次启动都从 `~/.claude` 同步过去。会话里改的会在下次启动被覆盖——改就改 `~/.claude`
+- **对话历史不复制**（复制等于分叉）。「目录」窗口、用量总览、「继续会话」会把每个会话配置**一起扫描并合并**，
+  所以哪个账号做的事都看得见，同一个目录只出现一次
+- **自动切换会跳过有终端在跑的账号**——它的额度本来就在被消耗，再把它设成默认登录会让同一个
+  refresh token 出现在两个配置目录里
+- 要打开的账号如果**就是当前默认登录**，直接起裸 `claude`，不建第二份凭据副本
+- 账号删除时，它的会话配置和目录绑定一起清掉；有终端在跑时拒绝删除
+
 ### 目录与会话
 
 - 工具栏「继续会话」下拉和托盘菜单直接列出各目录最近的会话，**一步回到上次的对话**
@@ -68,7 +87,8 @@ Get-FileHash ClaudeSwitch.exe -Algorithm SHA256
 - 恢复会话时**直接运行 `claude`，不经 cmd**——终端由你自己的「默认终端应用」设置决定，
   Claude 退出后窗口正常关闭，不会留一个 cmd 提示符
 - 累计 token 统计按需执行（读全部会话记录，几百毫秒），结果带可视化
-- **这份数据与账号无关**——Claude Code 不记录会话属于哪个账号
+- **目录本身与账号无关**——Claude Code 不记录一段对话属于哪个账号。「账号」列显示的是你给这个目录
+  设的绑定（决定从这里打开时用哪个账号），不是从对话记录里读出来的
 
 ### 界面语言
 
@@ -103,11 +123,15 @@ Get-FileHash ClaudeSwitch.exe -Algorithm SHA256
 | `~/.claude-swap-backup/credentials/` | 各槽位凭据（加密存储） |
 | `~/.claude-swap-backup/configs/` | 各槽位 `.claude.json` 快照 |
 | `~/.claude-swap-backup/sequence.json` | 槽位顺序与当前账号 |
+| `~/.claude-swap-backup/sessions/` | 各账号的会话配置（含它们自己的对话历史） |
+| `~/.claude-swap-backup/mappings.json` | 目录 → 账号绑定（本机专有） |
 | `~/.claude-swap-backup/cache/` | 用量总览缓存（可随时删除） |
 | `%LOCALAPPDATA%\ClaudeSwitch\ui-prefs.ini` | 界面偏好（主题、语言、隐藏邮箱等） |
 | `%TEMP%\.net\ClaudeSwitch\` | 单文件包自解压的运行时 |
 
 格式与 [claude-swap](https://github.com/realiti4/claude-swap)（Python CLI）兼容，两者可以共用同一份备份。
+会话配置的布局也和它的 `cswap run` 一致，只有内部标记文件名不同（`.cswitch-*` 对 `.cswap-*`）——
+两边都能读同一批 profile，但各自管各自的标记。
 
 ## 从源码构建
 
@@ -140,7 +164,7 @@ dotnet run --project gui-win/ClaudeSwitch.App -c Release -- --fixture %TEMP%\csw
 ## 项目结构
 
 ```
-crates/core     claude-switch-core   锁、凭据、切换、用量、自动切换、Engine
+crates/core     claude-switch-core   锁、凭据、切换、用量、自动切换、会话模式、Engine
 crates/ffi      claude_switch.dll    C ABI（cs_engine_*）
 gui-win/        Windows 托盘 GUI（WinForms）+ FfiSmoke + P/Invoke
 gui-win/ClaudeSwitch.App/Strings/    界面词条（每种语言一份 JSON，嵌入资源）
