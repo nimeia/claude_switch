@@ -1,0 +1,99 @@
+# Publishes the one file a user downloads.
+#
+# Triggered by a `v*` tag so a release is always tied to a commit, and runnable
+# by hand for a dry run that builds the artifact without publishing anything.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build the artifact but do not create a release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: ClaudeSwitch.exe (win-x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          file_ver=$(tr -d '[:space:]' < VERSION)
+          echo "tag=$tag VERSION=$file_ver"
+          # A release whose binary reports a different version than its tag is
+          # unsupportable — fail here rather than ship it.
+          test "$tag" = "$file_ver"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build the native engine
+        run: cargo build -p claude-switch-ffi --release
+
+      - name: Publish the single-file app
+        run: >
+          dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj
+          -c Release -p:PublishSingleFileBundle=true -o dist
+
+      - name: Verify the artifact is self-contained
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem dist -File
+          $files | Format-Table Name, Length
+          # A stray DLL beside the exe means the bundle did not absorb it, and
+          # users who download only the exe would hit a missing-dependency crash.
+          if ($files.Count -ne 1 -or $files[0].Name -ne 'ClaudeSwitch.exe') {
+            throw "expected exactly ClaudeSwitch.exe in dist, got: $($files.Name -join ', ')"
+          }
+
+      - name: Checksum
+        shell: bash
+        run: |
+          cd dist
+          sha256sum ClaudeSwitch.exe | tee ClaudeSwitch.exe.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeSwitch-win-x64
+          path: dist/*
+
+      - name: Create the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ClaudeSwitch.exe
+            dist/ClaudeSwitch.exe.sha256
+          generate_release_notes: true
+          body: |
+            ## 安装
+
+            下载 `ClaudeSwitch.exe`，双击运行。无需安装 .NET 或其它依赖。
+
+            **首次运行会看到 Windows SmartScreen 警告**——这个程序没有代码签名证书。
+            点「更多信息」→「仍要运行」。介意的话可以先核对校验和：
+
+            ```powershell
+            Get-FileHash ClaudeSwitch.exe -Algorithm SHA256
+            ```
+
+            与 `ClaudeSwitch.exe.sha256` 比对，或自行从源码构建（见 README）。

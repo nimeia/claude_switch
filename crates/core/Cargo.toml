@@ -1,0 +1,33 @@
+[package]
+name = "claude-switch-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Cross-platform core library for Claude Code multi-account switching"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tempfile = "3"
+parking_lot = "0.12"
+fs4 = "0.12"
+# Blocking HTTP for production usage fetches (no async runtime in core).
+ureq = { version = "2.12", default-features = true }
+# Time helpers for cooldown / usage ages.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+
+# Windows Internet Settings hold the machine proxy that Claude Code itself uses;
+# without it a proxied network gets 403s that look like auth failures.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"

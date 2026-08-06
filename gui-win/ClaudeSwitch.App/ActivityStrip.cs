@@ -1,0 +1,189 @@
+using System.Text.Json.Nodes;
+
+namespace ClaudeSwitch.App;
+
+/// <summary>
+/// A compact activity heatmap on the main window, so the picture costs no clicks.
+///
+/// Filled from a cached scan on a background thread: the full read is ~500 ms
+/// over ~85 MB, which must never sit on the UI thread or on startup. Until it
+/// arrives the strip stays quiet rather than showing a spinner for something
+/// nobody asked for.
+/// </summary>
+internal sealed class ActivityStrip : Panel
+{
+    private readonly CalendarHeatmap _heatmap = new();
+    private readonly Label _summary = new();
+    private readonly Label _hint = new();
+    private bool _loaded;
+
+    /// <summary>Raised when the strip is clicked — the host opens the full view.</summary>
+    public event EventHandler? OpenRequested;
+
+    public ActivityStrip()
+    {
+        Dock = DockStyle.Bottom;
+        Padding = new Padding(Theme.Space4, Theme.Space2, Theme.Space4, Theme.Space2);
+        Cursor = Cursors.Hand;
+
+        _summary.Dock = DockStyle.Top;
+        _summary.Height = 22;
+        _summary.Font = Theme.FontBody;
+        _summary.TextAlign = ContentAlignment.MiddleLeft;
+
+        _hint.Dock = DockStyle.Right;
+        _hint.Width = 96;
+        _hint.Font = Theme.FontCaption;
+        _hint.Text = "查看总览 ›";
+        _hint.TextAlign = ContentAlignment.MiddleRight;
+
+        _heatmap.Dock = DockStyle.Fill;
+        // Small cells: the strip is a glance under the account list, not the
+        // centrepiece, and full-size cells made it ~280px tall.
+        _heatmap.MaxCellSize = 13;
+        // The strip is a summary, not a control surface: clicking anywhere opens
+        // the full view, so the cells must not swallow the click.
+        _heatmap.Enabled = false;
+
+        Controls.Add(_heatmap);
+        Controls.Add(_summary);
+        Controls.Add(_hint);
+
+        foreach (Control c in new Control[] { this, _summary, _hint, _heatmap })
+            c.Click += (_, _) => OpenRequested?.Invoke(this, EventArgs.Empty);
+
+        ApplyTheme();
+        Theme.Changed += OnThemeChanged;
+        ShowSkeleton();
+        Resize += (_, _) => SyncHeight();
+    }
+
+    /// <summary>
+    /// Reserve the final geometry and show a placeholder while the scan runs.
+    /// </summary>
+    /// <remarks>
+    /// The strip used to stay at zero height and then appear, shoving the account
+    /// list up half a second after launch. Claiming the space immediately makes
+    /// the arrival a swap rather than a jolt — and the cell cap keeps that height
+    /// the same whatever the data turns out to be.
+    /// </remarks>
+    private void ShowSkeleton()
+    {
+        _heatmap.ShowSkeleton = true;
+        _summary.Text = "正在统计用量…";
+        _hint.Visible = false;
+        SyncHeight();
+    }
+
+    /// <summary>
+    /// Height for the current geometry. Cell size depends on the available
+    /// width, so this is only final once the strip has been laid out.
+    /// </summary>
+    private int StripHeight =>
+        _summary.Height + _heatmap.PreferredHeight + Padding.Vertical + 4;
+
+    /// <summary>
+    /// Re-measure once the real width is known.
+    /// </summary>
+    /// <remarks>
+    /// Sizing only at construction made the skeleton 35px shorter than the
+    /// loaded strip: with no width yet, the heatmap's cells clamp to their
+    /// minimum, and the grid grew when the layout gave it room. Re-measuring on
+    /// resize is what actually makes the swap jump-free.
+    /// </remarks>
+    private void SyncHeight()
+    {
+        if (_collapsed) return;
+        int want = StripHeight;
+        if (Height != want) Height = want;
+    }
+
+    /// <summary>Nothing to show at all — the strip stays out of the way.</summary>
+    private bool _collapsed;
+
+    private void OnThemeChanged(object? sender, EventArgs e)
+    {
+        if (IsDisposed) return;
+        ApplyTheme();
+        Invalidate(true);
+    }
+
+    private void ApplyTheme()
+    {
+        BackColor = Theme.BgSurface;
+        _summary.ForeColor = _loaded ? Theme.TextPrimary : Theme.TextMuted;
+        _hint.ForeColor = Theme.Primary;
+        _hint.BackColor = Theme.BgSurface;
+        _summary.BackColor = Theme.BgSurface;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        // A hairline above separates the strip from the list without a box.
+        using var pen = new Pen(Theme.BorderSoft);
+        e.Graphics.DrawLine(pen, 0, 0, Width, 0);
+    }
+
+    /// <summary>
+    /// Populate from an `overview_stats` payload. Safe to call with nothing
+    /// worth showing — the strip then stays collapsed.
+    /// </summary>
+    public void Apply(JsonNode? stats)
+    {
+        _loaded = true;
+        _summary.ForeColor = Theme.TextPrimary;
+        long Num(string key) => stats?[key]?.GetValue<long>() ?? 0;
+
+        var cells = new List<ChartPoint>();
+        if (stats?["daily"] is JsonArray days)
+        {
+            // Only the recent past: the strip is a glance, and squeezing a year
+            // into it would shrink the cells past legibility.
+            const int MaxDays = 16 * 7;
+            int skip = Math.Max(0, days.Count - MaxDays);
+            foreach (var d in days.Skip(skip))
+            {
+                if (d is null) continue;
+                string day = d["day"]?.GetValue<string>() ?? "";
+                long q = d["userMessages"]?.GetValue<long>() ?? 0;
+                cells.Add(new ChartPoint(day, q, day));
+            }
+        }
+
+        _heatmap.ShowSkeleton = false;
+        if (cells.Count == 0)
+        {
+            // Nothing to show at all (no transcripts): collapse rather than leave
+            // an empty frame implying something failed to load.
+            _collapsed = true;
+            Height = 0;
+            return;
+        }
+
+        if (DateTime.TryParse(cells[0].Label, out var start))
+            _heatmap.FirstWeekday = ((int)start.DayOfWeek + 6) % 7;
+        _heatmap.SetPoints(cells);
+        _hint.Visible = true;
+
+        _summary.Text =
+            $"{Compact(Num("outputTokens"))} token · {Num("sessions")} 个会话 · "
+            + $"{Num("projects")} 个项目 · 最长连续 {Num("longestStreak")} 天";
+
+        SyncHeight();
+    }
+
+    /// <summary>True once a payload has been applied, successful or empty.</summary>
+    public bool Loaded => _loaded;
+
+    private static string Compact(long n) =>
+        n >= 1_000_000 ? $"{n / 1_000_000.0:0.#}M"
+        : n >= 1_000 ? $"{n / 1_000.0:0.#}K"
+        : n.ToString();
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) Theme.Changed -= OnThemeChanged;
+        base.Dispose(disposing);
+    }
+}

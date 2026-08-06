@@ -1,0 +1,15 @@
+﻿form=1078x664
+bounds={X=1370,Y=684,Width=1100,Height=720}
+header=vis=True size=1078x52 client=(0,0,1078,52) screen=(1381,729,1078,52) text=""
+action=vis=True size=1078x48 client=(0,52,1078,48) screen=(1381,781,1078,48) text=""
+settings=vis=True size=1078x44 client=(0,100,1078,44) screen=(1381,829,1078,44) text=""
+list=vis=True size=1078x484 client=(0,0,1078,484) screen=(1381,873,1078,484) text=""
+scroll=vis=True size=1054x472 client=(16,8,1054,472) screen=(1397,881,1054,472) text=""
+cards=vis=True size=1054x472 client=(16,8,1054,472) screen=(1397,881,1054,472) text=""
+status=vis=True size=1078x36 client=(0,628,1078,36) screen=(1381,1357,1078,36) text="当前账号：#1 a***@example.com  ｜  自动切换：关闭  ｜  轮询位置：1/6  ｜  下次刷新：3分"
+toolstrip=vis=True size=1054x32 client=(12,8,1054,32) screen=(1393,789,1054,32) text=""
+search=vis=True size=180x30 client=(792,1,180,30) screen=(2185,790,180,30) text="搜索邮箱或别名…"
+OK search_visible
+scroll_client=1054x472 display=1050x460 contentH=480 childCount=6
+OK list_fits_viewport
+OK list_status_no_overlap

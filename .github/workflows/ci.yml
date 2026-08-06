@@ -1,0 +1,97 @@
+# Gates every push: the Rust core on three platforms, and the Windows shell
+# (tests plus the single-file publish users actually download).
+
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  version-sync:
+    name: VERSION ↔ Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check workspace version matches VERSION file
+        run: |
+          set -euo pipefail
+          file_ver=$(tr -d '[:space:]' < VERSION)
+          cargo_ver=$(grep -E '^version\s*=' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "VERSION=$file_ver cargo=$cargo_ver"
+          test "$file_ver" = "$cargo_ver"
+
+  core:
+    name: core (${{ matrix.os }})
+    needs: version-sync
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          - os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --all-targets
+
+  gui-win:
+    name: windows shell
+    needs: core
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build the native engine
+        run: cargo build -p claude-switch-ffi --release
+
+      - name: Test
+        run: dotnet test gui-win/ClaudeSwitch.App.Tests/ClaudeSwitch.App.Tests.csproj -c Release
+
+      - name: FFI smoke
+        run: dotnet run --project gui-win/FfiSmoke -c Release
+
+      # The shippable artifact is built on every push, not only at release time:
+      # a publish that only breaks when tagged breaks at the worst moment.
+      - name: Publish single-file
+        run: >
+          dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj
+          -c Release -p:PublishSingleFileBundle=true -o dist
+
+      - name: Verify the artifact is self-contained
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem dist -File
+          if ($files.Count -ne 1 -or $files[0].Name -ne 'ClaudeSwitch.exe') {
+            throw "expected exactly ClaudeSwitch.exe in dist, got: $($files.Name -join ', ')"
+          }

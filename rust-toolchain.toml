@@ -1,0 +1,5 @@
+[toolchain]
+# CI pins the same channel. MSRV is rust-version = "1.80" in workspace Cargo.toml.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

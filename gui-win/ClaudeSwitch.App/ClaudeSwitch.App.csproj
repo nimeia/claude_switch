@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ApplicationIcon />
+    <StartupObject>ClaudeSwitch.App.Program</StartupObject>
+    <RootNamespace>ClaudeSwitch.App</RootNamespace>
+    <AssemblyName>ClaudeSwitch</AssemblyName>
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\..\VERSION').Trim())</Version>
+  </PropertyGroup>
+
+  <!-- One downloadable file: no .NET install, no loose DLLs to lose. The native
+       engine is bundled too and self-extracts on first run. -->
+  <PropertyGroup Condition="'$(PublishSingleFileBundle)' == 'true'">
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- Trimming is off: the app reaches WinForms types through reflection, and a
+         trimmed build fails at runtime rather than at build time. -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <DebugType>embedded</DebugType>
+    <!-- One file means one file: don't drag referenced projects' pdbs along. -->
+    <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ClaudeSwitch.Core\ClaudeSwitch.Core.csproj" />
+  </ItemGroup>
+
+  <!-- The Rust engine, built by: cargo build -p claude-switch-ffi (release). -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\..\target\release\claude_switch.dll"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\..\target\release\claude_switch.dll')">
+      <Link>claude_switch.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+  <Target Name="WarnIfNativeMissing" BeforeTargets="Build">
+    <Warning
+      Condition="!Exists('$(MSBuildThisFileDirectory)..\..\target\release\claude_switch.dll')"
+      Text="claude_switch.dll not found — run: cargo build -p claude-switch-ffi --release" />
+  </Target>
+  <ItemGroup>
+    <!-- Card/drawer controls stay internal; the test project reads their
+         pure formatting helpers (e.g. AccountCard.BuildSubLine). -->
+    <InternalsVisibleTo Include="ClaudeSwitch.App.Tests" />
+  </ItemGroup>
+</Project>

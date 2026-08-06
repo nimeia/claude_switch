@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/ffi",
+]
+# ffi and gui-linux join the workspace in later PRs once their crates exist.
+# gui-mac / gui-win are non-Cargo projects (see docs/design-claude-switch.md §3.1).
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/example/claude-switch"
+rust-version = "1.80"
+
+[workspace.lints.rust]
+unsafe_code = "allow"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Soften pedantic noise that fights idiomatic library code; tighten per-module later.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

@@ -1,0 +1,10 @@
+# Rust
+/target/
+
+# .NET
+bin/
+obj/
+dist/
+
+# Release artifacts
+*.user
