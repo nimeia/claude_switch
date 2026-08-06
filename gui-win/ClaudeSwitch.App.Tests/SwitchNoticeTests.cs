@@ -38,9 +38,9 @@ public class SwitchNoticeTests
     [Fact]
     public void The_body_says_where_why_and_that_work_continues()
     {
-        var body = SwitchNotice.Body("winds8", "liutong.pub", 92.4);
-        Assert.Contains("winds8", body);
-        Assert.Contains("liutong.pub", body);
+        var body = SwitchNotice.Body("work", "personal", 92.4);
+        Assert.Contains("work", body);
+        Assert.Contains("personal", body);
         Assert.Contains("92.4%", body);
         // The claim that makes the feature worth having.
         Assert.Contains("无需重启", body);
@@ -51,12 +51,12 @@ public class SwitchNoticeTests
     {
         // Failover fires when the old account's usage could not be read at all;
         // inventing a percentage there would be a lie.
-        var body = SwitchNotice.Body("winds8", "liutong.pub", null);
-        Assert.Contains("winds8", body);
+        var body = SwitchNotice.Body("work", "personal", null);
+        Assert.Contains("work", body);
         Assert.DoesNotContain("用量已达", body);
         Assert.Contains(SwitchNotice.NoRestartLine, body);
 
-        var noSource = SwitchNotice.Body("winds8", null, 92.4);
+        var noSource = SwitchNotice.Body("work", null, 92.4);
         Assert.DoesNotContain("用量已达", noSource);
     }
 
@@ -64,7 +64,7 @@ public class SwitchNoticeTests
     public void The_body_stays_short_enough_for_a_balloon()
     {
         // Windows truncates balloon text; two lines is the budget.
-        var body = SwitchNotice.Body("liutong.pub@gmail.com", "winds8@gmail.com", 100);
+        var body = SwitchNotice.Body("someone@example.com", "another@example.com", 100);
         Assert.Equal(2, body.Split('\n').Length);
         Assert.True(body.Length < 120, $"len={body.Length}: {body}");
     }

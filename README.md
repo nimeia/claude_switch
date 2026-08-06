@@ -101,7 +101,8 @@ gui-win/        Windows 托盘 GUI（WinForms）+ FfiSmoke + P/Invoke
 ```
 
 - [docs/design-claude-switch.md](docs/design-claude-switch.md) — 架构、FFI、界面设计
-- `reference/claude-swap/` — 上游 Python CLI，作为**行为规范**（凭据、三锁切换事务、自动切换、轮询策略）
+- 行为规范来自上游 Python CLI [claude-swap](https://github.com/realiti4/claude-swap)——凭据处理、三锁切换事务、自动切换、轮询策略都以它为准。
+  开发时可把它 clone 到 `reference/claude-swap/`（该目录不纳入版本控制）。
 
 版本号以根目录 `VERSION` 为准，必须与 `Cargo.toml` 的 `[workspace.package].version` 一致。
 

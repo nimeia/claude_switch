@@ -8,3 +8,10 @@ dist/
 
 # Release artifacts
 *.user
+
+# Probe / layout-acceptance output
+_layout_out/
+
+# Vendored upstream + unrelated checkouts (not ours to redistribute)
+/others/
+/reference/
