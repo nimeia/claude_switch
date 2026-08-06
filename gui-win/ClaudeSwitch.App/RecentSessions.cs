@@ -70,19 +70,51 @@ internal static class RecentSessions
     }
 
     /// <summary>
-    /// Menu text: the directory, then what the conversation was about.
+    /// Menu text: the directory, when it was last touched, then what it was about.
     /// </summary>
     /// <remarks>
-    /// The directory leads because that is what the user is choosing between;
-    /// the prompt disambiguates and is clipped, since a menu row cannot carry a
-    /// paragraph. Ampersands are doubled or WinForms eats them as mnemonics.
+    /// The directory leads because that is what the reader is choosing between,
+    /// and the time follows it so the only variable-length part — the prompt —
+    /// sits last, where truncating it costs nothing. Ampersands are doubled or
+    /// WinForms eats them as mnemonics.
     /// </remarks>
-    public static string MenuLabel(RecentSession s, int maxTitle = 42)
+    public static string MenuLabel(RecentSession s, int titleCells = 26, int nameCells = 24)
     {
+        string name = Truncate(s.Name, nameCells);
         string when = Theme.FormatCompactEpoch(s.LastActiveMs) is { } t ? $"  ·  {t}" : "";
-        string title = (s.Title ?? "").Trim();
-        if (title.Length > maxTitle) title = title[..maxTitle] + "…";
+        string title = Truncate((s.Title ?? "").Trim(), titleCells);
         string tail = title.Length > 0 ? $"    {title}" : "";
-        return ($"{s.Name}{tail}{when}").Replace("&", "&&");
+        return ($"{name}{when}{tail}").Replace("&", "&&");
     }
+
+    /// <summary>
+    /// Clip to a budget of display cells, counting wide glyphs as two.
+    /// </summary>
+    /// <remarks>
+    /// Counting characters overflows the menu: 26 Chinese characters occupy the
+    /// width of 52 Latin ones, which pushed rows past the window edge and cut
+    /// off the timestamp that had been placed after them.
+    /// </remarks>
+    public static string Truncate(string text, int cells)
+    {
+        if (cells <= 0 || text.Length == 0) return "";
+        int used = 0;
+        for (int i = 0; i < text.Length; i++)
+        {
+            used += IsWide(text[i]) ? 2 : 1;
+            if (used > cells) return text[..i] + "…";
+        }
+        return text;
+    }
+
+    /// <summary>Roughly: CJK, kana, and full-width forms render double-width.</summary>
+    private static bool IsWide(char c) =>
+        c is >= 'ᄀ' and (
+            <= 'ᅟ'                       // Hangul Jamo
+            or >= '⺀' and <= '꓏'    // CJK radicals … Yi
+            or >= '가' and <= '힣'    // Hangul syllables
+            or >= '豈' and <= '﫿'    // CJK compatibility ideographs
+            or >= '︰' and <= '﹯'    // CJK compatibility forms
+            or >= '＀' and <= '｠'    // full-width forms
+            or >= '￠' and <= '￦');
 }

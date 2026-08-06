@@ -677,6 +677,10 @@ sealed class MainForm : Form
                 return _detailForm;
             }));
         }
+        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_RESUME") == "1")
+        {
+            LayoutProbe.Overlays.Add(("gui-resume-menu.png", () => _btnResume.ShowDropDown()));
+        }
         if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_PROJECTS") == "1")
         {
             LayoutProbe.ExtraWindows.Add(("gui-projects.png", () =>

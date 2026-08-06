@@ -80,9 +80,36 @@ public class RecentSessionsTests
     public void A_long_prompt_is_clipped_rather_than_stretching_the_menu()
     {
         var s = new RecentSession("D:/x", "x", "id", new string('长', 200), null);
-        var label = RecentSessions.MenuLabel(s, maxTitle: 20);
-        Assert.True(label.Length < 60, $"len={label.Length}");
+        var label = RecentSessions.MenuLabel(s, titleCells: 20);
+        Assert.True(label.Length < 40, $"len={label.Length}: {label}");
         Assert.EndsWith("…", label);
+    }
+
+    [Fact]
+    public void Clipping_counts_display_width_not_characters()
+    {
+        // 26 Chinese characters take the width of 52 Latin ones. Counting
+        // characters let rows overflow the window and pushed the timestamp off
+        // the right edge.
+        Assert.Equal("abcdef", RecentSessions.Truncate("abcdef", 6));
+        Assert.Equal("abcde…", RecentSessions.Truncate("abcdefgh", 5));
+        // Five wide glyphs fill a 10-cell budget exactly; the sixth overflows.
+        Assert.Equal("看看看看看", RecentSessions.Truncate("看看看看看", 10));
+        Assert.Equal("看看看看看…", RecentSessions.Truncate("看看看看看看", 10));
+        // A mixed string spends the budget proportionally.
+        Assert.Equal("ab看看…", RecentSessions.Truncate("ab看看看看", 6));
+        Assert.Equal("", RecentSessions.Truncate("anything", 0));
+    }
+
+    [Fact]
+    public void The_time_sits_before_the_prompt_so_clipping_cannot_eat_it()
+    {
+        var s = new RecentSession(
+            "D:/x", "proj", "id", new string('长', 200), 1_785_000_000_000);
+        var label = RecentSessions.MenuLabel(s);
+        int timeAt = label.IndexOf('·');
+        int titleAt = label.IndexOf('长');
+        Assert.True(timeAt > 0 && titleAt > timeAt, label);
     }
 
     [Fact]

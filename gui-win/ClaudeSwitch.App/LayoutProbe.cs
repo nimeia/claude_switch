@@ -18,6 +18,13 @@ internal static class LayoutProbe
     /// </summary>
     public static List<(string FileName, Func<Form?> Open)> ExtraWindows { get; } = [];
 
+    /// <summary>
+    /// Things that draw *over* the main window — menus, drop-downs — which
+    /// cannot be captured with PrintWindow because that renders a window's own
+    /// content only. These are screen-copied instead, so the overlay is included.
+    /// </summary>
+    public static List<(string FileName, Action Show)> Overlays { get; } = [];
+
     public static void RunIfRequested(Form form, params (string Name, Control Control)[] targets)
     {
         var dir = Environment.GetEnvironmentVariable("CLAUDE_SWITCH_LAYOUT_DIR");
@@ -187,6 +194,21 @@ internal static class LayoutProbe
                         $"alive=true capture={File.Exists(shotPath)} dir={dir}\n",
                         Encoding.UTF8);
 
+                    foreach (var (fileName, show) in Overlays)
+                    {
+                        // A screen copy takes whatever pixels are at those
+                        // coordinates, so the window must genuinely be in front —
+                        // otherwise the shot captures unrelated applications.
+                        form.Activate();
+                        form.BringToFront();
+                        Application.DoEvents();
+                        Thread.Sleep(150);
+                        show();
+                        Application.DoEvents();
+                        Thread.Sleep(400);
+                        CaptureScreen(form, Path.Combine(dir, fileName));
+                    }
+
                     foreach (var (fileName, open) in ExtraWindows)
                     {
                         if (open() is not { IsDisposed: false } extra) continue;
@@ -234,6 +256,16 @@ internal static class LayoutProbe
     private static string Quote(string? s) =>
         "\"" + (s ?? "").Replace("\"", "'") + "\"";
 
+
+    /// <summary>Copy the pixels where the window sits, overlays included.</summary>
+    private static void CaptureScreen(Form form, string path)
+    {
+        var b = form.Bounds;
+        using var bmp = new Bitmap(Math.Max(1, b.Width), Math.Max(1, b.Height));
+        using (var g = Graphics.FromImage(bmp))
+            g.CopyFromScreen(b.Location, Point.Empty, b.Size);
+        bmp.Save(path, ImageFormat.Png);
+    }
 
     private static void CaptureWindow(Form form, string path)
     {
