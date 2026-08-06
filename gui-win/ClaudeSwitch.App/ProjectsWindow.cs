@@ -134,7 +134,7 @@ internal sealed class ProjectsWindow : Form
         // Stats text gets its own band: inside the button flow it competed with
         // them for width and pushed them off the panel.
         _statsText.Dock = DockStyle.Bottom;
-        _statsText.Height = 54;
+        _statsText.Height = Theme.FontCaption.Height * 3 + Theme.Space2;
         _statsText.TextAlign = ContentAlignment.MiddleLeft;
         _statsText.Font = Theme.FontCaption;
         _statsText.Padding = new Padding(2, Theme.Space1, 2, 0);
@@ -152,7 +152,7 @@ internal sealed class ProjectsWindow : Form
         actions.Controls.AddRange([_resume, _openDir, _stats]);
 
         _sessionsTitle.Dock = DockStyle.Top;
-        _sessionsTitle.Height = 26;
+        _sessionsTitle.Height = Theme.FontHeading.Height + Theme.Space2;
         _sessionsTitle.Font = Theme.FontHeading;
         _sessionsTitle.TextAlign = ContentAlignment.MiddleLeft;
         _sessionsTitle.Text = "会话";
@@ -177,19 +177,20 @@ internal sealed class ProjectsWindow : Form
         _title.Text = "目录与会话";
         _title.Font = Theme.FontBrand;
         _title.AutoSize = true;
-        _title.Location = new Point(Theme.Space4, 14);
+        _title.Location = new Point(Theme.Space4, Theme.Space3);
 
         _countChip.AutoSize = true;
         _countChip.Font = Theme.FontSmall;
         _countChip.Padding = new Padding(Theme.Space2, Theme.Space1, Theme.Space2, Theme.Space1);
-        _countChip.Location = new Point(Theme.Space4, 44);
+        _countChip.Location = new Point(Theme.Space4, Theme.Space3 + Theme.FontBrand.Height + 4);
 
         _header.Dock = DockStyle.Top;
-        _header.Height = 76;
+        // Measured from its own fonts: a fixed band clips at >100% scaling.
+        _header.Height = Theme.FontBrand.Height + Theme.FontSmall.Height + Theme.Space6;
         _header.Controls.AddRange([_title, _countChip]);
 
         _hint.Dock = DockStyle.Bottom;
-        _hint.Height = 42;
+        _hint.Height = Theme.FontCaption.Height + Theme.Space4;
         _hint.TextAlign = ContentAlignment.MiddleLeft;
         _hint.Padding = new Padding(Theme.Space4, 0, Theme.Space4, 0);
         _hint.Font = Theme.FontCaption;

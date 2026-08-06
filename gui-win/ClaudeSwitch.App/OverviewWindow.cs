@@ -39,12 +39,13 @@ internal sealed class OverviewWindow : Form
         _title.Text = "用量总览";
         _title.Font = Theme.FontBrand;
         _title.AutoSize = true;
-        _title.Location = new Point(Theme.Space4, 14);
+        _title.Location = new Point(Theme.Space4, Theme.Space3);
         _subtitle.Font = Theme.FontSmall;
         _subtitle.AutoSize = true;
-        _subtitle.Location = new Point(Theme.Space4, 44);
+        _subtitle.Location = new Point(Theme.Space4, Theme.Space3 + Theme.FontBrand.Height + 2);
         _header.Dock = DockStyle.Top;
-        _header.Height = 72;
+        // Header holds the brand line plus a subtitle; measured, not guessed.
+        _header.Height = Theme.FontBrand.Height + Theme.FontSmall.Height + Theme.Space5;
         _header.Controls.AddRange([_title, _subtitle]);
 
         // Hero figure — the one number the view leads with, same sans as the rest.
@@ -63,7 +64,9 @@ internal sealed class OverviewWindow : Form
         var tiles = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = Theme.Scale(this, 64),
+            // Height comes from the tiles: they measure their own text, and a
+            // fixed band clipped the labels once display scaling passed 100%.
+            Height = _tileProjects.PreferredHeight + Theme.Space2,
             ColumnCount = 4,
             RowCount = 1,
             Padding = new Padding(Theme.Space4, 0, Theme.Space4, Theme.Space2),
@@ -83,7 +86,7 @@ internal sealed class OverviewWindow : Form
         {
             l.Font = Theme.FontHeading;
             l.Dock = DockStyle.Top;
-            l.Height = 26;
+            l.Height = Theme.FontHeading.Height + Theme.Space2;
             l.TextAlign = ContentAlignment.MiddleLeft;
         }
 
@@ -99,7 +102,8 @@ internal sealed class OverviewWindow : Form
         _projects.Dock = DockStyle.Top;
 
         _footnote.Dock = DockStyle.Bottom;
-        _footnote.Height = 40;
+        // Two lines of caption text, so two lines of room.
+        _footnote.Height = Theme.FontCaption.Height * 2 + Theme.Space2;
         _footnote.Font = Theme.FontCaption;
         _footnote.TextAlign = ContentAlignment.MiddleLeft;
         _footnote.Padding = new Padding(Theme.Space4, 0, Theme.Space4, 0);

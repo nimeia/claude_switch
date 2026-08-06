@@ -597,17 +597,33 @@ internal sealed class StatTile : Control
         using (var fill = new SolidBrush(Theme.BgRowAlt))
             g.FillPath(fill, path);
 
+        // Rows are measured from their fonts, never fixed pixels: a 16px box
+        // holds an 8pt caption at 100% scaling and clips it at 125%.
+        const TextFormatFlags Flags =
+            TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
+        int inner = Width - Theme.Space3 * 2;
+        int labelH = Theme.FontCaption.Height + 2;
+        int valueH = Theme.FontHeading.Height + 2;
+
+        // Centre the pair vertically so the tile looks the same whatever the
+        // fonts measure at this DPI.
+        int top = Math.Max(Theme.Space1, (Height - labelH - valueH) / 2);
+
         TextRenderer.DrawText(
             g, _label, Theme.FontCaption,
-            new Rectangle(Theme.Space3, Theme.Space2, Width - Theme.Space3 * 2, 16),
+            new Rectangle(Theme.Space3, top, inner, labelH),
             Theme.TextMuted,
-            TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            Flags);
         TextRenderer.DrawText(
             g, _value, Theme.FontHeading,
-            new Rectangle(Theme.Space3, Theme.Space2 + 15, Width - Theme.Space3 * 2, 24),
+            new Rectangle(Theme.Space3, top + labelH, inner, valueH),
             Theme.TextPrimary,
-            TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+            Flags);
     }
+
+    /// <summary>Height needed for both rows at the current DPI, plus padding.</summary>
+    public int PreferredHeight =>
+        Theme.FontCaption.Height + Theme.FontHeading.Height + 4 + Theme.Space3;
 
     protected override void Dispose(bool disposing)
     {

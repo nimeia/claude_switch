@@ -27,7 +27,7 @@ internal sealed class ActivityStrip : Panel
         Cursor = Cursors.Hand;
 
         _summary.Dock = DockStyle.Top;
-        _summary.Height = 22;
+        _summary.Height = Theme.FontBody.Height + Theme.Space1;
         _summary.Font = Theme.FontBody;
         _summary.TextAlign = ContentAlignment.MiddleLeft;
 
