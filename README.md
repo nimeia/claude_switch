@@ -6,7 +6,11 @@
 
 ## 安装
 
-到 [Releases](../../releases) 下载 `ClaudeSwitch.exe`，双击运行。不需要装 .NET、不需要装 Rust、没有安装程序、没有其它文件。
+到 [Releases](../../releases) 下载 `ClaudeSwitch-<版本>-win-x64.exe`，双击运行。不需要装 .NET，不需要装 Rust。
+
+**没有安装程序**——它是一个绿色可执行文件：不写注册表、不要管理员权限、放哪都行、删掉就干净。开机自启由应用内的复选框控制（写当前用户的启动项，取消勾选即移除）。
+
+唯一的例外：.NET 单文件包首次运行时会把自带运行时解压到 `%TEMP%\.net\ClaudeSwitch\`。这是 .NET 的标准行为，不是安装。
 
 **首次运行 Windows 会弹 SmartScreen 警告**——这个程序没有代码签名证书（一张证书每年几百美元，暂时没买）。点「更多信息」→「仍要运行」。
 
@@ -67,6 +71,9 @@ Get-FileHash ClaudeSwitch.exe -Algorithm SHA256
 | `~/.claude-swap-backup/credentials/` | 各槽位凭据（加密存储） |
 | `~/.claude-swap-backup/configs/` | 各槽位 `.claude.json` 快照 |
 | `~/.claude-swap-backup/sequence.json` | 槽位顺序与当前账号 |
+| `~/.claude-swap-backup/cache/` | 用量总览缓存（可随时删除） |
+| `%LOCALAPPDATA%\ClaudeSwitch\ui-prefs.ini` | 界面偏好（主题、隐藏邮箱等） |
+| `%TEMP%\.net\ClaudeSwitch\` | 单文件包自解压的运行时 |
 
 格式与 [claude-swap](https://github.com/realiti4/claude-swap)（Python CLI）兼容，两者可以共用同一份备份。
 
@@ -80,7 +87,7 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
   -c Release -p:PublishSingleFileBundle=true -o dist
 ```
 
-产物是 `dist/ClaudeSwitch.exe` 一个文件。
+产物是 `dist/ClaudeSwitch.exe` 一个文件。两步顺序不能反——原生引擎必须先构建，否则 publish 会直接报错拒绝，而不是打出一个启动即崩的包。
 
 开发时：
 

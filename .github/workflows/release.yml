@@ -65,11 +65,34 @@ jobs:
             throw "expected exactly ClaudeSwitch.exe in dist, got: $($files.Name -join ', ')"
           }
 
-      - name: Checksum
+      - name: Smoke-run the published exe
+        shell: pwsh
+        env:
+          CLAUDE_SWITCH_LAYOUT_DIR: ${{ runner.temp }}/probe
+          CLAUDE_SWITCH_LAYOUT_EXIT: "1"
+          CLAUDE_SWITCH_PROBE_SETTLE_MS: "800"
+        run: |
+          # Never publish a binary that has not been launched once. The
+          # self-contained check proves packaging; this proves it runs.
+          $fixture = Join-Path $env:RUNNER_TEMP 'fixture-home'
+          $p = Start-Process -FilePath dist/ClaudeSwitch.exe `
+                 -ArgumentList '--skip-onboarding', '--fixture', $fixture `
+                 -PassThru
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'exe did not exit within 120s' }
+          if ($p.ExitCode -ne 0) { throw "exe exited with $($p.ExitCode)" }
+          if (-not (Test-Path (Join-Path $env:CLAUDE_SWITCH_LAYOUT_DIR 'gui-layout.png'))) {
+            throw 'the app never reached first paint'
+          }
+
+      - name: Name the artifact after its version
         shell: bash
         run: |
+          set -euo pipefail
+          ver=$(tr -d '[:space:]' < VERSION)
           cd dist
-          sha256sum ClaudeSwitch.exe | tee ClaudeSwitch.exe.sha256
+          # Two downloads in a folder must be tellable apart.
+          mv ClaudeSwitch.exe "ClaudeSwitch-$ver-win-x64.exe"
+          sha256sum "ClaudeSwitch-$ver-win-x64.exe" | tee SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -81,19 +104,19 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/ClaudeSwitch.exe
-            dist/ClaudeSwitch.exe.sha256
+            dist/ClaudeSwitch-*-win-x64.exe
+            dist/SHA256SUMS.txt
           generate_release_notes: true
           body: |
             ## 安装
 
-            下载 `ClaudeSwitch.exe`，双击运行。无需安装 .NET 或其它依赖。
+            下载下方的 `ClaudeSwitch-*-win-x64.exe`，双击运行。无需安装 .NET 或其它依赖，也没有安装程序——它就是一个可以随便放、随便删的可执行文件。
 
             **首次运行会看到 Windows SmartScreen 警告**——这个程序没有代码签名证书。
             点「更多信息」→「仍要运行」。介意的话可以先核对校验和：
 
             ```powershell
-            Get-FileHash ClaudeSwitch.exe -Algorithm SHA256
+            Get-FileHash ClaudeSwitch-*-win-x64.exe -Algorithm SHA256
             ```
 
-            与 `ClaudeSwitch.exe.sha256` 比对，或自行从源码构建（见 README）。
+            与 `SHA256SUMS.txt` 比对，或自行从源码构建（见 README）。

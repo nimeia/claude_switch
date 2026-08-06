@@ -5,11 +5,23 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <ApplicationIcon />
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <StartupObject>ClaudeSwitch.App.Program</StartupObject>
     <RootNamespace>ClaudeSwitch.App</RootNamespace>
     <AssemblyName>ClaudeSwitch</AssemblyName>
     <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\..\VERSION').Trim())</Version>
+
+    <!-- Shown in Explorer's Properties and in the SmartScreen prompt. Blank
+         fields there are one of the things that make an unsigned download look
+         untrustworthy, so they are filled deliberately. -->
+    <Product>Claude Switch</Product>
+    <AssemblyTitle>Claude Switch</AssemblyTitle>
+    <Description>Switch between Claude Code accounts; auto-switch when a rate limit is reached.</Description>
+    <Company>claude-switch contributors</Company>
+    <Copyright>Copyright (c) 2026 claude-switch contributors — MIT</Copyright>
+    <!-- Explorer shows InformationalVersion; the default appends the commit hash,
+         which turns "0.1.0" into "0.1.0+10f5fcc…" in the Properties dialog. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <!-- One downloadable file: no .NET install, no loose DLLs to lose. The native
@@ -47,6 +59,16 @@
     <Warning
       Condition="!Exists('$(MSBuildThisFileDirectory)..\..\target\release\claude_switch.dll')"
       Text="claude_switch.dll not found — run: cargo build -p claude-switch-ffi --release" />
+  </Target>
+
+  <!-- Missing engine is only a warning while developing: the IDE still builds and
+       the tests that don't touch the engine still run. Publishing without it is
+       different — it produces an exe that dies the moment it launches, and that
+       must not be shippable by accident. -->
+  <Target Name="RequireNativeForPublish" BeforeTargets="PrepareForPublish">
+    <Error
+      Condition="'$(PublishSingleFileBundle)' == 'true' And !Exists('$(MSBuildThisFileDirectory)..\..\target\release\claude_switch.dll')"
+      Text="Refusing to publish without the native engine. Run first: cargo build -p claude-switch-ffi --release" />
   </Target>
   <ItemGroup>
     <!-- Card/drawer controls stay internal; the test project reads their

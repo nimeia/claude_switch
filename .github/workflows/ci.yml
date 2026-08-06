@@ -95,3 +95,27 @@ jobs:
           if ($files.Count -ne 1 -or $files[0].Name -ne 'ClaudeSwitch.exe') {
             throw "expected exactly ClaudeSwitch.exe in dist, got: $($files.Name -join ', ')"
           }
+
+      - name: Smoke-run the published exe
+        shell: pwsh
+        env:
+          # Isolated home: the smoke run must never touch a real Claude login.
+          CLAUDE_SWITCH_LAYOUT_DIR: ${{ runner.temp }}/probe
+          CLAUDE_SWITCH_LAYOUT_EXIT: "1"
+          CLAUDE_SWITCH_PROBE_SETTLE_MS: "800"
+        run: |
+          # The one-file check proves packaging, not that the bundle runs. This
+          # catches the failure that check cannot see: the native engine failing
+          # to resolve out of the self-extracted bundle, which would ship a
+          # binary that dies on launch for every user.
+          $fixture = Join-Path $env:RUNNER_TEMP 'fixture-home'
+          $p = Start-Process -FilePath dist/ClaudeSwitch.exe `
+                 -ArgumentList '--skip-onboarding', '--fixture', $fixture `
+                 -PassThru
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'exe did not exit within 120s' }
+          if ($p.ExitCode -ne 0) { throw "exe exited with $($p.ExitCode)" }
+          $shot = Join-Path $env:CLAUDE_SWITCH_LAYOUT_DIR 'gui-layout.png'
+          if (-not (Test-Path $shot)) { throw 'the app never reached first paint' }
+          Get-Content (Join-Path $env:CLAUDE_SWITCH_LAYOUT_DIR 'gui-layout-rects.txt') |
+            Select-String '^(list|status|strip)=' 
+          Write-Host "published exe launched, rendered and exited cleanly"
