@@ -75,6 +75,7 @@ sealed class MainForm : Form
     private readonly Panel _emptyState;
     private readonly Panel _listOuter;
     private readonly ActivityStrip _activityStrip;
+    private readonly ToolStripDropDownButton _btnResume;
     private readonly Panel _header;
     private readonly Panel _actionBar;
     private readonly Panel _settingsStrip;
@@ -250,6 +251,21 @@ sealed class MainForm : Form
         btnRefresh.ToolTipText = "刷新全部账号的用量与列表";
         var btnAdd = MakeStripBtn("添加账号", "secondary");
         btnAdd.ToolTipText = "托管本机当前 Claude Code 登录（全局）";
+        _btnResume = new ToolStripDropDownButton("继续会话")
+        {
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            AutoSize = true,
+            Margin = new Padding(0, 0, Theme.Space1, 0),
+            Padding = new Padding(Theme.Space3, 5, Theme.Space3, 5),
+            Font = Theme.FontBody,
+            Tag = "secondary",
+            Overflow = ToolStripItemOverflow.Never,
+            ToolTipText = "回到最近的会话（在你自己的终端里打开）",
+        };
+        // Built on open, not on a timer: the list is only interesting at the
+        // moment it is read, and building it costs a directory listing.
+        _btnResume.DropDownOpening += (_, _) => FillResumeMenu(_btnResume.DropDownItems);
+
         var btnProjects = MakeStripBtn("目录", "secondary");
         btnProjects.ToolTipText = "Claude Code 用过的目录与会话（与账号无关）";
         var btnOverview = MakeStripBtn("用量总览", "secondary");
@@ -291,8 +307,8 @@ sealed class MainForm : Form
             Margin = new Padding(0, 0, Theme.Space2, 0),
         };
         foreach (var item in new ToolStripItem[]
-                 { _btnSwitch, btnRefresh, btnAdd, btnProjects, btnOverview, _btnTheme, _search,
-                   _btnSearchClear, _searchMatchLabel })
+                 { _btnSwitch, btnRefresh, btnAdd, _btnResume, btnProjects, btnOverview, _btnTheme,
+                   _search, _btnSearchClear, _searchMatchLabel })
             item.Overflow = ToolStripItemOverflow.Never;
 
         _btnSwitch.Click += (_, _) => DoSwitch();
@@ -328,7 +344,9 @@ sealed class MainForm : Form
         _toolStrip.Items.AddRange([
             _btnSwitch,
             new ToolStripSeparator(),
-            btnRefresh, btnAdd, btnProjects, btnOverview,
+            btnRefresh, btnAdd,
+            new ToolStripSeparator(),
+            _btnResume, btnProjects, btnOverview,
             new ToolStripSeparator(),
             _btnTheme,
         ]);
@@ -859,11 +877,62 @@ sealed class MainForm : Form
         _cardHost.ResumeLayout(true);
     }
 
+    /// <summary>
+    /// Populate a "continue session" menu from the most recent session per
+    /// directory. Shared by the toolbar button and the tray so the two lists
+    /// cannot drift apart.
+    /// </summary>
+    private void FillResumeMenu(ToolStripItemCollection items)
+    {
+        items.Clear();
+        var recent = RecentSessions.Load(_engine, 8);
+
+        if (recent.Count == 0)
+        {
+            items.Add(new ToolStripMenuItem("还没有可继续的会话") { Enabled = false });
+        }
+        else
+        {
+            foreach (var session in recent)
+            {
+                var item = new ToolStripMenuItem(RecentSessions.MenuLabel(session))
+                {
+                    ToolTipText = $"{session.Path}{Environment.NewLine}会话 {session.SessionId}",
+                };
+                item.Click += (_, _) => ResumeSession(session);
+                items.Add(item);
+            }
+        }
+
+        items.Add(new ToolStripSeparator());
+        items.Add(new ToolStripMenuItem("全部目录与会话…", null, (_, _) => ShowProjectsWindow()));
+    }
+
+    private void ResumeSession(RecentSession session)
+    {
+        if (ClaudeCli.Resume(session.Path, session.SessionId) is { } problem)
+        {
+            MessageBox.Show(this, problem, "无法继续会话", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        _baseStatus = $"已在 {session.Name} 恢复会话";
+        ComposeStatusLine();
+    }
+
     private ContextMenuStrip BuildTrayMenu()
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("显示主窗口", null, (_, _) => RestoreFromTray());
         menu.Items.Add("刷新用量", null, (_, _) => Reload());
+        menu.Items.Add(new ToolStripSeparator());
+
+        // The tray is where someone returning to their machine actually looks,
+        // and the main window is usually closed at that moment.
+        var resume = new ToolStripMenuItem("继续会话");
+        resume.DropDownOpening += (_, _) => FillResumeMenu(resume.DropDownItems);
+        // A submenu with no children never opens, so seed one placeholder.
+        resume.DropDownItems.Add(new ToolStripMenuItem("…") { Enabled = false });
+        menu.Items.Add(resume);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出（Shift+关闭）", null, (_, _) =>
         {

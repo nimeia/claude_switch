@@ -447,42 +447,17 @@ internal sealed class ProjectsWindow : Form
         _stats.Enabled = project?.TranscriptDir is not null;
     }
 
-    /// <summary>
-    /// Open a terminal in the directory and resume the chosen conversation.
-    /// </summary>
-    /// <remarks>
-    /// The working directory is set on the process rather than prepended as a
-    /// <c>cd</c>: it avoids quoting the path into a command string, and it is
-    /// what decides which project Claude Code attaches to.
-    /// </remarks>
+    /// <summary>Resume the selected conversation in the user's own terminal.</summary>
     private void ResumeSelected()
     {
         if (SelectedProject is not { } project || SelectedSession is not { } session) return;
 
-        if (!Directory.Exists(project.Path))
+        if (ClaudeCli.Resume(project.Path, session.Id) is { } problem)
         {
-            MessageBox.Show(
-                this,
-                $"目录不存在：\n{project.Path}\n\n会话记录仍在，但目录已被移动或删除。",
-                "无法继续会话",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+            MessageBox.Show(this, problem, "无法继续会话", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
-
-        try
-        {
-            Process.Start(new ProcessStartInfo("cmd.exe", $"/k claude --resume {session.Id}")
-            {
-                WorkingDirectory = project.Path,
-                UseShellExecute = true,
-            });
-            _hint.Text = $"已在 {project.Name} 打开终端并恢复会话 {session.Id[..Math.Min(8, session.Id.Length)]}…";
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, ex.Message, "启动失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
+        _hint.Text = $"已在 {project.Name} 恢复会话 {session.Id[..Math.Min(8, session.Id.Length)]}…";
     }
 
     private void OpenSelectedDirectory()
