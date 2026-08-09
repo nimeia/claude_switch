@@ -1156,6 +1156,19 @@ sealed class MainForm : Form
         // its window is closed, and an overlay is the only way to capture it.
         // The expanded task board is a different layout, not just more rows, so
         // it needs its own capture.
+        // Toggle the palette before the main capture, so a themed screenshot
+        // does not depend on what the machine happens to be set to. Uses an
+        // ExtraCheck rather than an overlay because overlays are screen copies,
+        // which come back black on a session with no composited desktop.
+        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_FLIPTHEME") == "1")
+        {
+            LayoutProbe.ExtraChecks.Add(() =>
+            {
+                Theme.Toggle();
+                Application.DoEvents();
+                return $"theme flipped to {Theme.Mode}";
+            });
+        }
         if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_BOARD") == "1")
         {
             LayoutProbe.ExtraChecks.Add(() =>

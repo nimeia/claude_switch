@@ -43,16 +43,55 @@ internal sealed class TaskRow : Panel
 
     protected override void OnMouseEnter(EventArgs e)
     {
-        _hover = true;
-        Invalidate();
+        SetHover(true);
         base.OnMouseEnter(e);
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
-        _hover = false;
-        Invalidate();
+        SetHover(false);
         base.OnMouseLeave(e);
+    }
+
+    /// <summary>
+    /// Change the row's surface, telling the pills what they now sit on.
+    /// </summary>
+    /// <remarks>
+    /// The pills paint their own backdrop, so a row that changed colour under
+    /// them without saying so would leave each one in a patch of the old shade.
+    /// </remarks>
+    private void SetHover(bool hover)
+    {
+        if (_hover == hover) return;
+        _hover = hover;
+        foreach (var pill in Descendants(this).OfType<PillButton>())
+        {
+            pill.Surface = SurfaceColor;
+            pill.Invalidate();
+        }
+        Invalidate();
+    }
+
+    private Color SurfaceColor => _hover ? Theme.BgHover : Theme.BgSurface;
+
+    private static IEnumerable<Control> Descendants(Control root)
+    {
+        foreach (Control child in root.Controls)
+        {
+            yield return child;
+            foreach (var c in Descendants(child)) yield return c;
+        }
+    }
+
+    /// <summary>Re-seed the pills after a theme change, which moves the palette.</summary>
+    public void RefreshSurfaces()
+    {
+        foreach (var pill in Descendants(this).OfType<PillButton>())
+        {
+            pill.Surface = SurfaceColor;
+            pill.Invalidate();
+        }
+        Invalidate();
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -150,6 +189,17 @@ internal sealed class PillButton : Control
     /// <summary>Draws the primary action with more weight than the rest.</summary>
     public bool Emphasis { get; init; }
 
+    /// <summary>
+    /// Colour behind the pill, so its rounded corners blend into the row.
+    /// </summary>
+    /// <remarks>
+    /// Set explicitly rather than read from the parent: the parent is a
+    /// transparent flow panel, and <see cref="Graphics.Clear"/> ignores alpha —
+    /// clearing to <see cref="Color.Transparent"/> paints solid black, which is
+    /// exactly what showed up as square black corners around every pill.
+    /// </remarks>
+    public Color Surface { get; set; } = Theme.BgSurface;
+
     public PillButton(string text)
     {
         SetStyle(
@@ -228,7 +278,7 @@ internal sealed class PillButton : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Parent?.BackColor ?? Theme.BgSurface);
+        g.Clear(Surface);
 
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
         using var path = TaskRow.Rounded(r, r.Height / 2);
@@ -775,6 +825,7 @@ internal sealed class TaskBoard : Panel
         }
 
         row.Controls.Add(actions);
+        row.RefreshSurfaces();
         // The painted row needs to know how much room the buttons take so its
         // text ellipsises before running under them.
         row.Layout += (_, _) => PlaceActions(row, actions);
@@ -882,7 +933,13 @@ internal sealed class TaskBoard : Panel
             // The holder's padding is the gap between rows, so it has to show
             // the page colour rather than the row's.
             holder.BackColor = Theme.BgApp;
-            foreach (Control row in holder.Controls) row.Invalidate(true);
+            foreach (Control row in holder.Controls)
+            {
+                // The pills cache the shade they sit on, so a palette change has
+                // to hand them the new one.
+                if (row is TaskRow painted) painted.RefreshSurfaces();
+                else row.Invalidate(true);
+            }
         }
     }
 }

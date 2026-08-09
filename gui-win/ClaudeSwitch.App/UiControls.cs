@@ -537,11 +537,23 @@ internal sealed class ThemedCheckBox : CheckBox
         base.OnMouseLeave(e);
     }
 
+    /// <summary>Nearest ancestor colour that is actually paintable.</summary>
+    private Color OpaqueBackdrop()
+    {
+        for (var p = Parent; p is not null; p = p.Parent)
+        {
+            if (p.BackColor.A == 255) return p.BackColor;
+        }
+        return Theme.BgApp;
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        g.Clear(Parent?.BackColor ?? Theme.BgApp);
+        // Graphics.Clear ignores alpha, so clearing to a transparent parent
+        // colour paints solid black. Walk up to something opaque instead.
+        g.Clear(OpaqueBackdrop());
 
         int box = Box;
         int top = (Height - box) / 2;
