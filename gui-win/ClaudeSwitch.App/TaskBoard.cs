@@ -457,8 +457,16 @@ internal sealed class TaskBoard : Panel
     /// <summary>Every task, of which the view shows a page.</summary>
     private IReadOnlyList<TaskEntry> _entries = [];
 
-    /// <summary>Whether the band is showing more than its collapsed few.</summary>
-    private bool _expanded;
+    /// <summary>
+    /// Whether the user wants every task shown, not whether any are hidden.
+    /// </summary>
+    /// <remarks>
+    /// Kept as a preference rather than recomputed: a list that briefly drops
+    /// below the collapsed cap must not silently discard the choice, or the
+    /// band would fold itself the moment a run finished and unfold again when
+    /// the next one started.
+    /// </remarks>
+    private bool _expanded = UiPrefs.TasksExpanded;
 
     private int _page;
 
@@ -534,6 +542,7 @@ internal sealed class TaskBoard : Panel
         _seeAll.LinkClicked += (_, _) =>
         {
             _expanded = !_expanded;
+            UiPrefs.TasksExpanded = _expanded;
             _page = 0;
             Render();
             LayoutChanged?.Invoke();
@@ -595,6 +604,21 @@ internal sealed class TaskBoard : Panel
 
     internal bool IsExpandedForTest => _expanded;
 
+    /// <summary>
+    /// Put the band in a known state, without touching the stored preference.
+    /// </summary>
+    /// <remarks>
+    /// The initial state comes from a process-wide preference, so a test that
+    /// relied on the default would be at the mercy of whatever ran before it —
+    /// and of whatever the developer's own prefs file happens to say.
+    /// </remarks>
+    internal void SetExpandedForTest(bool expanded)
+    {
+        _expanded = expanded;
+        _page = 0;
+        Render();
+    }
+
     internal void ToggleForTest()
     {
         _expanded = !_expanded;
@@ -641,7 +665,6 @@ internal sealed class TaskBoard : Panel
         _entries = entries;
         // A refresh can shorten the list under a reader who is on the last page.
         _page = Math.Clamp(_page, 0, Math.Max(0, PageCount - 1));
-        if (entries.Count <= MaxRows) _expanded = false;
         Render();
     }
 
@@ -652,7 +675,13 @@ internal sealed class TaskBoard : Panel
         foreach (Control c in _rows.Controls) c.Dispose();
         _rows.Controls.Clear();
 
-        var shown = _expanded
+        // Collapsing only means something when it would hide something. Below
+        // the cap both views show the same rows, so the link goes away rather
+        // than offering a choice with no effect.
+        bool canCollapse = entries.Count > MaxRows;
+        bool showAll = _expanded && canCollapse;
+
+        var shown = showAll
             ? entries.Skip(_page * EffectivePageSize).Take(EffectivePageSize).ToList()
             // Even collapsed, never claim more rows than the window can show —
             // a clipped half-row reads as a rendering fault.
@@ -680,16 +709,14 @@ internal sealed class TaskBoard : Panel
         }
 
         _summary.Text = SummaryText(entries);
-        // The link is offered whenever collapsing would hide something, and
-        // stays offered once expanded so there is a way back.
-        _seeAll.Visible = _expanded || entries.Count > MaxRows;
-        _seeAll.Text = _expanded
+        _seeAll.Visible = canCollapse;
+        _seeAll.Text = showAll
             ? Loc.T("board.seeAll.collapse")
             : Loc.T("board.seeAll.count", entries.Count);
         _headingRow.Height = (int)Scaled(HeadingHeight);
 
         int pages = PageCount;
-        _pager.Visible = _expanded && pages > 1;
+        _pager.Visible = showAll && pages > 1;
         if (_pager.Visible)
         {
             _pager.Height = (int)Scaled(PagerHeight);

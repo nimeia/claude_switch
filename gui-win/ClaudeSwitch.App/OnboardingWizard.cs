@@ -274,6 +274,17 @@ internal static class UiPrefs
     /// </remarks>
     public static bool SettingsExpanded { get; set; }
 
+    /// <summary>
+    /// Whether the supervised-work band shows every task or only the first few.
+    /// </summary>
+    /// <remarks>
+    /// Defaults to expanded, unlike the automation section: that one holds
+    /// decisions made once, while this one holds work in progress, and a task
+    /// that needs a person is worth the height. Collapsing is remembered, so
+    /// the default only decides what a first run looks like.
+    /// </remarks>
+    public static bool TasksExpanded { get; set; } = true;
+
     private static string Path =>
         System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -296,6 +307,10 @@ internal static class UiPrefs
                     Language = line["language=".Length..].Trim();
                 if (line.StartsWith("settings_expanded=", StringComparison.OrdinalIgnoreCase))
                     SettingsExpanded = line.Contains('1') || line.Contains("true", StringComparison.OrdinalIgnoreCase);
+                // Absent from a prefs file written before this setting existed,
+                // which must keep the expanded default rather than read as off.
+                if (line.StartsWith("tasks_expanded=", StringComparison.OrdinalIgnoreCase))
+                    TasksExpanded = line.Contains('1') || line.Contains("true", StringComparison.OrdinalIgnoreCase);
             }
         }
         catch { /* ignore */ }
@@ -315,6 +330,7 @@ internal static class UiPrefs
                 $"onboarding_done={(OnboardingDone ? "1" : "0")}\n" +
                 $"hide_email={(HideEmail ? "1" : "0")}\n" +
                 $"settings_expanded={(SettingsExpanded ? "1" : "0")}\n" +
+                $"tasks_expanded={(TasksExpanded ? "1" : "0")}\n" +
                 $"language={Language}\n");
         }
         catch { /* ignore */ }

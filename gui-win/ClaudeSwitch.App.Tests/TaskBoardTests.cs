@@ -79,14 +79,14 @@ public class TaskBoardTests : IDisposable
     public void The_board_shows_at_most_its_row_cap()
     {
         using var board = new TaskBoard();
-        var many = Enumerable
-            .Range(0, TaskBoard.MaxRows + 3)
-            .Select(i => Entry(TaskState.Interrupted, $"t{i}", () => { }))
-            .ToList();
+        var many = Many(TaskBoard.PageSize + 3);
 
+        board.SetExpandedForTest(false);
         board.Show(many);
-
         Assert.Equal(TaskBoard.MaxRows, board.RowCount);
+
+        board.SetExpandedForTest(true);
+        Assert.Equal(TaskBoard.PageSize, board.RowCount);
 
         // And it collapses to nothing when there is nothing to report, so the
         // band costs no height on a machine that never uses supervised runs.
@@ -94,41 +94,46 @@ public class TaskBoardTests : IDisposable
         Assert.Equal(0, board.RowCount);
     }
 
+    private static List<TaskEntry> Many(int n) =>
+        [.. Enumerable.Range(0, n).Select(i => Entry(TaskState.Interrupted, $"t{i}", () => { }))];
+
     [Fact]
-    public void Expanding_shows_a_page_instead_of_the_collapsed_few()
+    public void The_band_starts_expanded()
+    {
+        // Work in progress is worth the height; the automation panel folds by
+        // default because those are decisions made once, this is not.
+        using var board = new TaskBoard();
+        board.Show(Many(TaskBoard.PageSize + 2));
+        Assert.True(board.IsExpandedForTest);
+        Assert.Equal(TaskBoard.PageSize, board.RowCount);
+    }
+
+    [Fact]
+    public void Collapsing_shows_only_the_first_few()
     {
         using var board = new TaskBoard();
-        var many = Enumerable
-            .Range(0, TaskBoard.PageSize + 2)
-            .Select(i => Entry(TaskState.Interrupted, $"t{i}", () => { }))
-            .ToList();
+        board.SetExpandedForTest(true);
+        board.Show(Many(TaskBoard.PageSize + 2));
+        float expanded = board.DesiredHeight;
+        Assert.Equal(TaskBoard.PageSize, board.RowCount);
 
-        board.Show(many);
+        board.ToggleForTest();
         Assert.Equal(TaskBoard.MaxRows, board.RowCount);
-        float collapsed = board.DesiredHeight;
+
+        // Each state must ask the form for its own height, or the rows would be
+        // laid out inside a height that never changed and get clipped.
+        Assert.True(board.DesiredHeight < expanded);
 
         board.ToggleForTest();
         Assert.Equal(TaskBoard.PageSize, board.RowCount);
-
-        // Expanding must ask the form for more room, or the extra rows would be
-        // laid out inside a height that never changed and get clipped.
-        Assert.True(board.DesiredHeight > collapsed);
-
-        board.ToggleForTest();
-        Assert.Equal(TaskBoard.MaxRows, board.RowCount);
     }
 
     [Fact]
     public void The_last_page_holds_the_remainder()
     {
         using var board = new TaskBoard();
-        var many = Enumerable
-            .Range(0, TaskBoard.PageSize + 2)
-            .Select(i => Entry(TaskState.Interrupted, $"t{i}", () => { }))
-            .ToList();
-
-        board.Show(many);
-        board.ToggleForTest();
+        board.SetExpandedForTest(true);
+        board.Show(Many(TaskBoard.PageSize + 2));
         board.TurnPageForTest(1);
 
         Assert.Equal(2, board.RowCount);
@@ -143,9 +148,8 @@ public class TaskBoardTests : IDisposable
     {
         // A refresh can drop tasks while someone is on the last page.
         using var board = new TaskBoard();
-        board.Show([.. Enumerable.Range(0, TaskBoard.PageSize + 2)
-            .Select(i => Entry(TaskState.Interrupted, $"t{i}", () => { }))]);
-        board.ToggleForTest();
+        board.SetExpandedForTest(true);
+        board.Show(Many(TaskBoard.PageSize + 2));
         board.TurnPageForTest(1);
         Assert.Equal(2, board.RowCount);
 
@@ -154,18 +158,22 @@ public class TaskBoardTests : IDisposable
     }
 
     [Fact]
-    public void A_short_list_never_stays_expanded()
+    public void A_short_list_keeps_the_choice_it_was_given()
     {
-        // Nothing is hidden, so there is nothing to expand into.
+        // Below the cap both views show the same rows, so the preference must
+        // survive rather than be rewritten — otherwise the band would fold
+        // itself the moment a run finished and unfold when the next started.
         using var board = new TaskBoard();
-        board.Show([.. Enumerable.Range(0, TaskBoard.PageSize + 2)
-            .Select(i => Entry(TaskState.Interrupted, $"t{i}", () => { }))]);
-        board.ToggleForTest();
+        board.SetExpandedForTest(true);
+        board.Show(Many(TaskBoard.PageSize + 2));
         Assert.Equal(TaskBoard.PageSize, board.RowCount);
 
         board.Show([Entry(TaskState.Running, "one")]);
         Assert.Equal(1, board.RowCount);
-        Assert.False(board.IsExpandedForTest);
+        Assert.True(board.IsExpandedForTest);
+
+        board.Show(Many(TaskBoard.PageSize + 2));
+        Assert.Equal(TaskBoard.PageSize, board.RowCount);
     }
 
     [Fact]
@@ -174,8 +182,8 @@ public class TaskBoardTests : IDisposable
         // A clipped half-row reads as a rendering fault, and scrolling to fix it
         // brings a native scrollbar the theme cannot recolour.
         using var board = new TaskBoard();
-        board.Show([.. Enumerable.Range(0, 8)
-            .Select(i => Entry(TaskState.Interrupted, $"t{i}", () => { }))]);
+        board.SetExpandedForTest(false);
+        board.Show(Many(8));
         Assert.Equal(TaskBoard.MaxRows, board.RowCount);
 
         board.SetMaxVisibleRows(2);
