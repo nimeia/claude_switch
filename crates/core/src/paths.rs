@@ -138,6 +138,8 @@ pub struct Paths {
     pub sequence_file: PathBuf,
     pub settings_file: PathBuf,
     pub autoswitch_state_file: PathBuf,
+    /// Journal of supervised agent runs (see [`crate::agentruns`]).
+    pub agent_runs_file: PathBuf,
 }
 
 impl Paths {
@@ -157,6 +159,7 @@ impl Paths {
             sequence_file: backup_root.join("sequence.json"),
             settings_file: backup_root.join("settings.json"),
             autoswitch_state_file: backup_root.join("autoswitch_state.json"),
+            agent_runs_file: backup_root.join(crate::agentruns::JOURNAL_FILENAME),
             backup_root,
             env,
         }

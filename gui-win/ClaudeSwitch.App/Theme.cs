@@ -36,11 +36,18 @@ public static class Theme
     public static Color PrimarySoft { get; private set; }
     public static Color Accent { get; private set; }
 
-    // Semantic
+    // ── Semantic roles ───────────────────────────────────────────────────
+    // Each colour owns exactly one meaning, and nothing else may borrow it:
+    //   green (Primary)  brand, and "this account is the one in use"
+    //   slate (Selection) "this row has focus" — never a state, only a cursor
+    //   amber (Warning)  "this needs you" — a credential to fix, a quota to watch
+    //   red   (Danger)   an error, or a window that is effectively spent
     public static Color Danger { get; private set; }
     public static Color DangerSoft { get; private set; }
     public static Color Success { get; private set; }
     public static Color Warning { get; private set; }
+    /// <summary>Amber wash behind an attention badge — pairs with <see cref="Warning"/>.</summary>
+    public static Color WarningSoft { get; private set; }
 
     // Text
     public static Color TextPrimary { get; private set; }
@@ -120,6 +127,7 @@ public static class Theme
             DangerSoft = Color.FromArgb(0x3A, 0x28, 0x26);
             Success = Color.FromArgb(0x6F, 0xB8, 0x8A);
             Warning = Color.FromArgb(0xE0, 0xB8, 0x55);
+            WarningSoft = Color.FromArgb(0x3A, 0x32, 0x1E);
 
             TextPrimary = Color.FromArgb(0xEC, 0xF2, 0xEE);
             TextSecondary = Color.FromArgb(0xB0, 0xBE, 0xB6);
@@ -160,6 +168,7 @@ public static class Theme
             DangerSoft = Color.FromArgb(0xF8, 0xEB, 0xE9);
             Success = Color.FromArgb(0x3D, 0x7A, 0x56);
             Warning = Color.FromArgb(0xB8, 0x8A, 0x28);
+            WarningSoft = Color.FromArgb(0xFB, 0xF2, 0xDF);
 
             TextPrimary = Color.FromArgb(0x1A, 0x1F, 0x1C);
             TextSecondary = Color.FromArgb(0x4A, 0x54, 0x4E);
@@ -198,12 +207,19 @@ public static class Theme
     public static string UsageLabel(double? pct) =>
         pct is null ? Loc.T("usage.none") : Loc.T("usage.usedOnly", $"{pct:0.#}");
 
-    /// <summary>Compact used+remain for dense card meters (must fit ~120px).</summary>
-    public static string UsageLabelCompact(double? pct, string? status = null)
+    /// <summary>
+    /// What is left, for the figure beside a card's bar.
+    /// </summary>
+    /// <remarks>
+    /// Only the remainder. The bar already shows the spent share, so printing
+    /// both numbers put two figures for one measurement side by side and made
+    /// readers work out that they always sum to 100.
+    /// </remarks>
+    public static string UsageLabelRemain(double? pct, string? status = null)
     {
         if (pct is null) return UsageStatusShort(status);
         double remain = Math.Max(0, 100.0 - pct.Value);
-        return Loc.T("usage.used", $"{pct:0.#}", $"{remain:0.#}");
+        return Loc.T("usage.remain", $"{remain:0.#}");
     }
 
     /// <summary>Full used+remain for detail drawer / tooltips.</summary>
@@ -312,6 +328,26 @@ public static class Theme
         }
         int mins = Math.Max(1, (int)Math.Ceiling(rem.TotalMinutes));
         return Loc.T("resets.m", mins);
+    }
+
+    /// <summary>
+    /// Warmup plan label: "now", "today 06:00", or "tomorrow 06:00". Null if unparseable.
+    /// </summary>
+    public static string? FormatWarmupAnchor(string? isoLocalOrOffset)
+    {
+        if (string.IsNullOrWhiteSpace(isoLocalOrOffset)) return null;
+        if (!DateTimeOffset.TryParse(isoLocalOrOffset, out var when)) return null;
+        var local = when.ToLocalTime();
+        var now = DateTimeOffset.Now;
+        // Within ~2 minutes of "now" the core surfaces the current tick as the plan.
+        if (Math.Abs((local - now).TotalMinutes) <= 2)
+            return Loc.T("warmup.when.now");
+        string clock = $"{local.Hour}:{local.Minute:D2}";
+        if (local.Date == now.Date)
+            return Loc.T("warmup.when.today", clock);
+        if (local.Date == now.Date.AddDays(1))
+            return Loc.T("warmup.when.tomorrow", clock);
+        return Loc.T("warmup.when.date", local.Month, local.Day, clock);
     }
 
 

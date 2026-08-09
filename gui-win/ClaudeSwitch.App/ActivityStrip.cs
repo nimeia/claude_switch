@@ -98,7 +98,27 @@ internal sealed class ActivityStrip : Panel
     {
         if (_collapsed) return;
         int want = StripHeight;
+        if (_hostHeight > 0) want = Math.Min(want, _hostHeight * 2 / 5);
         if (Height != want) Height = want;
+    }
+
+    /// <summary>Height of the window the strip is in, or 0 while unknown.</summary>
+    private int _hostHeight;
+
+    /// <summary>
+    /// Tell the strip how much window there is, so it can stand down.
+    /// </summary>
+    /// <remarks>
+    /// The heatmap asks for a fixed height whatever the window does. In a short
+    /// window that left the account list a two-line slot under a full-size
+    /// chart — the summary crowding out the thing it summarises. Two fifths is
+    /// the most it may take.
+    /// </remarks>
+    public void CapHeight(int hostHeight)
+    {
+        if (_hostHeight == hostHeight) return;
+        _hostHeight = hostHeight;
+        SyncHeight();
     }
 
     /// <summary>Nothing to show at all — the strip stays out of the way.</summary>

@@ -514,19 +514,34 @@ internal sealed class CalendarHeatmap : ChartBase
     /// the caption beside the grid already says the work is running. What the
     /// placeholder must do is hold the space so nothing jumps.
     /// </remarks>
+    /// <summary>
+    /// Placeholder shown while the scan runs.
+    /// </summary>
+    /// <remarks>
+    /// Three soft bars, not a full grid of blank cells. A complete grid of
+    /// identical squares is indistinguishable from a heatmap of a year in which
+    /// nothing happened — it looked like an answer rather than a wait. Bars read
+    /// as "content on its way" and cannot be mistaken for data.
+    /// </remarks>
     private void PaintSkeleton(Graphics g)
     {
+        // Left-aligned under the caption that names it, not centred like the
+        // grid: a placeholder floating in the middle of the strip read as
+        // unrelated to the "loading" line above it.
+        int left = LeftGutter;
+        int usable = Math.Max(40, Width - left - 8);
+        int barH = Math.Max(6, Step - Gap * 2);
+        int gap = Math.Max(6, Step);
+        int top = TopGutter + Math.Max(0, (Step * 7 - (barH * 3 + gap * 2)) / 2);
+
         using var brush = new SolidBrush(EmptyCell);
-        for (int col = 0; col < WeekCount; col++)
+        ReadOnlySpan<double> widths = [1.0, 0.72, 0.86];
+        for (int i = 0; i < widths.Length; i++)
         {
-            for (int row = 0; row < 7; row++)
-            {
-                var r = new Rectangle(
-                    GridLeft + col * Step, TopGutter + row * Step, Cell, Cell);
-                if (r.Right > Width) continue;
-                using var path = CardPanel.Rounded(r, 2);
-                g.FillPath(brush, path);
-            }
+            var r = new Rectangle(
+                left, top + i * (barH + gap), (int)(usable * widths[i]), barH);
+            using var path = CardPanel.Rounded(r, barH / 2);
+            g.FillPath(brush, path);
         }
     }
 

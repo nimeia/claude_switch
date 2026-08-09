@@ -7,8 +7,9 @@ namespace ClaudeSwitch.App;
 /// Opening a terminal that runs one specific account, alongside the default login.
 ///
 /// The core prepares a per-account profile directory and hands back the value for
-/// <c>CLAUDE_CONFIG_DIR</c>; this class is only the shell around that — pick a
-/// directory, launch, report. Everything that decides *what* the profile contains
+/// <c>CLAUDE_CONFIG_DIR</c>; this class is only the shell around that — launch and
+/// report. Directory choice lives in <see cref="SessionLaunchDialog"/> (recent
+/// work dirs + continue/new). Everything that decides *what* the profile contains
 /// lives in the core so the CLI-shaped rules stay in one place.
 /// </summary>
 internal static class SessionMode

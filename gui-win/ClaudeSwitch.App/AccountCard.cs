@@ -27,6 +27,11 @@ public sealed class AccountCardModel
     public string? FiveHourResetsAt { get; init; }
     /// <summary>ISO timestamp when the 7d window resets (if known).</summary>
     public string? SevenDayResetsAt { get; init; }
+    /// <summary>
+    /// Next local time the window guardian would open the 5h bucket (when
+    /// warmup is on and the window is not already live).
+    /// </summary>
+    public string? WarmupAnchor { get; init; }
 
     /// <summary>
     /// Why usage numbers are missing: <c>ok</c> · <c>unknown</c> ·
@@ -63,6 +68,21 @@ public sealed class AccountCardModel
     public bool HasPlanBadge => !string.IsNullOrWhiteSpace(PlanLabel);
 
     /// <summary>
+    /// The account cannot report usage until the user does something about it.
+    /// </summary>
+    /// <remarks>
+    /// One card-level state, not a per-window one: the credential is broken for
+    /// the whole account, so repeating the reason on the 5h row and again on the
+    /// 7d row read as two independent quota faults.
+    /// </remarks>
+    public bool NeedsAttention =>
+        UsageStatus is "needs-login" or "no-credential" or "no-subscription";
+
+    /// <summary>Numbers are simply not in yet — not an error, not a final answer.</summary>
+    public bool UsageUnknownYet =>
+        FiveHour is null && SevenDay is null && UsageStatus is null or "ok" or "unknown";
+
+    /// <summary>
     /// True when the snapshot carried a `plan` node worth a detail section —
     /// false for slots whose backups predate these fields.
     /// </summary>
@@ -78,21 +98,32 @@ public sealed class AccountCardModel
 internal sealed record CardDrop(AccountCard Source, AccountCard Target, bool After);
 
 /// <summary>
-/// Compact account row. Active (in use) and selected (focus for actions) are independent:
-///   · selected → slate/blue border + soft selection fill
-///   · active   → green badge + "当前" pill (never green border alone)
+/// One account, drawn as five aligned columns:
+/// <c>identity │ state │ 5h │ 7d │ actions</c>. Every card computes the same
+/// column geometry from the same measurements, so the numbers line up down the
+/// list instead of drifting with the length of each name.
 /// </summary>
+/// <remarks>
+/// Colour roles are fixed and do not overlap: green says <em>this account is the
+/// one in use</em>, slate/blue says <em>this row has the keyboard focus</em>,
+/// amber says <em>this account needs you</em>. A card can be all three at once,
+/// which is exactly why each gets its own channel — fill, border and badge —
+/// rather than all three fighting over the background.
+/// </remarks>
 internal sealed class AccountCard : Control
 {
     private bool _hover;
     private bool _selected;
     private bool _moreHover;
+    private bool _fixHover;
     private Point _dragStart;
     private bool _dragArmed;
     /// <summary>This card is the one being dragged (drawn faded).</summary>
     private bool _dragSource;
     /// <summary>Insertion line to draw, or null when the pointer is elsewhere.</summary>
     private bool? _dropAfter;
+    /// <summary>Where the "sign in again" button was last painted (empty when absent).</summary>
+    private Rectangle _fixRect;
     private readonly ToolTip _tip = new() { ShowAlways = true, AutoPopDelay = 4500 };
 
     /// <summary>
@@ -131,16 +162,37 @@ internal sealed class AccountCard : Control
     /// <summary>A drag finished (dropped or cancelled); safe to rebuild again.</summary>
     public event EventHandler? DragSessionEnded;
     public event EventHandler? MoreMenuRequested;
+    /// <summary>The user pressed the card's "sign in again" button.</summary>
+    public event EventHandler? FixRequested;
 
-    private static int s_nameH;
-    private static int s_subH;
+    private static int s_row1H;
+    private static int s_row2H;
     private static int s_cardH;
-    private static int s_labelW;
-    private static int s_valueW;
-    private static int s_meterW;
+    private static int s_statusW;
+    private static int s_meterValueW;
+    private static int s_meterLabelW;
     private static bool s_metricsReady;
+    /// <summary>Display DPI the cached metrics were measured at.</summary>
+    private static int s_dpi = 96;
 
-    private const int GripW = 18;
+    /// <summary>Design pixels → device pixels for the display the cards are on.</summary>
+    private static int Sc(int designPx) => (int)Math.Round(designPx * s_dpi / 96.0);
+
+    // ── Column geometry (96-DPI design px; run through Sc for the display) ──
+    //
+    // Every length here is a design pixel. The fonts scale themselves with the
+    // display, so a raw constant is a column that keeps its 96-DPI width while
+    // the text inside it grows — which is how "alice@exa…" ended up ellipsised
+    // on a 125% screen at a width where it fits comfortably at 100%.
+    private const int PadX = 14;
+    private const int PadY = 9;
+    private const int AvatarD = 30;
+    private const int GapAvatar = 10;
+    private const int GapCol = 14;
+    private const int IdentityMinW = 150;
+    private const int MeterBarW = 120;
+    private const int MeterBarMinW = 72;
+    private const int GripW = 22;
     private const int MoreW = 28;
 
     private const TextFormatFlags TfLeft =
@@ -174,10 +226,10 @@ internal sealed class AccountCard : Control
             | ControlStyles.ResizeRedraw
             | ControlStyles.SupportsTransparentBackColor,
             true);
-        EnsureMetrics();
+        SyncDpi();
         Height = s_cardH;
         Cursor = Cursors.Hand;
-        Margin = new Padding(0, 0, 0, 2);
+        Margin = new Padding(0, 0, 0, 4);
         TabStop = true;
         AllowDrop = true;
         _tip.SetToolTip(this, Loc.T("card.tip.short"));
@@ -194,36 +246,65 @@ internal sealed class AccountCard : Control
     /// Discards the cached measurements so the next card re-measures.
     /// </summary>
     /// <remarks>
-    /// The meter column is sized from the widest label it will hold. Those
-    /// labels are translated, so the cache computed under one language sizes
-    /// the column wrong for the next: "5 小时" fitted where "5 hours" rendered
-    /// as "5 ho…".
+    /// The state and meter columns are sized from the widest label they will
+    /// hold. Those labels are translated, so the cache computed under one
+    /// language sizes the column wrong for the next: "5 小时" fitted where
+    /// "5 hours" rendered as "5 ho…".
     /// </remarks>
     public static void InvalidateMetrics() => s_metricsReady = false;
+
+    /// <summary>
+    /// Re-measure when this card lands on a display with a different scaling.
+    /// </summary>
+    /// <remarks>
+    /// The measurements are cached statically because every card shares them,
+    /// which is only sound while every card is on the same display. Checking the
+    /// DPI here is what keeps that true after a drag to a second monitor.
+    /// </remarks>
+    private void SyncDpi()
+    {
+        if (s_dpi != DeviceDpi)
+        {
+            s_dpi = DeviceDpi;
+            s_metricsReady = false;
+        }
+        EnsureMetrics();
+    }
+
+    private static readonly TextFormatFlags MeasureFlags =
+        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+
+    private static int TextW(string s, Font f) =>
+        TextRenderer.MeasureText(s, f, new Size(int.MaxValue, 200), MeasureFlags).Width;
 
     private static void EnsureMetrics()
     {
         if (s_metricsReady) return;
 
         // Generous line boxes so glyphs never clip under DPI / ClearType.
-        s_nameH = Math.Max(20, Theme.FontName.Height + 4);
-        s_subH = Math.Max(17, Theme.FontSmall.Height + 3);
+        s_row1H = Math.Max(20, Theme.FontName.Height + 4);
+        s_row2H = Math.Max(17, Theme.FontSmall.Height + 3);
 
-        // Measure widest strings so meter column never ellipsizes labels/values.
-        var flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
-        s_labelW = Math.Max(
-            52,
-            TextRenderer.MeasureText(Loc.T("card.window.5h"), Theme.FontSmall, new Size(int.MaxValue, s_subH), flags).Width + 4);
-        s_valueW = Math.Max(
-            96,
-            TextRenderer.MeasureText(Loc.T("usage.used", "100", "100"), Theme.FontSmall, new Size(int.MaxValue, s_subH), flags).Width + 6);
-        // label + gap + bar area + value
-        s_meterW = s_labelW + 8 + s_valueW + 8 + 72; // bar min ~72
+        // The state column holds one badge above one badge, and must fit the
+        // longest thing either can say — including the attention badge, which is
+        // the widest and the one that must never be the one that gets clipped.
+        int widestState = 0;
+        foreach (var key in new[]
+                 {
+                     "card.status.current", "card.status.ready", "card.status.disabled",
+                     "usage.needsLogin", "usage.noSubscription", "usage.noCredential",
+                 })
+            widestState = Math.Max(widestState, TextW(Loc.T(key), Theme.FontSmall));
+        widestState = Math.Max(widestState, TextW(Loc.T("card.relogin"), Theme.FontSmall) + Sc(8));
+        s_statusW = Math.Clamp(widestState + Sc(PillPadX) * 2, Sc(64), Sc(160));
 
-        int identityH = s_nameH + s_subH + 2;
-        int meterRow = s_subH + 8; // text line + bar + gap
-        int meterH = meterRow * 2 + 2;
-        s_cardH = Math.Max(86, Math.Max(identityH, meterH) + Theme.Space2 * 2);
+        s_meterLabelW = Math.Max(
+            TextW(Loc.T("card.window.5h"), Theme.FontSmall),
+            TextW(Loc.T("card.window.7d"), Theme.FontSmall)) + Sc(4);
+        s_meterValueW = Math.Max(
+            Sc(52), TextW(Loc.T("usage.remain", "100"), Theme.FontSmall) + Sc(4));
+
+        s_cardH = Math.Max(Sc(62), s_row1H + Sc(3) + s_row2H + Sc(PadY) * 2);
         s_metricsReady = true;
     }
 
@@ -234,9 +315,13 @@ internal sealed class AccountCard : Control
         string email = DisplayEmail(model.Email);
         string five = Theme.UsageLabelFull(model.FiveHour, model.UsageStatus);
         string seven = Theme.UsageLabelFull(model.SevenDay, model.UsageStatus);
+        string warmTip = "";
+        if (Theme.FormatWarmupAnchor(model.WarmupAnchor) is { } warm)
+            warmTip = Loc.T("card.tip.warmup", warm);
         _tip.SetToolTip(this,
-            $"{title}\n{email}\n{PlanTooltipLines(model)}"
+            $"{title}\n{Loc.T("card.slot", model.Number)} · {email}\n{PlanTooltipLines(model)}"
             + Loc.T("card.tip.windows", five, seven)
+            + warmTip
             + (model.Active ? Loc.T("card.tip.inUse") : "")
             + Loc.T("card.tip.short"));
         Invalidate();
@@ -272,6 +357,13 @@ internal sealed class AccountCard : Control
     public static string DisplayEmail(string email) =>
         UiPrefs.HideEmail ? Pii.MaskEmail(email) : email;
 
+    /// <summary>Single glyph for the avatar disc — the account's own initial.</summary>
+    private static string Initial(AccountCardModel m)
+    {
+        string t = DisplayTitle(m).TrimStart();
+        return t.Length == 0 ? "?" : t[..1].ToUpperInvariant();
+    }
+
     protected override void OnMouseEnter(EventArgs e)
     {
         _hover = true;
@@ -283,6 +375,7 @@ internal sealed class AccountCard : Control
     {
         _hover = false;
         _moreHover = false;
+        _fixHover = false;
         // Keep a pending drag armed while the button is still down: a quick
         // flick leaves the card's bounds before the drag threshold is crossed,
         // and disarming here made fast drags simply not start.
@@ -292,8 +385,8 @@ internal sealed class AccountCard : Control
         base.OnMouseLeave(e);
     }
 
-    private int MoreLeft => Math.Max(0, Width - MoreW - 2);
-    private int GripLeft => Math.Max(0, MoreLeft - GripW);
+    private int MoreLeft => Math.Max(0, Width - Sc(MoreW) - Sc(4));
+    private int GripLeft => Math.Max(0, MoreLeft - Sc(GripW) - Sc(Theme.Space2));
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
@@ -303,7 +396,12 @@ internal sealed class AccountCard : Control
             _dragArmed = e.X >= GripLeft && e.X < MoreLeft;
             Selected = true;
 
-            if (e.X >= MoreLeft)
+            if (!_fixRect.IsEmpty && _fixRect.Contains(e.Location))
+            {
+                FixRequested?.Invoke(this, EventArgs.Empty);
+                _dragArmed = false;
+            }
+            else if (e.X >= MoreLeft)
             {
                 MoreMenuRequested?.Invoke(this, EventArgs.Empty);
                 _dragArmed = false;
@@ -333,8 +431,10 @@ internal sealed class AccountCard : Control
         }
 
         bool wasMore = _moreHover;
+        bool wasFix = _fixHover;
         _moreHover = e.X >= MoreLeft;
-        if (wasMore != _moreHover) Invalidate();
+        _fixHover = !_fixRect.IsEmpty && _fixRect.Contains(e.Location);
+        if (wasMore != _moreHover || wasFix != _fixHover) Invalidate();
 
         // Assign only on change — every set of Cursor round-trips to the OS.
         var want = e.X >= GripLeft && e.X < MoreLeft ? Cursors.SizeAll : Cursors.Hand;
@@ -468,7 +568,7 @@ internal sealed class AccountCard : Control
     protected override void OnDoubleClick(EventArgs e)
     {
         var pt = PointToClient(Cursor.Position);
-        if (pt.X < GripLeft)
+        if (pt.X < GripLeft && !_fixRect.Contains(pt))
             CardActivated?.Invoke(this, EventArgs.Empty);
         base.OnDoubleClick(e);
     }
@@ -488,9 +588,59 @@ internal sealed class AccountCard : Control
         base.OnKeyDown(e);
     }
 
+    /// <summary>Resolved column geometry for one paint.</summary>
+    private readonly record struct Columns(
+        int IdentityLeft, int IdentityW,
+        int StatusLeft, int StatusW,
+        int Meter5Left, int Meter7Left, int MeterW, int BarW,
+        int GripLeft, int MoreLeft);
+
+    /// <summary>
+    /// Fit the five columns into <paramref name="bounds"/>, giving width back in
+    /// the order the user can most afford to lose it: the bars narrow first,
+    /// then the state column folds into the identity row. Identity never drops
+    /// below <see cref="IdentityMinW"/> — a card whose name is unreadable
+    /// identifies nothing.
+    /// </summary>
+    private static Columns Resolve(Rectangle bounds)
+    {
+        int gapCol = Sc(GapCol);
+        int gapVal = Sc(Theme.Space2);
+        int minBarW = Sc(MeterBarMinW);
+        int minIdentityW = Sc(IdentityMinW);
+
+        int moreLeft = bounds.Right - Sc(MoreW) - Sc(4);
+        int gripLeft = moreLeft - Sc(GripW) - Sc(Theme.Space2);
+        int opsLeft = gripLeft - Sc(Theme.Space2);
+        int identityLeft = bounds.X + Sc(PadX) + Sc(AvatarD) + Sc(GapAvatar);
+
+        int barW = Sc(MeterBarW);
+        int statusW = s_statusW;
+        for (; ; )
+        {
+            int meterW = s_meterValueW + gapVal + barW;
+            int meter7Left = opsLeft - meterW;
+            int meter5Left = meter7Left - gapCol - meterW;
+            int statusLeft = meter5Left - gapCol - statusW;
+            int identityW = (statusW > 0 ? statusLeft : meter5Left) - gapCol - identityLeft;
+
+            if (identityW >= minIdentityW || (barW <= minBarW && statusW == 0))
+            {
+                return new Columns(
+                    identityLeft, Math.Max(Sc(40), identityW),
+                    statusLeft, statusW,
+                    meter5Left, meter7Left, meterW, barW,
+                    gripLeft, moreLeft);
+            }
+
+            if (barW > minBarW) barW = Math.Max(minBarW, barW - Sc(12));
+            else statusW = 0;
+        }
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
-        EnsureMetrics();
+        SyncDpi();
         if (Height != s_cardH) Height = s_cardH;
 
         var g = e.Graphics;
@@ -499,20 +649,28 @@ internal sealed class AccountCard : Control
         g.Clear(Parent?.BackColor ?? Theme.BgApp);
 
         var bounds = new Rectangle(1, 1, Math.Max(1, Width - 3), Math.Max(1, Height - 3));
+        var m = Model;
 
-        Color fill = Model.Disabled
-            ? Theme.BgDisabled
-            : _selected
-                ? Theme.BgSelected
-                : _hover
-                    ? Theme.BgHover
-                    : Theme.BgSurface;
+        // Fill says "selected" (slate) or "in use" (green tint) — never both, so
+        // the two never have to be told apart by shade.
+        Color fill = m.Disabled ? Theme.BgDisabled
+            : _selected ? Theme.BgSelected
+            : m.Active ? Theme.PrimarySoft
+            : _hover ? Theme.BgHover
+            : Theme.BgSurface;
 
         using (var path = RoundRect(bounds, Theme.CardRadius))
         using (var brush = new SolidBrush(fill))
             g.FillPath(brush, path);
 
-        Color border = _selected ? Theme.SelectionBorder : Theme.BorderSoft;
+        // The in-use account keeps a green edge even while selected: the accent
+        // and the border are different channels, so "current" survives focus.
+        if (m.Active && !m.Disabled)
+            DrawAccentEdge(g, bounds);
+
+        Color border = _selected ? Theme.SelectionBorder
+            : m.NeedsAttention ? Theme.Warning
+            : Theme.BorderSoft;
         float borderW = _selected ? 2f : 1f;
         using (var path = RoundRect(bounds, Theme.CardRadius))
         using (var pen = new Pen(border, borderW))
@@ -526,138 +684,176 @@ internal sealed class AccountCard : Control
             g.FillPath(veil, path);
         }
 
-        // Columns: identity | meters | grip | more
-        int moreLeft = bounds.Right - MoreW;
-        int gripLeft = moreLeft - GripW;
-        int meterW = Math.Min(s_meterW, Math.Max(160, gripLeft - bounds.X - 200));
-        // Prefer full measured meter width when space allows.
-        if (gripLeft - Theme.Space3 - s_meterW > bounds.X + 160)
-            meterW = s_meterW;
-        int meterLeft = gripLeft - meterW - Theme.Space2;
-        int identityRight = meterLeft - Theme.Space3;
+        var col = Resolve(bounds);
+        int row1Y = bounds.Y + Sc(PadY);
+        int row2Y = row1Y + s_row1H + Sc(3);
 
-        DrawGrip(g, gripLeft, bounds.Y, GripW, bounds.Height);
-        DrawMore(g, moreLeft, bounds.Y, MoreW, bounds.Height, _moreHover);
-
-        int padX = Theme.Space3;
-        int padY = Theme.Space2;
-        int left = bounds.X + padX;
-        int top = bounds.Y + padY;
-
-        int badgeSize = 22;
-        int badgeY = top + Math.Max(0, (s_nameH + s_subH - badgeSize) / 2);
-        var badge = new Rectangle(left, badgeY, badgeSize, badgeSize);
-        using (var b = new SolidBrush(Model.Active ? Theme.Primary : Theme.BgRowAlt))
-            g.FillEllipse(b, badge);
-        using (var p = new Pen(Model.Active ? Theme.PrimaryDark : Theme.Border, 1f))
-            g.DrawEllipse(p, badge);
-        TextRenderer.DrawText(
+        int avatarD = Sc(AvatarD);
+        DrawAvatar(
             g,
-            Model.Number.ToString(),
-            Theme.FontBody,
-            badge,
-            Model.Active ? Theme.TextOnPrimary : Theme.TextSecondary,
-            TfCenter);
+            new Rectangle(
+                bounds.X + Sc(PadX), bounds.Y + (bounds.Height - avatarD) / 2, avatarD, avatarD),
+            m);
+        // The grip only appears when the row is under the pointer or has focus:
+        // a permanent one on every card reads as clutter, and it competes with
+        // the ⋮ it sits beside.
+        if (_hover || _selected)
+            DrawGrip(g, col.GripLeft, bounds.Y, Sc(GripW), bounds.Height);
+        DrawMore(g, col.MoreLeft, bounds.Y, Sc(MoreW), bounds.Height, _moreHover);
 
-        int textLeft = left + badgeSize + Theme.Space2;
-        int textW = Math.Max(48, identityRight - textLeft);
+        // When the row is too narrow for a state column, the badge moves into
+        // the identity line rather than disappearing. Dropping it would take the
+        // amber "needs you" with it — the one thing on the card that must never
+        // be the casualty of a narrow window.
+        DrawIdentity(g, col, row1Y, row2Y, m, inlineState: col.StatusW == 0);
+        _fixRect = col.StatusW > 0
+            ? DrawStatusColumn(g, col, row1Y, row2Y, m)
+            : Rectangle.Empty;
+        DrawMeters(g, col, row1Y, row2Y, m);
 
-        string status = Model.Disabled ? Loc.T("card.status.disabled")
-            : Model.Active ? Loc.T("card.status.current") : Loc.T("card.status.ready");
-        Color statusBg = Model.Disabled
-            ? Theme.BgDisabled
-            : Model.Active
-                ? Theme.PrimarySoft
-                : Theme.BgRowAlt;
-        Color statusFg = Model.Disabled
-            ? Theme.TextMuted
-            : Model.Active
-                ? Theme.PrimaryDark
-                : Theme.TextSecondary;
-        int pillW = PillWidth(status);
-        int pillH = Math.Min(s_nameH - 2, Math.Max(16, Theme.FontSmall.Height + 4));
+        DrawDropIndicator(g, bounds);
+    }
 
-        // Open session terminals. Accented rather than neutral: this is live
-        // state the user may need to act on, and it is the only place a session
-        // announces itself once its window is behind something else.
-        string sessions = Model.LiveSessions > 0
-            ? Loc.Plural("card.terminals", Model.LiveSessions)
-            : "";
+    /// <summary>A 3px green bar down the left edge: "this is the live login".</summary>
+    private static void DrawAccentEdge(Graphics g, Rectangle bounds)
+    {
+        var edge = new Rectangle(
+            bounds.X, bounds.Y + Sc(6), Sc(3), Math.Max(2, bounds.Height - Sc(12)));
+        using var path = RoundRect(edge, Sc(2));
+        using var b = new SolidBrush(Theme.Primary);
+        g.FillPath(b, path);
+    }
+
+    private static void DrawAvatar(Graphics g, Rectangle disc, AccountCardModel m)
+    {
+        // An initial, not a rank. The slot number lives in the sub-line, where
+        // it reads as the identifier it is instead of a position in a list the
+        // user can freely reorder.
+        Color bg = m.Disabled ? Theme.BgDisabled : m.Active ? Theme.Primary : Theme.BgRowAlt;
+        Color fg = m.Disabled ? Theme.TextMuted : m.Active ? Theme.TextOnPrimary : Theme.TextSecondary;
+        using (var b = new SolidBrush(bg))
+            g.FillEllipse(b, disc);
+        using (var p = new Pen(m.Active ? Theme.PrimaryDark : Theme.Border, 1f))
+            g.DrawEllipse(p, disc);
+        TextRenderer.DrawText(g, Initial(m), Theme.FontName, disc, fg, TfCenter);
+    }
+
+    private static void DrawIdentity(
+        Graphics g, Columns col, int row1Y, int row2Y, AccountCardModel m, bool inlineState)
+    {
+        int w = col.IdentityW;
+        int gap = Sc(Theme.Space2);
+
+        // Live terminals ride with the name: they belong to this account's
+        // identity right now, and they are the one thing here that can change
+        // between two polls.
+        string sessions = m.LiveSessions > 0 ? Loc.Plural("card.terminals", m.LiveSessions) : "";
         int sessW = sessions.Length == 0 ? 0 : PillWidth(sessions);
+        if (sessW > 0 && w - sessW - gap < Sc(60)) sessW = 0;
 
-        // Plan badge sits last, in neutral colors so it never competes with the
-        // green "当前". Dropped first when the row is tight — identity and live
-        // state both matter more than a tier that never changes.
-        string plan = Model.HasPlanBadge ? Model.PlanLabel! : "";
-        int planW = plan.Length == 0 ? 0 : PillWidth(plan);
-        if (planW > 0 && textW - pillW - sessW - planW - Theme.Space1 * 3 < MinNameW)
-            planW = 0;
-        if (sessW > 0 && textW - pillW - sessW - Theme.Space1 * 2 < MinNameW)
-            sessW = 0;
+        var state = StateBadge(m);
+        int stateW = inlineState ? PillWidth(state.Text) : 0;
+        if (stateW > 0 && w - stateW - sessW - gap * 2 < Sc(50)) sessW = 0;
 
         int nameW = Math.Max(
-            40,
-            textW - pillW - Theme.Space2
-                - (sessW > 0 ? sessW + Theme.Space1 : 0)
-                - (planW > 0 ? planW + Theme.Space1 : 0));
-
-        string title = DisplayTitle(Model);
-        string emailLine = BuildSubLine(Model, textW);
-
+            Sc(40),
+            w - (sessW > 0 ? sessW + gap : 0) - (stateW > 0 ? stateW + gap : 0));
         TextRenderer.DrawText(
-            g,
-            title,
-            Theme.FontName,
-            new Rectangle(textLeft, top, nameW, s_nameH),
-            Model.Disabled ? Theme.TextMuted : Theme.TextPrimary,
+            g, DisplayTitle(m), Theme.FontName,
+            new Rectangle(col.IdentityLeft, row1Y, nameW, s_row1H),
+            m.Disabled ? Theme.TextMuted : Theme.TextPrimary,
             TfLeft);
 
-        int pillY = top + Math.Max(0, (s_nameH - pillH) / 2);
-        int pillX = textLeft + nameW + Theme.Space1;
-        DrawPill(g, new Rectangle(pillX, pillY, pillW, pillH), status, statusBg, statusFg);
-        pillX += pillW + Theme.Space1;
-
+        int pillH = PillHeight();
+        int pillY = row1Y + Math.Max(0, (s_row1H - pillH) / 2);
+        int pillX = col.IdentityLeft + nameW + gap;
         if (sessW > 0)
         {
             DrawPill(
-                g,
-                new Rectangle(pillX, pillY, sessW, pillH),
-                sessions,
-                Theme.BgActive,
-                Theme.Accent);
-            pillX += sessW + Theme.Space1;
+                g, new Rectangle(pillX, pillY, sessW, pillH),
+                sessions, Theme.BgActive, Theme.Accent);
+            pillX += sessW + gap;
         }
-
-        if (planW > 0)
-        {
-            DrawPill(
-                g,
-                new Rectangle(pillX, pillY, planW, pillH),
-                plan,
-                Model.Disabled ? Theme.BgDisabled : Theme.BgRowAlt,
-                Model.Disabled ? Theme.TextMuted : Theme.TextSecondary);
-        }
+        if (stateW > 0)
+            DrawPill(g, new Rectangle(pillX, pillY, stateW, pillH), state.Text, state.Bg, state.Fg);
 
         TextRenderer.DrawText(
-            g,
-            emailLine,
-            Theme.FontSmall,
-            new Rectangle(textLeft, top + s_nameH, textW, s_subH),
-            Theme.TextSecondary,
+            g, BuildSubLine(m, w), Theme.FontSmall,
+            new Rectangle(col.IdentityLeft, row2Y, w, s_row2H),
+            m.Disabled ? Theme.TextDisabled : Theme.TextSecondary,
             TfLeft);
+    }
 
-        // Usage meters — full labels, no ellipsis
-        int meterRowH = s_subH + 8;
-        int meterBlockH = meterRowH * 2 + 2;
-        int meterTop = bounds.Y + Math.Max(padY, (bounds.Height - meterBlockH) / 2);
-        if (meterLeft > left && meterW > 80)
+    /// <summary>
+    /// The one badge that says what this account is doing.
+    /// </summary>
+    /// <remarks>
+    /// Attention outranks "in use": an account that cannot report its quota is
+    /// the more urgent fact about it, even when it happens to be the one Claude
+    /// Code is logged into. One state, one colour — the badge never has to be
+    /// read together with a second one to be understood.
+    /// </remarks>
+    internal static (string Text, Color Bg, Color Fg) StateBadge(AccountCardModel m) =>
+        m.NeedsAttention
+            ? (Theme.UsageStatusShort(m.UsageStatus), Theme.WarningSoft, Theme.Warning)
+        : m.Disabled ? (Loc.T("card.status.disabled"), Theme.BgDisabled, Theme.TextMuted)
+        : m.Active ? (Loc.T("card.status.current"), Theme.PrimarySoft, Theme.PrimaryDark)
+        : (Loc.T("card.status.ready"), Theme.BgRowAlt, Theme.TextSecondary);
+
+    /// <summary>
+    /// State above, plan below. Returns the "sign in again" hit box, or an empty
+    /// rectangle when the account has nothing to fix.
+    /// </summary>
+    private Rectangle DrawStatusColumn(
+        Graphics g, Columns col, int row1Y, int row2Y, AccountCardModel m)
+    {
+        int pillH = PillHeight();
+        int pillY = row1Y + Math.Max(0, (s_row1H - pillH) / 2);
+        var state = StateBadge(m);
+
+        DrawPill(
+            g, new Rectangle(col.StatusLeft, pillY, col.StatusW, pillH),
+            state.Text, state.Bg, state.Fg);
+
+        if (m.NeedsAttention)
         {
-            DrawMeter(g, meterLeft, meterTop, meterW, Loc.T("card.window.5h"), Model.FiveHour, Model.UsageStatus);
-            DrawMeter(
-                g, meterLeft, meterTop + meterRowH, meterW, Loc.T("card.window.7d"), Model.SevenDay, Model.UsageStatus);
+            var btn = new Rectangle(col.StatusLeft, row2Y, col.StatusW, s_row2H + Sc(2));
+            DrawFixButton(g, btn, _fixHover);
+            return btn;
         }
 
-        DrawDropIndicator(g, bounds);
+        if (m.HasPlanBadge)
+        {
+            // Neutral on purpose: a tier that never changes must not look like
+            // live state sitting right above it.
+            int planW = Math.Min(col.StatusW, PillWidth(m.PlanLabel!));
+            DrawPill(
+                g, new Rectangle(col.StatusLeft, row2Y, planW, s_row2H),
+                m.PlanLabel!,
+                m.Disabled ? Theme.BgDisabled : Theme.BgRowAlt,
+                m.Disabled ? Theme.TextMuted : Theme.TextMuted);
+        }
+        return Rectangle.Empty;
+    }
+
+    private static void DrawFixButton(Graphics g, Rectangle r, bool hover)
+    {
+        if (r.Width < Sc(20) || r.Height < Sc(8)) return;
+        using (var path = RoundRect(r, Theme.ControlRadius))
+        using (var b = new SolidBrush(hover ? Theme.WarningSoft : Theme.BgSurface))
+            g.FillPath(b, path);
+        using (var path = RoundRect(r, Theme.ControlRadius))
+        using (var p = new Pen(Theme.Warning, 1f))
+            g.DrawPath(p, path);
+        TextRenderer.DrawText(g, Loc.T("card.relogin"), Theme.FontSmall, r, Theme.Warning, TfCenter);
+    }
+
+    private static void DrawMeters(
+        Graphics g, Columns col, int row1Y, int row2Y, AccountCardModel m)
+    {
+        if (col.MeterW < Sc(60)) return;
+        DrawMeter(g, col.Meter5Left, row1Y, row2Y, col, Loc.T("card.window.5h"), m.FiveHour, m);
+        DrawMeter(g, col.Meter7Left, row1Y, row2Y, col, Loc.T("card.window.7d"), m.SevenDay, m);
     }
 
     /// <summary>
@@ -674,22 +870,24 @@ internal sealed class AccountCard : Control
     internal static void DrawDropIndicator(Graphics g, Rectangle bounds, bool after)
     {
         int y = after ? bounds.Bottom - 1 : bounds.Y + 1;
-        using var pen = new Pen(Theme.Primary, 3f);
-        g.DrawLine(pen, bounds.X + Theme.Space2, y, bounds.Right - Theme.Space2, y);
+        int inset = Sc(Theme.Space2);
+        int capD = Sc(6);
+        using var pen = new Pen(Theme.Primary, Sc(3));
+        g.DrawLine(pen, bounds.X + inset, y, bounds.Right - inset, y);
         // End caps make the line read as an insertion point, not a border.
         using var cap = new SolidBrush(Theme.Primary);
-        g.FillEllipse(cap, bounds.X + Theme.Space2 - 3, y - 3, 6, 6);
-        g.FillEllipse(cap, bounds.Right - Theme.Space2 - 3, y - 3, 6, 6);
+        g.FillEllipse(cap, bounds.X + inset - capD / 2, y - capD / 2, capD, capD);
+        g.FillEllipse(cap, bounds.Right - inset - capD / 2, y - capD / 2, capD, capD);
     }
 
-    private const int MinNameW = 56;
-
-    private static readonly TextFormatFlags MeasureFlags =
-        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+    private const int PillPadX = 7;
 
     private static int PillWidth(string text) =>
-        TextRenderer.MeasureText(text, Theme.FontSmall, new Size(int.MaxValue, s_nameH), MeasureFlags)
-            .Width + 12;
+        TextW(text, Theme.FontSmall) + Sc(PillPadX) * 2;
+
+    /// <summary>Badge height — one value, so every badge on the card matches.</summary>
+    private static int PillHeight() =>
+        Math.Min(s_row1H - Sc(2), Math.Max(Sc(16), Theme.FontSmall.Height + Sc(4)));
 
     private static void DrawPill(Graphics g, Rectangle pill, string text, Color bg, Color fg)
     {
@@ -701,74 +899,82 @@ internal sealed class AccountCard : Control
     }
 
     /// <summary>
-    /// Sub-line under the title: email, plus the subscription start date when it
-    /// fits. Appended only if the whole line fits — ellipsizing here would eat
-    /// the email, and a truncated address is worse than no date.
+    /// Sub-line under the title: the slot number, the email, and the
+    /// subscription start when it fits. The number lives here rather than in a
+    /// badge because it identifies the slot — it is not a rank, and the list
+    /// order beside it is the user's own.
     /// </summary>
     public static string BuildSubLine(AccountCardModel m, int availWidth)
     {
         EnsureMetrics();
+        string head = Loc.T("card.slot", m.Number);
         string email = DisplayEmail(m.Email ?? "");
+        string baseLine = $"{head} · {email}";
         string? started = Theme.FormatShortDate(m.SubscriptionCreatedAt);
-        if (started is null) return email;
+        if (started is null) return baseLine;
 
-        string full = Loc.T("card.subLine", email, started);
-        int w = TextRenderer
-            .MeasureText(full, Theme.FontSmall, new Size(int.MaxValue, s_subH), MeasureFlags)
-            .Width;
-        return w <= availWidth ? full : email;
+        string full = Loc.T("card.subLine", baseLine, started);
+        return TextW(full, Theme.FontSmall) <= availWidth ? full : baseLine;
     }
 
+    /// <summary>
+    /// One quota window: label on the upper line, bar and remaining figure on
+    /// the lower one. The figure sits against the bar it belongs to, and says
+    /// only what is left — the bar already shows what is spent, and printing
+    /// both numbers made the pair read as two different measurements.
+    /// </summary>
     private static void DrawMeter(
-        Graphics g, int x, int y, int width, string window, double? pct, string? status)
+        Graphics g, int x, int row1Y, int row2Y, Columns col,
+        string window, double? pct, AccountCardModel m)
     {
-        EnsureMetrics();
-        int labelW = s_labelW;
-        int valueW = s_valueW;
-        int rowH = s_subH;
-        // Keep bar usable even on narrow cards.
-        if (width < labelW + valueW + 40)
+        int w = col.MeterW;
+        TextRenderer.DrawText(
+            g, window, Theme.FontSmall,
+            new Rectangle(x, row1Y, Math.Min(w, s_meterLabelW + Sc(40)), s_row1H),
+            Theme.TextMuted, TfLeft);
+
+        int barW = col.BarW;
+        int barH = Sc(6);
+        int gap = Sc(Theme.Space2);
+        int barY = row2Y + Math.Max(0, (s_row2H - barH) / 2);
+        var barRect = new Rectangle(x, barY, barW, barH);
+        var valueRect = new Rectangle(x + barW + gap, row2Y, w - barW - gap, s_row2H);
+
+        // Nothing to say yet: a skeleton of the shape that is coming, in place,
+        // rather than a spinner somewhere else on the window.
+        if (m.UsageUnknownYet)
         {
-            valueW = Math.Max(72, width / 3);
-            labelW = Math.Max(40, Math.Min(labelW, width / 4));
+            using (var path = RoundRect(barRect, barH / 2))
+            using (var b = new SolidBrush(Theme.BorderSoft))
+                g.FillPath(b, path);
+            int ghostW = Math.Min(valueRect.Width, Sc(34));
+            var ghost = new Rectangle(valueRect.Right - ghostW, barY, ghostW, barH);
+            using (var path = RoundRect(ghost, barH / 2))
+            using (var b = new SolidBrush(Theme.BorderSoft))
+                g.FillPath(b, path);
+            return;
         }
 
-        TextRenderer.DrawText(
-            g,
-            window,
-            Theme.FontSmall,
-            new Rectangle(x, y, labelW, rowH),
-            Theme.TextMuted,
-            TfLeft);
+        // A broken credential is stated once, on the card. Here the cell just
+        // says it has no number, so two windows do not read as two faults.
+        if (pct is null)
+        {
+            TextRenderer.DrawText(
+                g, "—", Theme.FontSmall,
+                new Rectangle(x, row2Y, w, s_row2H),
+                Theme.TextMuted, TfLeft);
+            return;
+        }
 
-        string value = Theme.UsageLabelCompact(pct, status);
-        // A reason the user must act on reads as a warning, not as muted "no data".
-        Color vc = pct is null && status is "needs-login" or "no-credential" or "no-subscription"
-            ? Theme.Warning
-            : Theme.UsageColor(pct);
-        TextRenderer.DrawText(
-            g,
-            value,
-            Theme.FontSmall,
-            new Rectangle(x + width - valueW, y, valueW, rowH),
-            vc,
-            TfRight);
-
-        int barX = x + labelW + 6;
-        int barW = Math.Max(24, width - labelW - valueW - 12);
-        int barY = y + rowH + 1;
-        int barH = 5;
-        if (barW < 8 || barH < 1) return;
-
-        var barRect = new Rectangle(barX, barY, barW, barH);
-        using (var path = RoundRect(barRect, 2))
+        Color vc = Theme.UsageColor(pct);
+        using (var path = RoundRect(barRect, barH / 2))
         using (var bg = new SolidBrush(Theme.BorderSoft))
             g.FillPath(bg, path);
 
-        if (pct is not null and > 0)
+        if (pct > 0)
         {
-            int fillW = Math.Max(3, (int)(barW * Math.Clamp(pct.Value / 100.0, 0, 1)));
-            using var path = RoundRect(new Rectangle(barX, barY, fillW, barH), 2);
+            int fillW = Math.Max(Sc(3), (int)(barW * Math.Clamp(pct.Value / 100.0, 0, 1)));
+            using var path = RoundRect(new Rectangle(x, barY, fillW, barH), barH / 2);
             using var fg = new SolidBrush(vc);
             g.FillPath(fg, path);
         }
@@ -776,21 +982,28 @@ internal sealed class AccountCard : Control
         double thr = ThresholdMarkerPct;
         if (thr is > 0 and < 100)
         {
-            int tx = barX + (int)(barW * thr / 100.0);
+            int tx = x + (int)(barW * thr / 100.0);
             using var pen = new Pen(Theme.TextMuted, 1f);
-            g.DrawLine(pen, tx, barY - 1, tx, barY + barH + 1);
+            g.DrawLine(pen, tx, barY - Sc(2), tx, barY + barH + Sc(2));
         }
+
+        TextRenderer.DrawText(
+            g, Theme.UsageLabelRemain(pct), Theme.FontSmall, valueRect,
+            m.Disabled ? Theme.TextMuted : vc, TfLeft);
     }
 
+    /// <summary>Standard six-dot drag handle, clearly apart from the ⋮ menu.</summary>
     private static void DrawGrip(Graphics g, int left, int top, int w, int h)
     {
+        int dot = Sc(3);
+        int pitch = Sc(6);
         using var brush = new SolidBrush(Theme.TextMuted);
-        int cx = left + w / 2 - 4;
-        int cy = top + h / 2 - 7;
+        int cx = left + w / 2 - pitch / 2 - dot / 2;
+        int cy = top + h / 2 - pitch - dot / 2;
         for (int row = 0; row < 3; row++)
         {
-            g.FillEllipse(brush, cx, cy + row * 6, 2, 2);
-            g.FillEllipse(brush, cx + 6, cy + row * 6, 2, 2);
+            g.FillEllipse(brush, cx, cy + row * pitch, dot, dot);
+            g.FillEllipse(brush, cx + pitch, cy + row * pitch, dot, dot);
         }
     }
 
@@ -798,17 +1011,20 @@ internal sealed class AccountCard : Control
     {
         if (hover)
         {
-            var bg = new Rectangle(left + 2, top + h / 2 - 12, Math.Max(4, w - 4), 24);
-            using var path = RoundRect(bg, 4);
+            int hh = Sc(24);
+            var bg = new Rectangle(left + Sc(2), top + (h - hh) / 2, Math.Max(4, w - Sc(4)), hh);
+            using var path = RoundRect(bg, Sc(4));
             using var b = new SolidBrush(Theme.BgHover);
             g.FillPath(b, path);
         }
 
+        int dot = Sc(3);
+        int pitch = Sc(7);
         using var brush = new SolidBrush(Theme.TextSecondary);
-        int cx = left + w / 2 - 1;
-        int cy = top + h / 2 - 8;
+        int cx = left + w / 2 - dot / 2;
+        int cy = top + h / 2 - pitch - dot / 2;
         for (int i = 0; i < 3; i++)
-            g.FillEllipse(brush, cx, cy + i * 7, 3, 3);
+            g.FillEllipse(brush, cx, cy + i * pitch, dot, dot);
     }
 
     private static GraphicsPath RoundRect(Rectangle r, int radius)

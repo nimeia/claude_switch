@@ -141,6 +141,21 @@ pub fn open_private_file(path: &Path, truncate: bool) -> io::Result<File> {
     Ok(file)
 }
 
+/// Move a file, falling back to copy+remove when `rename` cannot cross volumes.
+///
+/// Profiles can sit on a different drive from `~/.claude`, where a bare
+/// `fs::rename` fails with `ERROR_NOT_SAME_DEVICE`.
+pub fn move_file(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    fs::copy(from, to)?;
+    fs::remove_file(from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

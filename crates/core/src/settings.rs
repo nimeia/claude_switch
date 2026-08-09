@@ -103,6 +103,75 @@ impl Default for UiSettings {
     }
 }
 
+/// Open each account's 5h usage window at an optimal local time before work.
+///
+/// See [`crate::warmup`] for the schedule math and fire path. Stored under
+/// `settings.json` → `warmup` (claude-switch only; unknown to cswap).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmupSettings {
+    /// When true, the engine may fire a Haiku print request to anchor a window.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Local work-day start, `"HH:MM"` (default `09:00`).
+    #[serde(default = "default_work_start")]
+    pub work_start: String,
+    /// Local work-day end, `"HH:MM"` (default `18:00`). Must be after start.
+    #[serde(default = "default_work_end")]
+    pub work_end: String,
+    /// Slot numbers to warm; empty means every eligible OAuth account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<u32>,
+    /// Model for the warmup request (default Haiku).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+fn default_work_start() -> String {
+    "09:00".into()
+}
+fn default_work_end() -> String {
+    "18:00".into()
+}
+
+impl Default for WarmupSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            work_start: default_work_start(),
+            work_end: default_work_end(),
+            accounts: Vec::new(),
+            model: None,
+        }
+    }
+}
+
+impl WarmupSettings {
+    #[must_use]
+    pub fn clamp(mut self) -> Self {
+        // Normalize blank times back to defaults rather than failing load.
+        if crate::warmup::parse_hhmm(&self.work_start).is_none() {
+            self.work_start = default_work_start();
+        }
+        if crate::warmup::parse_hhmm(&self.work_end).is_none() {
+            self.work_end = default_work_end();
+        }
+        // Overnight / inverted windows are not supported; fall back to default.
+        if let (Some(s), Some(e)) = (
+            crate::warmup::parse_hhmm(&self.work_start),
+            crate::warmup::parse_hhmm(&self.work_end),
+        ) {
+            if crate::warmup::work_hours(s, e).is_none() {
+                self.work_start = default_work_start();
+                self.work_end = default_work_end();
+            }
+        }
+        self.accounts.sort_unstable();
+        self.accounts.dedup();
+        self
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -110,6 +179,8 @@ pub struct Settings {
     pub schema_version: u32,
     #[serde(default)]
     pub autoswitch: AutoSwitchSettings,
+    #[serde(default)]
+    pub warmup: WarmupSettings,
     #[serde(default)]
     pub ui: UiSettings,
 }
@@ -123,6 +194,7 @@ impl Default for Settings {
         Self {
             schema_version: SETTINGS_SCHEMA_VERSION,
             autoswitch: AutoSwitchSettings::default(),
+            warmup: WarmupSettings::default(),
             ui: UiSettings::default(),
         }
     }
@@ -136,6 +208,7 @@ impl Settings {
         let text = std::fs::read_to_string(path).map_err(Error::Io)?;
         let mut s: Settings = serde_json::from_str(&text).unwrap_or_default();
         s.autoswitch = s.autoswitch.clamp();
+        s.warmup = s.warmup.clamp();
         s.schema_version = SETTINGS_SCHEMA_VERSION;
         Ok(s)
     }
@@ -146,6 +219,7 @@ impl Settings {
         }
         let mut s = self.clone();
         s.autoswitch = s.autoswitch.clamp();
+        s.warmup = s.warmup.clamp();
         s.schema_version = SETTINGS_SCHEMA_VERSION;
         let text = serde_json::to_string_pretty(&s)
             .map_err(|e| Error::Internal(format!("settings serialize: {e}")))?;
@@ -177,9 +251,27 @@ mod tests {
         let mut s = Settings::default();
         s.autoswitch.enabled = true;
         s.autoswitch.threshold = 80.0;
+        s.warmup.enabled = true;
+        s.warmup.work_start = "08:30".into();
+        s.warmup.work_end = "17:30".into();
         s.save(&path).unwrap();
         let loaded = Settings::load(&path).unwrap();
         assert!(loaded.autoswitch.enabled);
         assert!((loaded.autoswitch.threshold - 80.0).abs() < f64::EPSILON);
+        assert!(loaded.warmup.enabled);
+        assert_eq!(loaded.warmup.work_start, "08:30");
+        assert_eq!(loaded.warmup.work_end, "17:30");
+    }
+
+    #[test]
+    fn warmup_clamp_repairs_bad_times() {
+        let w = WarmupSettings {
+            work_start: "nope".into(),
+            work_end: "25:99".into(),
+            ..Default::default()
+        }
+        .clamp();
+        assert_eq!(w.work_start, "09:00");
+        assert_eq!(w.work_end, "18:00");
     }
 }

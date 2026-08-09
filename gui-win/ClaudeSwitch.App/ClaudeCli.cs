@@ -1,35 +1,33 @@
 using System.Diagnostics;
+using System.Text;
 
 namespace ClaudeSwitch.App;
 
 /// <summary>
-/// Launching the Claude Code CLI.
-///
-/// Sessions are resumed by running <c>claude</c> directly rather than through
-/// <c>cmd /k claude …</c>. The shell was a middle layer that cost four things:
-/// it forced cmd as the shell whatever the user prefers, left a stray cmd prompt
-/// behind when Claude exited, put every path through cmd's quoting rules, and
-/// decided the console host itself. Launching the executable lets Windows honour
-/// the user's own "default terminal application" setting — which is exactly the
-/// "use whatever the system uses" behaviour, with no terminal detection at all.
-///
-/// Session mode needs <c>CLAUDE_CONFIG_DIR</c> on the child, which rules out
-/// <c>UseShellExecute = true</c> (ShellExecute cannot carry an environment).
-/// That looked like it would force the cmd layer back, but it does not: with
-/// <c>UseShellExecute = false</c> from a process that has no console of its own,
-/// Windows still allocates the child a console through the same delegation the
-/// "Default terminal application" setting drives — measured on Windows 11, the
-/// child lands in Windows Terminal via OpenConsole, not a bare conhost. So both
-/// launch paths use it and keep the property.
+/// Launching the Claude Code CLI in a real colour-capable terminal.
 /// </summary>
+/// <remarks>
+/// Session mode needs <c>CLAUDE_CONFIG_DIR</c> on the child, so we cannot use
+/// <c>UseShellExecute = true</c>. Starting <c>claude.exe</c> directly from a
+/// WinForms process (no console of its own) used to hand it a bare console
+/// without truecolor / WT profile → Claude Code's UI icons rendered monochrome.
+///
+/// Prefer Windows Terminal (<c>wt.exe</c>) when installed, and always seed the
+/// colour env vars apps use to detect 24-bit colour. Fall back to a direct
+/// spawn with the same env when WT is missing.
+/// </remarks>
 internal static class ClaudeCli
 {
+    /// <summary>Env vars that force colour-capable rendering when the host supports it.</summary>
+    private static readonly (string Name, string Value)[] ColorEnv =
+    [
+        ("COLORTERM", "truecolor"),
+        ("TERM", "xterm-256color"),
+        ("FORCE_COLOR", "3"),
+        ("CLICOLOR_FORCE", "1"),
+    ];
+
     /// <summary>Full path to the CLI, or null when it is not installed / not on PATH.</summary>
-    /// <remarks>
-    /// Resolved before launching rather than letting <see cref="Process.Start"/>
-    /// fail: without a shell there is no window left on screen to read an error
-    /// from, so an unavailable CLI has to be reported by us.
-    /// </remarks>
     public static string? FindExecutable() => Find("claude");
 
     /// <summary>PATH lookup honouring PATHEXT, plus the usual per-user install dir.</summary>
@@ -67,6 +65,23 @@ internal static class ClaudeCli
         return null;
     }
 
+    /// <summary>
+    /// Windows Terminal launcher, if the app execution alias or install is present.
+    /// </summary>
+    public static string? FindWindowsTerminal()
+    {
+        if (Find("wt") is { } onPath)
+            return onPath;
+
+        // Store / App Installer alias (often not yet on PATH for this process).
+        string apps = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Microsoft", "WindowsApps", "wt.exe");
+        if (File.Exists(apps)) return apps;
+
+        return null;
+    }
+
     /// <summary>Message to show when the CLI cannot be found.</summary>
     public static string NotFoundMessage => Loc.T("resume.notFound");
 
@@ -94,39 +109,159 @@ internal static class ClaudeCli
         {
             return Loc.T("resume.missingDir", workingDirectory);
         }
-        if (FindExecutable() is not { } exe)
+        if (FindExecutable() is not { } claudeExe)
         {
             return NotFoundMessage;
         }
 
+        var scrub = (scrubEnv ?? []).Where(s => !string.IsNullOrEmpty(s)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
         try
         {
-            var psi = new ProcessStartInfo(exe)
+            // Prefer Windows Terminal: full colour profile + ConPTY truecolor.
+            if (FindWindowsTerminal() is { } wt)
             {
-                WorkingDirectory = workingDirectory,
-                // False so the environment below is honoured; see the class
-                // remarks for why this keeps the default-terminal behaviour.
-                UseShellExecute = false,
-            };
-            if (!string.IsNullOrEmpty(sessionId))
-            {
-                psi.ArgumentList.Add("--resume");
-                psi.ArgumentList.Add(sessionId);
+                if (TryStartViaWindowsTerminal(wt, claudeExe, workingDirectory, sessionId, configDir, scrub))
+                    return null;
             }
-            if (configDir is not null)
-            {
-                psi.Environment["CLAUDE_CONFIG_DIR"] = configDir;
-            }
-            foreach (var name in scrubEnv ?? [])
-            {
-                psi.Environment.Remove(name);
-            }
-            Process.Start(psi);
+
+            // Fallback: direct spawn (default-terminal handoff) with colour env.
+            StartDirect(claudeExe, workingDirectory, sessionId, configDir, scrub);
             return null;
         }
         catch (Exception ex)
         {
             return ex.Message;
         }
+    }
+
+    /// <summary>
+    /// <c>wt -d dir -- cmd /d /s /c "set … &amp;&amp; claude …"</c> so env vars
+    /// actually reach Claude (WT does not reliably inherit our Process env into the pane).
+    /// </summary>
+    private static bool TryStartViaWindowsTerminal(
+        string wtExe,
+        string claudeExe,
+        string workingDirectory,
+        string? sessionId,
+        string? configDir,
+        IReadOnlyList<string> scrubEnv)
+    {
+        try
+        {
+            string script = BuildCmdEnvScript(claudeExe, sessionId, configDir, scrubEnv);
+            var psi = new ProcessStartInfo(wtExe)
+            {
+                UseShellExecute = false,
+                // wt itself does not need the work dir; -d sets the tab's.
+                WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            };
+            // Open as a tab when a window exists; otherwise a new window.
+            psi.ArgumentList.Add("-w");
+            psi.ArgumentList.Add("0");
+            psi.ArgumentList.Add("nt");
+            psi.ArgumentList.Add("-d");
+            psi.ArgumentList.Add(workingDirectory);
+            // Explicit commandline after options: cmd carries env then execs claude.
+            psi.ArgumentList.Add("cmd.exe");
+            psi.ArgumentList.Add("/d");
+            psi.ArgumentList.Add("/s");
+            psi.ArgumentList.Add("/c");
+            psi.ArgumentList.Add(script);
+            ApplyColorEnv(psi);
+            Process.Start(psi);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void StartDirect(
+        string claudeExe,
+        string workingDirectory,
+        string? sessionId,
+        string? configDir,
+        IReadOnlyList<string> scrubEnv)
+    {
+        var psi = new ProcessStartInfo(claudeExe)
+        {
+            WorkingDirectory = workingDirectory,
+            UseShellExecute = false,
+        };
+        if (!string.IsNullOrEmpty(sessionId))
+        {
+            psi.ArgumentList.Add("--resume");
+            psi.ArgumentList.Add(sessionId);
+        }
+        if (configDir is not null)
+        {
+            psi.Environment["CLAUDE_CONFIG_DIR"] = configDir;
+        }
+        foreach (var name in scrubEnv)
+        {
+            psi.Environment.Remove(name);
+        }
+        ApplyColorEnv(psi);
+        Process.Start(psi);
+    }
+
+    /// <summary>
+    /// cmd.exe script: set colour + session env, clear scrubbed keys, run claude.
+    /// </summary>
+    private static string BuildCmdEnvScript(
+        string claudeExe,
+        string? sessionId,
+        string? configDir,
+        IReadOnlyList<string> scrubEnv)
+    {
+        var sb = new StringBuilder();
+        // /s /c expects one command string; chain with &&.
+        void Set(string name, string value)
+        {
+            if (sb.Length > 0) sb.Append(" && ");
+            // Escape embedded quotes in values (paths rarely have them).
+            string v = value.Replace("\"", "");
+            sb.Append("set \"").Append(name).Append('=').Append(v).Append('"');
+        }
+
+        void Clear(string name)
+        {
+            if (sb.Length > 0) sb.Append(" && ");
+            sb.Append("set \"").Append(name).Append('=').Append('"');
+        }
+
+        foreach (var (name, value) in ColorEnv)
+            Set(name, value);
+        // Explicitly clear any NO_COLOR inherited into cmd's parent chain.
+        Clear("NO_COLOR");
+
+        if (configDir is not null)
+            Set("CLAUDE_CONFIG_DIR", configDir);
+
+        foreach (var name in scrubEnv)
+            Clear(name);
+
+        if (sb.Length > 0) sb.Append(" && ");
+        // Quoted exe path; optional --resume id.
+        sb.Append('"').Append(claudeExe).Append('"');
+        if (!string.IsNullOrEmpty(sessionId))
+        {
+            sb.Append(" --resume ");
+            sb.Append('"').Append(sessionId.Replace("\"", "")).Append('"');
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Mark the child as truecolor-capable and drop NO_COLOR so icons stay coloured.
+    /// </summary>
+    private static void ApplyColorEnv(ProcessStartInfo psi)
+    {
+        foreach (var (name, value) in ColorEnv)
+            psi.Environment[name] = value;
+        psi.Environment.Remove("NO_COLOR");
     }
 }

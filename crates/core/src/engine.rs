@@ -17,12 +17,22 @@ use crate::paths::{PathEnv, Paths};
 use crate::plan::{plan_for_slot, PlanInfo};
 use crate::sequence::SequenceData;
 use crate::session;
-use crate::settings::{AutoSwitchSettings, Settings};
+use crate::agentruns;
+use crate::autocontinue::{
+    self, ContinuePolicy, InterruptKind, StopReason, TransportFailure, TurnOutcome,
+};
+use crate::settings::{AutoSwitchSettings, Settings, WarmupSettings};
+use crate::stalled;
 use crate::switcher::{AccountRef, SwitchResult, Switcher};
 use crate::usage::{
     fetch_usage, plan_after_fetch, MockHttp, SharedHttp, UreqHttp, Usage, UsageCache, UsageStatus,
 };
-use std::time::Duration;
+use crate::warmup::{
+    self, WarmupDecision, WarmupFireResult, WarmupMode, WarmupSkipEntry, WarmupState,
+    WarmupTickResult, ATTEMPT_COOLDOWN, DEFAULT_WARMUP_MODEL,
+};
+use chrono::Local;
+use std::time::{Duration, Instant};
 
 /// Bumped to 3 when `accounts[].liveSessions` was added (additive; older readers ignore it).
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
@@ -51,6 +61,11 @@ pub struct AccountSnapshot {
     /// delete can be refused.
     #[serde(default)]
     pub live_sessions: u32,
+    /// When warmup is enabled and the 5h window is not open: next local time the
+    /// guardian would try to open it (RFC3339). Omitted while a window is live
+    /// (use `usage.fiveHour.resetsAt` then) or when warmup is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warmup_anchor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -68,6 +83,7 @@ pub struct Snapshot {
     pub unmanaged_login_email: Option<String>,
     pub accounts: Vec<AccountSnapshot>,
     pub autoswitch: AutoSwitchSettings,
+    pub warmup: WarmupSettings,
     pub is_leader: bool,
     /// Seconds until the next adaptive usage poll (from last [`Engine::refresh_usage`]).
     pub next_poll_seconds: f64,
@@ -136,6 +152,9 @@ pub struct RefreshUsageResult {
     pub ok: bool,
     pub next_poll_seconds: f64,
     pub accounts_refreshed: u32,
+    /// Present when the window guardian ran during this refresh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warmup: Option<WarmupTickResult>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -261,6 +280,10 @@ pub struct Engine {
     is_leader: Mutex<bool>,
     /// Adaptive cadence from last refresh (`plan_after_fetch`).
     next_poll: Mutex<Duration>,
+    /// In-process cooldown ledger for 5h window warmup fires.
+    warmup_state: Mutex<WarmupState>,
+    /// Most recent guardian / force result (for autoswitch_tick payloads and UI).
+    last_warmup: Mutex<Option<WarmupTickResult>>,
 }
 
 impl Engine {
@@ -309,6 +332,8 @@ impl Engine {
             events: Arc::new(Mutex::new(Vec::new())),
             is_leader: Mutex::new(true),
             next_poll: Mutex::new(Duration::from_secs(60)),
+            warmup_state: Mutex::new(WarmupState::new()),
+            last_warmup: Mutex::new(None),
         })
     }
 
@@ -551,10 +576,38 @@ impl Engine {
         let seq = self.switcher.load_sequence()?;
         let settings = self.settings.lock().clone();
         let active = self.resolve_active(&seq);
+        // Warmup stagger index uses the same eligible set as the guardian:
+        // subscribed + healthy usage only (see [`Engine::warmup_eligible`]).
+        let warmup_eligible: Vec<u32> = self
+            .warmup_eligible(&seq, &settings.warmup)
+            .into_iter()
+            .map(|(n, _, _)| n)
+            .collect();
+        let warmup_count = warmup_eligible.len();
+        let now_local = Local::now();
         let mut accounts = Vec::new();
         for &num in &seq.sequence {
             let Some(rec) = seq.account(num) else {
                 continue;
+            };
+            let usage = self.usage.get(num);
+            let warmup_anchor = if settings.warmup.enabled {
+                let idx = warmup_eligible.iter().position(|&n| n == num);
+                idx.and_then(|index| {
+                    let resets = usage
+                        .as_ref()
+                        .and_then(|u| u.five_hour.as_ref())
+                        .and_then(|w| w.resets_at.as_deref());
+                    warmup::next_anchor_rfc3339(
+                        &settings.warmup,
+                        now_local,
+                        index,
+                        warmup_count,
+                        resets,
+                    )
+                })
+            } else {
+                None
             };
             accounts.push(AccountSnapshot {
                 number: num,
@@ -562,11 +615,12 @@ impl Engine {
                 alias: rec.alias.clone(),
                 active: active.number == Some(num),
                 disabled: rec.disabled,
-                usage: self.usage.get(num),
+                usage,
                 usage_status: self.usage.status(num),
                 plan: self.plan_for(num, &rec.email),
                 live_sessions: u32::try_from(self.live_sessions(num, &rec.email).len())
                     .unwrap_or(u32::MAX),
+                warmup_anchor,
             });
         }
         // Only report a foreign login when it is genuinely unmanaged.
@@ -580,6 +634,7 @@ impl Engine {
             unmanaged_login_email: unmanaged_email,
             accounts,
             autoswitch: settings.autoswitch,
+            warmup: settings.warmup,
             is_leader: *self.is_leader.lock(),
             next_poll_seconds: self.next_poll.lock().as_secs_f64(),
         })
@@ -1026,11 +1081,20 @@ impl Engine {
         let plan = plan_after_fetch(active_pct, threshold);
         *self.next_poll.lock() = plan.next_after;
 
+        // Window guardian rides the same poll: usage is fresh, so `resets_at`
+        // is the right signal for "already open" vs "fire now".
+        let warmup = if self.settings.lock().warmup.enabled {
+            self.warmup_tick().ok()
+        } else {
+            None
+        };
+
         self.emit(CoreEvent::SnapshotUpdated);
         Ok(RefreshUsageResult {
             ok: true,
             next_poll_seconds: plan.next_after.as_secs_f64(),
             accounts_refreshed: refreshed,
+            warmup,
         })
     }
 
@@ -1116,6 +1180,252 @@ impl Engine {
         Ok(())
     }
 
+    pub fn set_warmup(&self, warmup: WarmupSettings) -> Result<()> {
+        let mut s = self.settings.lock();
+        s.warmup = warmup.clamp();
+        s.save(&self.paths.settings_file)?;
+        Ok(())
+    }
+
+    /// Ensure a session profile exists for warmup (always profile-based).
+    ///
+    /// Unlike [`Engine::session_prepare`], this never short-circuits to the
+    /// default login: a warmup must not write history into `~/.claude`.
+    fn warmup_ensure_profile(&self, num: u32, email: &str, org_uuid: &str) -> Result<PathBuf> {
+        let dir = self.session_dir(num, email);
+        let stored = self.switcher.store.read_slot(num, email)?;
+        let Some(stored) = stored.filter(|c| !c.trim().is_empty()) else {
+            return Err(Error::Credential(format!(
+                "Account-{num} ({email}) has no stored credentials"
+            )));
+        };
+        if crate::credentials::looks_like_api_key(&stored) {
+            return Err(Error::Validation(format!(
+                "Account-{num} ({email}) is an API-key account; warmup needs OAuth"
+            )));
+        }
+
+        let live = session::live_sessions_for(&dir);
+        if session::is_stale(&dir) && live.is_empty() {
+            session::invalidate_credentials(&dir);
+        }
+
+        if !session::profile_is_valid(&dir, email, org_uuid) {
+            if live.is_empty() {
+                let config = self
+                    .switcher
+                    .store
+                    .read_slot_config(&self.paths.configs_dir, num, email)?
+                    .unwrap_or_default();
+                session::bootstrap(&dir, &stored, &config)?;
+            } else if !dir.is_dir() {
+                return Err(Error::Validation(format!(
+                    "Account-{num} ({email}) has live sessions but no profile dir"
+                )));
+            }
+            // Live but invalid: leave the running profile alone and still try —
+            // Claude Code will use whatever credential is already there.
+        }
+        // No sharing / MCP mirror: warmup is a silent Haiku hit in an empty
+        // temp project dir; copying CLAUDE.md only slows the fire.
+        Ok(dir)
+    }
+
+    /// Accounts that participate in warmup stagger (N) and may be fired.
+    ///
+    /// Only **subscribed + healthy** slots count:
+    /// - not disabled, OAuth (not API key), optional `warmup.accounts` allow-list
+    /// - [`UsageStatus::Ok`] — last usage fetch returned subscription windows
+    ///
+    /// Needs-login / no-sub / unavailable / unknown do **not** inflate N, so a
+    /// broken peer cannot shift the 5/N phase of good accounts.
+    fn warmup_eligible(
+        &self,
+        seq: &SequenceData,
+        settings: &WarmupSettings,
+    ) -> Vec<(u32, String, String)> {
+        let mut eligible = Vec::new();
+        for &num in &seq.sequence {
+            let Some(rec) = seq.account(num) else {
+                continue;
+            };
+            if rec.disabled {
+                continue;
+            }
+            if !settings.accounts.is_empty() && !settings.accounts.contains(&num) {
+                continue;
+            }
+            let Ok(Some(cred)) = self.switcher.store.read_slot(num, &rec.email) else {
+                continue;
+            };
+            if crate::credentials::looks_like_api_key(&cred) {
+                continue;
+            }
+            if !self.usage.status(num).is_warmup_ready() {
+                continue;
+            }
+            eligible.push((num, rec.email.clone(), rec.org_uuid.clone()));
+        }
+        eligible
+    }
+
+    /// Decide and optionally fire 5h window warmups for configured accounts.
+    ///
+    /// Safe to call every poll tick: skips when disabled, before the anchor,
+    /// after work end, while a window is already open, or during cooldown.
+    ///
+    /// Stagger uses N = number of **subscribed, healthy** OAuth accounts only
+    /// (see [`Engine::warmup_eligible`]), with phase `Aᵢ = A₀ + i·(5/N)`.
+    pub fn warmup_tick(&self) -> Result<WarmupTickResult> {
+        self.warmup_run(WarmupMode::Scheduled, None)
+    }
+
+    /// Manual fire for every eligible account (or one slot when `only` is set).
+    ///
+    /// Ignores the schedule and the enabled toggle; still skips open windows
+    /// and honours cooldown. Same eligibility as the guardian (sub + healthy).
+    pub fn warmup_now(&self, only: Option<u32>) -> Result<WarmupTickResult> {
+        self.warmup_run(WarmupMode::Force, only)
+    }
+
+    fn warmup_run(&self, mode: WarmupMode, only: Option<u32>) -> Result<WarmupTickResult> {
+        let settings = self.settings.lock().warmup.clone();
+        let mut out = WarmupTickResult {
+            enabled: settings.enabled || mode == WarmupMode::Force,
+            fired: Vec::new(),
+            skipped: Vec::new(),
+        };
+        if mode == WarmupMode::Scheduled && !settings.enabled {
+            *self.last_warmup.lock() = Some(out.clone());
+            return Ok(out);
+        }
+
+        let seq = self.switcher.load_sequence()?;
+        // Stagger indices use this full eligible set even when `only` filters fire.
+        let eligible = self.warmup_eligible(&seq, &settings);
+
+        if eligible.is_empty() {
+            out.skipped.push(WarmupSkipEntry {
+                number: only.unwrap_or(0),
+                reason: warmup::SkipReason::NoEligibleAccount.as_str().into(),
+            });
+            *self.last_warmup.lock() = Some(out.clone());
+            return Ok(out);
+        }
+
+        if let Some(want) = only {
+            if !eligible.iter().any(|(n, _, _)| *n == want) {
+                out.skipped.push(WarmupSkipEntry {
+                    number: want,
+                    reason: warmup::SkipReason::NoEligibleAccount.as_str().into(),
+                });
+                *self.last_warmup.lock() = Some(out.clone());
+                return Ok(out);
+            }
+        }
+
+        let count = eligible.len();
+        let model = settings
+            .model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_WARMUP_MODEL.to_string());
+        let now_local = Local::now();
+        let now_instant = Instant::now();
+
+        let Some(claude) = warmup::find_claude_executable() else {
+            self.emit(CoreEvent::Error {
+                message: "warmup: claude CLI not found on PATH or ~/.local/bin".into(),
+                retryable: true,
+            });
+            *self.last_warmup.lock() = Some(out.clone());
+            return Ok(out);
+        };
+
+        for (index, (num, email, org)) in eligible.into_iter().enumerate() {
+            if only.is_some_and(|want| want != num) {
+                continue;
+            }
+            let resets = self
+                .usage
+                .get(num)
+                .and_then(|u| u.five_hour.as_ref().and_then(|w| w.resets_at.clone()));
+            let last = self.warmup_state.lock().last_attempt(num);
+            let decision = warmup::decide(
+                &settings,
+                now_local,
+                index,
+                count,
+                resets.as_deref(),
+                last,
+                now_instant,
+                ATTEMPT_COOLDOWN,
+                mode,
+            );
+            match decision {
+                WarmupDecision::Skip(reason) => {
+                    out.skipped.push(WarmupSkipEntry {
+                        number: num,
+                        reason: reason.as_str().into(),
+                    });
+                }
+                WarmupDecision::Fire => {
+                    self.warmup_state.lock().mark_attempted(num, now_instant);
+                    let fire = self.fire_warmup(num, &email, &org, &claude, &model);
+                    if !fire.ok {
+                        if let Some(ref detail) = fire.detail {
+                            self.emit(CoreEvent::Error {
+                                message: format!("warmup Account-{num} ({email}): {detail}"),
+                                retryable: true,
+                            });
+                        }
+                    }
+                    out.fired.push(fire);
+                }
+            }
+        }
+        *self.last_warmup.lock() = Some(out.clone());
+        Ok(out)
+    }
+
+    fn fire_warmup(
+        &self,
+        num: u32,
+        email: &str,
+        org: &str,
+        claude: &std::path::Path,
+        model: &str,
+    ) -> WarmupFireResult {
+        let profile = match self.warmup_ensure_profile(num, email, org) {
+            Ok(p) => p,
+            Err(e) => {
+                return WarmupFireResult {
+                    number: num,
+                    email: email.to_string(),
+                    ok: false,
+                    detail: Some(e.message()),
+                    config_dir: None,
+                };
+            }
+        };
+        let work = std::env::temp_dir().join(format!("cswitch-warm-{num}"));
+        match warmup::spawn_warmup(claude, Some(&profile), model, &work) {
+            Ok(()) => WarmupFireResult {
+                number: num,
+                email: email.to_string(),
+                ok: true,
+                detail: None,
+                config_dir: Some(profile.to_string_lossy().into_owned()),
+            },
+            Err(detail) => WarmupFireResult {
+                number: num,
+                email: email.to_string(),
+                ok: false,
+                detail: Some(detail),
+                config_dir: Some(profile.to_string_lossy().into_owned()),
+            },
+        }
+    }
+
     /// What an autoswitch tick *would* do, without doing it.
     ///
     /// Same inputs as [`Engine::autoswitch_tick`] but never activates anything,
@@ -1160,6 +1470,7 @@ impl Engine {
             &settings,
             &self.session_busy(&seq),
         );
+        let warmup = self.last_warmup.lock().clone();
         if decision.should_switch {
             if let Some(t) = decision.target {
                 let r = self.switch_to(&t.to_string())?;
@@ -1170,6 +1481,7 @@ impl Engine {
                     "from": r.from,
                     "to": r.to,
                     "detail": decision.detail,
+                    "warmup": warmup,
                 }));
             }
         }
@@ -1188,6 +1500,7 @@ impl Engine {
         Ok(json!({
             "switched": false,
             "detail": decision.detail,
+            "warmup": warmup,
         }))
     }
 
@@ -1204,6 +1517,421 @@ impl Engine {
     pub fn set_leader(&self, leader: bool) {
         *self.is_leader.lock() = leader;
         self.autoswitch.set_observe_only(!leader);
+    }
+
+    /// Classify one agent turn and decide whether it may resume.
+    ///
+    /// Stateless by design — the caller tracks its own attempt counters, so the
+    /// GUI can drive an ACP session it owns while this stays the only copy of
+    /// the policy (see [`crate::autocontinue`]).
+    ///
+    /// Input is whichever of these the caller observed:
+    /// - `stopReason` — the turn completed; classify it.
+    /// - `transport` (`"disconnected"` / `"timeout"`) — no reply to read.
+    /// - `errorKind` + `message` — the agent reported a failure.
+    ///
+    /// ```json
+    /// { "errorKind": "server_error", "message": "API Error: 529 Overloaded",
+    ///   "attempt": 1, "rateLimitWaits": 0, "policy": { "maxAttempts": 5 } }
+    /// ```
+    fn acp_decide(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        let outcome = if let Some(reason) = params.get("stopReason").and_then(|v| v.as_str()) {
+            TurnOutcome::Completed(StopReason::parse(reason))
+        } else if let Some(transport) = params.get("transport").and_then(|v| v.as_str()) {
+            let failure = match transport {
+                "disconnected" => TransportFailure::Disconnected,
+                "timeout" => TransportFailure::Timeout,
+                other => {
+                    return Err(Error::Validation(format!("invalid-transport: {other}")));
+                }
+            };
+            TurnOutcome::Interrupted(autocontinue::classify_transport(failure))
+        } else {
+            let message = params
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let kind = params.get("errorKind").and_then(|v| v.as_str());
+            // Nothing to go on at all is not a silent success: an unknown
+            // failure still has to reach the retry budget rather than be
+            // reported as a finished turn.
+            if message.is_empty() && kind.is_none() {
+                TurnOutcome::Interrupted(InterruptKind::Unknown)
+            } else {
+                TurnOutcome::Interrupted(autocontinue::classify_failure(kind, message))
+            }
+        };
+
+        let policy: ContinuePolicy = match params.get("policy") {
+            Some(v) => serde_json::from_value::<ContinuePolicy>(v.clone())
+                .map_err(|e| Error::Validation(format!("invalid-policy: {e}")))?
+                .clamp(),
+            None => ContinuePolicy::default(),
+        };
+
+        let attempt = u32::try_from(params.get("attempt").and_then(|v| v.as_u64()).unwrap_or(0))
+            .unwrap_or(u32::MAX);
+        let waits = u32::try_from(
+            params
+                .get("rateLimitWaits")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        )
+        .unwrap_or(u32::MAX);
+
+        // The caller names the account; the quota facts come from the engine's
+        // own usage cache, so the GUI never has to plumb `resetsAt` around.
+        let account = params
+            .get("accountNumber")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok());
+        let quota = self.quota_context(account);
+
+        let decision = autocontinue::decide(outcome, attempt, waits, &policy, &quota);
+        let mut out = serde_json::to_value(decision)
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        // Surface the classification too: the GUI labels the interruption for
+        // the user ("network blip", "needs re-login") and should not have to
+        // re-derive it from the decision.
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert(
+                "outcome".into(),
+                serde_json::to_value(outcome).map_err(|e| Error::Internal(e.to_string()))?,
+            );
+            obj.insert("continueMessage".into(), json!(policy.continue_message));
+            obj.insert(
+                "quota".into(),
+                json!({
+                    "secondsUntilReset": quota.seconds_until_reset,
+                    "alternativeAvailable": quota.alternative_available,
+                    "exhausted": quota.exhausted,
+                }),
+            );
+        }
+        Ok(out)
+    }
+
+    /// Seconds from now until an RFC3339 instant, or `None` if it is past or
+    /// unparseable. A reset already behind us is not a wait, it is quota.
+    fn seconds_until(raw: &str) -> Option<u64> {
+        let parsed = chrono::DateTime::parse_from_rfc3339(raw.trim()).ok()?;
+        let delta = parsed.with_timezone(&chrono::Utc) - chrono::Utc::now();
+        u64::try_from(delta.num_seconds()).ok().filter(|s| *s > 0)
+    }
+
+    /// What the engine knows about `account`'s 5h window right now.
+    ///
+    /// Everything is `None`/`false` for an unnamed or unpolled account, which
+    /// [`autocontinue::decide`] reads as "unknown" and degrades to a fixed
+    /// backoff — never to a wrong decision.
+    fn quota_context(&self, account: Option<u32>) -> autocontinue::QuotaContext {
+        let Some(num) = account else {
+            return autocontinue::QuotaContext::default();
+        };
+
+        let usage = self.usage.get(num);
+        let five = usage.as_ref().and_then(|u| u.five_hour.as_ref());
+
+        let seconds_until_reset = five
+            .and_then(|w| w.resets_at.as_deref())
+            .and_then(Self::seconds_until);
+        // Treat "essentially full" as exhausted: the last fraction of a percent
+        // is not enough to finish a turn, and rounding should not decide this.
+        let exhausted = five.is_some_and(|w| w.pct >= 99.0);
+
+        autocontinue::QuotaContext {
+            seconds_until_reset,
+            alternative_available: self.has_alternative_account(num),
+            exhausted,
+        }
+    }
+
+    /// Whether some other managed account could take over a run from `except`.
+    ///
+    /// Deliberately stricter than "exists": a slot with no credential, disabled,
+    /// unhealthy, or itself near its limit is not somewhere to hand work to.
+    fn has_alternative_account(&self, except: u32) -> bool {
+        let Ok(seq) = self.switcher.load_sequence() else {
+            return false;
+        };
+        seq.sequence.iter().any(|&num| {
+            if num == except {
+                return false;
+            }
+            let Some(rec) = seq.account(num) else {
+                return false;
+            };
+            if rec.disabled {
+                return false;
+            }
+            if self.usage.status(num) != UsageStatus::Ok {
+                return false;
+            }
+            self.usage
+                .get(num)
+                .and_then(|u| u.five_hour.as_ref().map(|w| w.pct < 90.0))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Hand a running conversation to another account.
+    ///
+    /// A session's transcript lives inside the profile that created it, and
+    /// `session/load` only finds sessions in its own `CLAUDE_CONFIG_DIR` —
+    /// verified: loading a foreign session id answers
+    /// `Resource not found`. So switching accounts mid-run means **moving** the
+    /// transcript into the target profile, not just changing an env var.
+    ///
+    /// Moved rather than copied: a copy would leave the same conversation in two
+    /// profiles, diverging from the moment the run continues. The transcript
+    /// scanners already read every profile as a root
+    /// ([`crate::projects::scan_envs`]), so a moved file stays visible in the
+    /// history without being counted twice.
+    fn agent_run_handoff(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        let session_id = str_param(params, "sessionId")?;
+        if session_id.trim().is_empty() {
+            return Err(Error::Validation("sessionId must not be empty".into()));
+        }
+
+        let except = params
+            .get("fromAccount")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok());
+
+        let target = match params
+            .get("toAccount")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+        {
+            Some(n) => n,
+            None => self
+                .best_alternative_account(except)
+                .ok_or_else(|| Error::Validation("no account with quota to hand over to".into()))?,
+        };
+
+        // Make sure the target profile exists and is seeded before anything is
+        // moved into it — a half-made profile with a transcript in it would be
+        // worse than not switching at all.
+        let launch = self.session_prepare(&target.to_string(), false)?;
+        // Empty means "this account already is the default login", which has no
+        // profile of its own — its transcripts live in ~/.claude.
+        let config_dir: Option<String> = (!launch.use_default_login
+            && !launch.config_dir.is_empty())
+        .then(|| launch.config_dir.clone());
+
+        let Some(source) = self.find_session_transcript(session_id) else {
+            return Err(Error::Validation(format!(
+                "no transcript found for session {session_id}"
+            )));
+        };
+
+        // The encoded project folder name is lossy (both `_` and `-` become
+        // `-`), so it cannot be recomputed from a path. Reusing the folder the
+        // file already sits in sidesteps the encoding entirely.
+        let folder = source
+            .parent()
+            .and_then(std::path::Path::file_name)
+            .ok_or_else(|| Error::Internal("transcript has no parent folder".into()))?
+            .to_owned();
+
+        let dest_root = match &config_dir {
+            Some(dir) => PathBuf::from(dir),
+            // "Use the default login" — its transcripts live in ~/.claude.
+            None => self.paths.claude_config_home.clone(),
+        };
+        let dest_dir = dest_root.join("projects").join(&folder);
+        std::fs::create_dir_all(&dest_dir).map_err(Error::Io)?;
+        let dest = dest_dir.join(format!("{session_id}.jsonl"));
+
+        if source != dest {
+            crate::fsutil::move_file(&source, &dest).map_err(Error::Io)?;
+        }
+
+        Ok(json!({
+            "accountNumber": target,
+            "configDir": config_dir,
+            "movedFrom": source.to_string_lossy(),
+            "movedTo": dest.to_string_lossy(),
+        }))
+    }
+
+    /// Locate a session's transcript across the default home and every profile.
+    fn find_session_transcript(&self, session_id: &str) -> Option<PathBuf> {
+        let name = format!("{session_id}.jsonl");
+        for env in crate::projects::scan_envs(&self.paths.env, &self.paths.backup_root) {
+            let root = crate::projects::transcripts_root(&env);
+            let Ok(entries) = std::fs::read_dir(&root) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let candidate = entry.path().join(&name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+
+    /// The healthiest account to hand a run to, if any.
+    ///
+    /// Lowest 5h usage wins; anything disabled, unhealthy, or near its own limit
+    /// is not a place to move work to.
+    fn best_alternative_account(&self, except: Option<u32>) -> Option<u32> {
+        let seq = self.switcher.load_sequence().ok()?;
+        let mut best: Option<(u32, f64)> = None;
+        for &num in &seq.sequence {
+            if Some(num) == except {
+                continue;
+            }
+            let Some(rec) = seq.account(num) else { continue };
+            if rec.disabled || self.usage.status(num) != UsageStatus::Ok {
+                continue;
+            }
+            let Some(pct) = self
+                .usage
+                .get(num)
+                .and_then(|u| u.five_hour.as_ref().map(|w| w.pct))
+            else {
+                continue;
+            };
+            if pct >= 90.0 {
+                continue;
+            }
+            if best.is_none_or(|(_, b)| pct < b) {
+                best = Some((num, pct));
+            }
+        }
+        best.map(|(n, _)| n)
+    }
+
+    /// Sessions that stopped against their will and have been idle since.
+    ///
+    /// The counterpart to [`Self::agent_run_list`]: that one covers runs this
+    /// app started, this one covers terminals someone opened themselves. A
+    /// stalled Claude Code is still *running* — it prints the limit and waits —
+    /// so only the transcript can tell the difference between stuck and busy.
+    fn stalled_scan(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        let criteria = params
+            .get("criteria")
+            .map(|v| serde_json::from_value::<stalled::StallCriteria>(v.clone()))
+            .transpose()
+            .map_err(|e| Error::Validation(format!("bad criteria: {e}")))?
+            .unwrap_or_default()
+            .clamp();
+
+        let roots = stalled::scan_roots(&self.paths.env, &self.paths.backup_root);
+        let sessions = stalled::scan_all(&roots, agentruns::now_ms(), criteria);
+        Ok(json!({ "sessions": sessions, "criteria": criteria }))
+    }
+
+    /// What the end of a session's transcript says about its last turn.
+    ///
+    /// The check a finished takeover must run on itself. ACP answers
+    /// `stopReason: end_turn` even when the turn produced nothing but a
+    /// synthesised `"No response requested."` — verified against a live agent —
+    /// so the protocol's own success signal cannot distinguish work done from
+    /// work swallowed. The transcript can: a real reply carries a real model id.
+    fn session_tail(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        let session_id = str_param(params, "sessionId")?;
+        let Some(path) = self.find_session_transcript(&session_id) else {
+            return Ok(json!({
+                "found": false,
+                "state": stalled::TailState::Unknown.label(),
+                "producedRealReply": false,
+            }));
+        };
+
+        let tail = stalled::classify_tail(&stalled::read_tail_lines(&path));
+        let message = match &tail {
+            stalled::TailState::Failed { message } => Some(message.clone()),
+            _ => None,
+        };
+        Ok(json!({
+            "found": true,
+            "file": path.to_string_lossy(),
+            "state": tail.label(),
+            "producedRealReply": tail.produced_real_reply(),
+            "message": message,
+        }))
+    }
+
+    /// Read the run journal, reaping records whose owner process is gone.
+    ///
+    /// Reaping on read rather than on write is deliberate: the process that
+    /// would have marked a run interrupted is precisely the one that died.
+    fn agent_run_list(&self) -> Result<serde_json::Value> {
+        let path = &self.paths.agent_runs_file;
+        let mut journal = agentruns::RunJournal::load(path);
+        let demoted = journal.reap(agentruns::now_ms(), &agentruns::process_is_alive);
+        if !demoted.is_empty() {
+            journal.save(path)?;
+        }
+        Ok(json!({
+            "schemaVersion": agentruns::JOURNAL_SCHEMA_VERSION,
+            "runs": journal.runs,
+            "demoted": demoted,
+            "tally": journal.tally(),
+        }))
+    }
+
+    /// Insert or update one run record.
+    fn agent_run_upsert(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        let run: agentruns::AgentRun = serde_json::from_value(params.clone())
+            .map_err(|e| Error::Validation(format!("invalid-run: {e}")))?;
+        if run.id.trim().is_empty() {
+            return Err(Error::Validation("run id must not be empty".into()));
+        }
+
+        let path = &self.paths.agent_runs_file;
+        let mut journal = agentruns::RunJournal::load(path);
+        journal.upsert(run);
+        journal.prune();
+        journal.save(path)?;
+        Ok(json!({ "ok": true }))
+    }
+
+    /// Change a run's outcome without restating the rest of the record.
+    ///
+    /// [`Self::agent_run_upsert`] replaces a record wholesale, so a caller that
+    /// only knows the new status has to restate the account, profile, mode and
+    /// policy or silently erase them — a trap that has already cost one bug, and
+    /// one a verification step is especially prone to because it learns the
+    /// outcome long after it has forgotten how the run was launched.
+    fn agent_run_patch(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        let id = str_param(params, "id")?;
+        let path = &self.paths.agent_runs_file;
+        let mut journal = agentruns::RunJournal::load(path);
+
+        let Some(run) = journal.runs.iter_mut().find(|r| r.id == id) else {
+            return Ok(json!({ "patched": false }));
+        };
+
+        if let Some(s) = params.get("status") {
+            run.status = serde_json::from_value(s.clone())
+                .map_err(|e| Error::Validation(format!("invalid status: {e}")))?;
+        }
+        if let Some(c) = params.get("stopCause").and_then(|v| v.as_str()) {
+            run.stop_cause = Some(c.to_string());
+        }
+        if let Some(e) = params.get("lastError").and_then(|v| v.as_str()) {
+            run.last_error = Some(e.to_string());
+        }
+        run.updated_ms = agentruns::now_ms();
+
+        journal.save(path)?;
+        Ok(json!({ "patched": true }))
+    }
+
+    fn agent_run_remove(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        let id = str_param(params, "id")?;
+        let path = &self.paths.agent_runs_file;
+        let mut journal = agentruns::RunJournal::load(path);
+        let removed = journal.remove(id);
+        if removed {
+            journal.save(path)?;
+        }
+        Ok(json!({ "removed": removed }))
     }
 
     /// JSON-RPC style call for C ABI method catalog.
@@ -1382,6 +2110,28 @@ impl Engine {
                 self.set_autoswitch(auto)?;
                 Ok(json!({"ok": true}))
             }
+            "set_warmup" => {
+                let w: WarmupSettings = serde_json::from_value(params.clone())
+                    .map_err(|e| Error::Validation(e.to_string()))?;
+                self.set_warmup(w)?;
+                Ok(json!({"ok": true}))
+            }
+            "warmup_tick" => {
+                let r = self.warmup_tick()?;
+                Ok(serde_json::to_value(r).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "warmup_now" => {
+                let only = params
+                    .get("id")
+                    .or_else(|| params.get("number"))
+                    .and_then(|v| {
+                        v.as_u64()
+                            .and_then(|n| u32::try_from(n).ok())
+                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    });
+                let r = self.warmup_now(only)?;
+                Ok(serde_json::to_value(r).map_err(|e| Error::Internal(e.to_string()))?)
+            }
             "autoswitch_tick" => self.autoswitch_tick(),
             "autoswitch_preview" => {
                 let enabled = params
@@ -1402,6 +2152,36 @@ impl Engine {
                     .unwrap_or(false);
                 let ok = self.claim_leadership(force)?;
                 Ok(json!({"isLeader": ok}))
+            }
+            // Auto-continue policy. Stateless: the GUI owns the ACP transport
+            // (it needs streaming and interactive permission prompts, which this
+            // request/response surface cannot carry), but the decision table
+            // lives here so there is only one of it.
+            "acp_decide" => self.acp_decide(params),
+            // Supervised-run journal: survives the window, and lets a run cut
+            // short by the app exiting be resumed on the next launch.
+            "agent_run_list" => self.agent_run_list(),
+            // Terminals the user opened themselves: a stalled Claude Code keeps
+            // running, so only its transcript says whether it is stuck.
+            "stalled_scan" => self.stalled_scan(params),
+            // `stopReason` alone cannot tell work done from work swallowed; the
+            // transcript can. Callers verify a takeover with this.
+            "session_tail" => self.session_tail(params),
+            "agent_run_upsert" => self.agent_run_upsert(params),
+            "agent_run_remove" => self.agent_run_remove(params),
+            // Correct a run's outcome after the fact, without having to restate
+            // the fields the caller no longer has.
+            "agent_run_patch" => self.agent_run_patch(params),
+            "agent_run_handoff" => self.agent_run_handoff(params),
+            // The GUI launches the ACP agent itself and must hand it the same
+            // proxy Claude Code would use. Resolving it here rather than in C#
+            // keeps one implementation of the registry/env precedence rules.
+            "proxy_resolve" => {
+                let host = params
+                    .get("host")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("api.anthropic.com");
+                Ok(json!({ "proxy": crate::proxy::resolve_for(host) }))
             }
             "schema_version" => Ok(json!({"ffiSchemaVersion": FFI_SCHEMA_VERSION})),
             other => Err(Error::Validation(format!("invalid-method: {other}"))),
@@ -1586,6 +2366,582 @@ mod tests {
                 > 0.0
         );
         assert!(v["nextPollSeconds"].as_f64().is_some());
+    }
+
+    #[test]
+    fn acp_decide_over_the_ffi_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+
+        // A normal finish must never be turned into a continuation.
+        let v = eng
+            .call_json("acp_decide", &json!({ "stopReason": "end_turn" }))
+            .unwrap();
+        assert_eq!(v["action"], "stop");
+        assert_eq!(v["cause"], "completed");
+
+        // A server blip retries on the policy's backoff, in camelCase the GUI reads.
+        let v = eng
+            .call_json(
+                "acp_decide",
+                &json!({
+                    "errorKind": "server_error",
+                    "message": "API Error: 529 Overloaded",
+                    "attempt": 1,
+                    "policy": { "baseDelaySeconds": 10 }
+                }),
+            )
+            .unwrap();
+        assert_eq!(v["action"], "continue");
+        assert_eq!(v["delaySeconds"], 20);
+        assert_eq!(v["needsFreshProcess"], false);
+        assert_eq!(v["outcome"]["state"], "interrupted");
+        assert_eq!(v["outcome"]["value"], "network");
+
+        // Auth failures stop regardless of the remaining budget.
+        let v = eng
+            .call_json(
+                "acp_decide",
+                &json!({
+                    "errorKind": "authentication_failed",
+                    "message": "API Error: 403 Request not allowed",
+                    "attempt": 0,
+                    "policy": { "maxAttempts": 99 }
+                }),
+            )
+            .unwrap();
+        assert_eq!(v["action"], "stop");
+        assert_eq!(v["cause"], "needsAuth");
+
+        // A dead agent process must be respawned before retrying.
+        let v = eng
+            .call_json("acp_decide", &json!({ "transport": "disconnected" }))
+            .unwrap();
+        assert_eq!(v["action"], "continue");
+        assert_eq!(v["needsFreshProcess"], true);
+
+        // Callers get the resume text from here, so both drivers send the same one.
+        assert!(v["continueMessage"].as_str().is_some_and(|s| !s.is_empty()));
+
+        // Garbage in the transport field is rejected rather than guessed at.
+        assert!(eng
+            .call_json("acp_decide", &json!({ "transport": "nonsense" }))
+            .is_err());
+    }
+
+    #[test]
+    fn agent_run_journal_over_the_ffi_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+
+        // Empty to start.
+        let v = eng.call_json("agent_run_list", &json!({})).unwrap();
+        assert_eq!(v["runs"].as_array().unwrap().len(), 0);
+
+        // A run owned by *this* process is live and must be left alone.
+        let mine = json!({
+            "id": "run-live",
+            "sessionId": "sess-live",
+            "cwd": "D:/work",
+            "prompt": "refactor the parser",
+            "status": "running",
+            "ownerPid": std::process::id(),
+            "createdMs": 1,
+            "updatedMs": 1,
+        });
+        eng.call_json("agent_run_upsert", &mine).unwrap();
+
+        // A run whose owner is gone: exactly what an app crash leaves behind.
+        let orphan = json!({
+            "id": "run-orphan",
+            "sessionId": "sess-orphan",
+            "cwd": "D:/work",
+            "prompt": "run the migration",
+            "status": "running",
+            // Pid 0 is never a live process, so this is deterministic.
+            "ownerPid": 0,
+            "createdMs": 1,
+            "updatedMs": 1,
+        });
+        eng.call_json("agent_run_upsert", &orphan).unwrap();
+
+        let v = eng.call_json("agent_run_list", &json!({})).unwrap();
+        let runs = v["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(v["demoted"].as_array().unwrap().len(), 1);
+        assert_eq!(v["demoted"][0], "run-orphan");
+
+        let by_id = |id: &str| {
+            runs.iter()
+                .find(|r| r["id"] == id)
+                .cloned()
+                .expect("run present")
+        };
+        assert_eq!(by_id("run-live")["status"], "running");
+        assert_eq!(by_id("run-orphan")["status"], "interrupted");
+        assert!(by_id("run-orphan")["lastError"].as_str().is_some());
+
+        // Reaping is persisted, so a second reader sees the same thing.
+        let again = eng.call_json("agent_run_list", &json!({})).unwrap();
+        assert!(again["demoted"].as_array().unwrap().is_empty());
+        assert_eq!(
+            again["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == "run-orphan")
+                .unwrap()["status"],
+            "interrupted"
+        );
+
+        // Upsert replaces rather than duplicating.
+        let mut finished = mine.clone();
+        finished["status"] = json!("completed");
+        finished["stopCause"] = json!("completed");
+        finished["turns"] = json!(3);
+        eng.call_json("agent_run_upsert", &finished).unwrap();
+        let v = eng.call_json("agent_run_list", &json!({})).unwrap();
+        assert_eq!(v["runs"].as_array().unwrap().len(), 2);
+
+        let removed = eng
+            .call_json("agent_run_remove", &json!({ "id": "run-orphan" }))
+            .unwrap();
+        assert_eq!(removed["removed"], true);
+        let v = eng.call_json("agent_run_list", &json!({})).unwrap();
+        assert_eq!(v["runs"].as_array().unwrap().len(), 1);
+
+        // A record without an id is a journal we could never update again.
+        assert!(eng
+            .call_json("agent_run_upsert", &json!({ "id": "  " }))
+            .is_err());
+    }
+
+    #[test]
+    fn stalled_scan_over_the_ffi_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+
+        let projects = eng.paths.claude_config_home.join("projects").join("D--work");
+        std::fs::create_dir_all(&projects).unwrap();
+
+        let user = json!({"type":"user","cwd":"D:\\work",
+                          "message":{"role":"user","content":[{"type":"text","text":"go"}]}});
+        let assistant = |model: &str, text: &str, err: bool| {
+            json!({"type":"assistant","cwd":"D:\\work","isApiErrorMessage":err,
+                   "message":{"role":"assistant","model":model,
+                              "content":[{"type":"text","text":text}]}})
+        };
+
+        // Three sessions, one of each shape the scanner must tell apart.
+        let cases = [
+            ("11111111-1111-1111-1111-111111111111",
+             assistant("claude-opus-5", "Claude AI usage limit reached", true)),
+            // Finished normally: the model handed control back to a human.
+            ("22222222-2222-2222-2222-222222222222",
+             assistant("claude-opus-5", "all done", false)),
+            // Synthetic close-out of an orphaned turn — not an answer.
+            ("33333333-3333-3333-3333-333333333333",
+             assistant(crate::stalled::SYNTHETIC_MODEL, "No response requested.", false)),
+        ];
+        for (id, last) in &cases {
+            std::fs::write(
+                projects.join(format!("{id}.jsonl")),
+                format!("{user}\n{last}\n"),
+            )
+            .unwrap();
+        }
+
+        // Backdate everything past the idle threshold.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(20 * 60);
+        for (id, _) in &cases {
+            let f = std::fs::File::options()
+                .write(true)
+                .open(projects.join(format!("{id}.jsonl")))
+                .unwrap();
+            f.set_modified(old).unwrap();
+        }
+
+        let v = eng.call_json("stalled_scan", &json!({})).unwrap();
+        let found = v["sessions"].as_array().unwrap();
+        assert_eq!(found.len(), 1, "only the quota wall qualifies: {found:?}");
+        assert_eq!(found[0]["sessionId"], cases[0].0);
+        assert_eq!(found[0]["reason"], "rateLimit");
+        assert_eq!(found[0]["cwd"], "D:\\work");
+        assert!(found[0]["lastError"].as_str().unwrap().contains("usage limit"));
+
+        // A stricter idle window rules it out; the criteria are echoed back
+        // clamped, so a UI can show what was actually applied.
+        let v = eng
+            .call_json("stalled_scan", &json!({ "criteria": { "windowHours": 5, "idleMinutes": 60 } }))
+            .unwrap();
+        assert_eq!(v["sessions"].as_array().unwrap().len(), 0);
+        assert_eq!(v["criteria"]["idleMinutes"], 60);
+
+        // Nonsense is clamped rather than obeyed: a zero idle window would call
+        // a turn that is mid-flight stalled.
+        let v = eng
+            .call_json("stalled_scan", &json!({ "criteria": { "windowHours": 0, "idleMinutes": 0 } }))
+            .unwrap();
+        assert_eq!(v["criteria"]["idleMinutes"], 1);
+        assert_eq!(v["criteria"]["windowHours"], 1);
+
+        // A malformed criteria object is refused rather than silently defaulted.
+        assert!(eng
+            .call_json("stalled_scan", &json!({ "criteria": { "idleMinutes": "soon" } }))
+            .is_err());
+    }
+
+    #[test]
+    fn agent_run_patch_changes_the_outcome_and_keeps_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+
+        eng.call_json(
+            "agent_run_upsert",
+            &json!({
+                "id": "run-1",
+                "sessionId": "sess-1",
+                "cwd": "D:/work",
+                "accountNumber": 2,
+                "configDir": "D:/backup/sessions/2-a_x.com",
+                "mode": "acceptEdits",
+                "prompt": "refactor the parser",
+                "status": "completed",
+                "stopCause": "completed",
+                "ownerPid": std::process::id(),
+                "createdMs": 1,
+                "updatedMs": 1,
+                "turns": 2,
+            }),
+        )
+        .unwrap();
+
+        // A verification step knows the outcome but not how the run was
+        // launched. Patching must not cost it the account or the profile —
+        // without those the run resumes as the default login and cannot find
+        // its own conversation.
+        let v = eng
+            .call_json(
+                "agent_run_patch",
+                &json!({
+                    "id": "run-1",
+                    "status": "interrupted",
+                    "lastError": "the turn produced no real output",
+                }),
+            )
+            .unwrap();
+        assert_eq!(v["patched"], true);
+
+        let runs = eng.call_json("agent_run_list", &json!({})).unwrap();
+        let r = runs["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "run-1")
+            .expect("record survives the patch");
+
+        assert_eq!(r["status"], "interrupted");
+        assert!(r["lastError"].as_str().unwrap().contains("no real output"));
+        assert_eq!(r["accountNumber"], 2, "the account must survive");
+        assert_eq!(r["configDir"], "D:/backup/sessions/2-a_x.com", "the profile must survive");
+        assert_eq!(r["mode"], "acceptEdits");
+        assert_eq!(r["prompt"], "refactor the parser");
+        assert_eq!(r["turns"], 2);
+        // The old stop cause is left alone when the patch does not name one.
+        assert_eq!(r["stopCause"], "completed");
+
+        // Patching a record that is not there is not an error: the run may have
+        // been forgotten while its verification was still in flight.
+        let v = eng
+            .call_json("agent_run_patch", &json!({ "id": "nope", "status": "failed" }))
+            .unwrap();
+        assert_eq!(v["patched"], false);
+
+        // A status the journal does not know is refused rather than stored.
+        assert!(eng
+            .call_json("agent_run_patch", &json!({ "id": "run-1", "status": "banana" }))
+            .is_err());
+    }
+
+    #[test]
+    fn session_tail_tells_a_real_reply_from_a_swallowed_turn() {
+        // The check that stops a takeover reporting success having done nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+
+        let projects = eng.paths.claude_config_home.join("projects").join("D--work");
+        std::fs::create_dir_all(&projects).unwrap();
+        let user = json!({"type":"user","cwd":"D:\\work",
+                          "message":{"role":"user","content":[{"type":"text","text":"go"}]}});
+
+        let write = |id: &str, last: serde_json::Value| {
+            std::fs::write(projects.join(format!("{id}.jsonl")), format!("{user}\n{last}\n")).unwrap();
+        };
+
+        write(
+            "real",
+            json!({"type":"assistant","message":{"role":"assistant","model":"claude-opus-5",
+                   "content":[{"type":"text","text":"done"}]}}),
+        );
+        write(
+            "swallowed",
+            json!({"type":"assistant","message":{"role":"assistant",
+                   "model": crate::stalled::SYNTHETIC_MODEL,
+                   "content":[{"type":"text","text":"No response requested."}]}}),
+        );
+
+        let v = eng.call_json("session_tail", &json!({ "sessionId": "real" })).unwrap();
+        assert_eq!(v["found"], true);
+        assert_eq!(v["state"], "awaitingUser");
+        assert_eq!(v["producedRealReply"], true);
+
+        // The case the protocol reports as `end_turn` regardless.
+        let v = eng.call_json("session_tail", &json!({ "sessionId": "swallowed" })).unwrap();
+        assert_eq!(v["state"], "dangling");
+        assert_eq!(v["producedRealReply"], false);
+
+        // A session with no transcript is not a success either.
+        let v = eng.call_json("session_tail", &json!({ "sessionId": "nope" })).unwrap();
+        assert_eq!(v["found"], false);
+        assert_eq!(v["producedRealReply"], false);
+    }
+
+    #[test]
+    fn quota_context_degrades_to_unknown_without_an_account() {
+        // An unnamed account must not silently produce a confident answer: an
+        // unknown quota falls back to the fixed delay, never to a wrong wait.
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+
+        let v = eng
+            .call_json(
+                "acp_decide",
+                &json!({ "message": "Claude AI usage limit reached" }),
+            )
+            .unwrap();
+        assert_eq!(v["outcome"]["value"], "rateLimit");
+        assert!(v["quota"]["secondsUntilReset"].is_null());
+        assert_eq!(v["quota"]["alternativeAvailable"], false);
+        assert_eq!(v["quota"]["exhausted"], false);
+        // Default policy waits; with no reset known it uses the fixed delay.
+        assert_eq!(v["action"], "continue");
+        assert_eq!(v["delaySeconds"], 15 * 60);
+        assert_eq!(v["switchAccount"], false);
+    }
+
+    #[test]
+    fn quota_policy_can_be_set_to_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+
+        let v = eng
+            .call_json(
+                "acp_decide",
+                &json!({
+                    "message": "Claude AI usage limit reached",
+                    "policy": { "onRateLimit": "stop" }
+                }),
+            )
+            .unwrap();
+        assert_eq!(v["action"], "stop");
+        assert_eq!(v["cause"], "rateLimited");
+    }
+
+    #[test]
+    fn handoff_moves_the_transcript_into_the_target_profile() {
+        // A session is only visible to the profile holding its transcript, so a
+        // handover that does not move the file leaves the run unresumable.
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+        eng.add_raw(
+            1,
+            "a@x.com",
+            &oauth_cred("a@x.com", "tok-a"),
+            &oauth_cfg("a@x.com"),
+            None,
+        )
+        .unwrap();
+        eng.add_raw(
+            2,
+            "b@x.com",
+            &oauth_cred("b@x.com", "tok-b"),
+            &oauth_cfg("b@x.com"),
+            None,
+        )
+        .unwrap();
+
+        // Seed a transcript in the default home, as a run on the active login
+        // would have written it.
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let folder = "D--work-proj";
+        let src_dir = eng.paths.claude_config_home.join("projects").join(folder);
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let src = src_dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(&src, b"{\"type\":\"user\"}\n").unwrap();
+
+        let v = eng
+            .call_json(
+                "agent_run_handoff",
+                &json!({ "sessionId": session_id, "toAccount": 2 }),
+            )
+            .unwrap();
+
+        assert_eq!(v["accountNumber"], 2);
+        let moved_to = v["movedTo"].as_str().expect("movedTo path");
+        let dest = std::path::Path::new(moved_to);
+
+        assert!(dest.is_file(), "transcript should exist at the destination");
+        assert!(
+            !src.is_file(),
+            "moved, not copied: a second copy would fork the conversation"
+        );
+        // It must land under the *same* encoded project folder — that name is
+        // lossy and cannot be recomputed, so it is reused rather than derived.
+        assert_eq!(
+            dest.parent().unwrap().file_name().unwrap().to_string_lossy(),
+            folder
+        );
+        assert!(
+            dest.to_string_lossy().contains("sessions"),
+            "destination should be inside the target account's profile: {moved_to}"
+        );
+    }
+
+    #[test]
+    fn handoff_refuses_a_session_it_cannot_find() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+        eng.add_raw(
+            1,
+            "a@x.com",
+            &oauth_cred("a@x.com", "tok-a"),
+            &oauth_cfg("a@x.com"),
+            None,
+        )
+        .unwrap();
+
+        // Failing loudly beats moving nothing and reporting success — the run
+        // would then resume against a profile with no conversation in it.
+        assert!(eng
+            .call_json(
+                "agent_run_handoff",
+                &json!({ "sessionId": "no-such-session", "toAccount": 1 }),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn warmup_settings_roundtrip_and_disabled_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+        eng.set_warmup(WarmupSettings {
+            enabled: true,
+            work_start: "09:00".into(),
+            work_end: "18:00".into(),
+            accounts: vec![],
+            model: None,
+        })
+        .unwrap();
+        let snap = eng.snapshot().unwrap();
+        assert!(snap.warmup.enabled);
+        assert_eq!(snap.warmup.work_start, "09:00");
+        // No OAuth slots → tick reports no-eligible rather than panicking.
+        let tick = eng.warmup_tick().unwrap();
+        assert!(tick.enabled);
+        assert!(tick.fired.is_empty());
+        assert!(tick
+            .skipped
+            .iter()
+            .any(|s| s.reason == "no-eligible-account"));
+    }
+
+    #[test]
+    fn warmup_now_can_target_a_single_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+        eng.add_raw(
+            1,
+            "a@x.com",
+            &oauth_cred("a@x.com", "tok-a"),
+            &oauth_cfg("a@x.com"),
+            None,
+        )
+        .unwrap();
+        eng.add_raw(
+            2,
+            "b@x.com",
+            &oauth_cred("b@x.com", "tok-b"),
+            &oauth_cfg("b@x.com"),
+            None,
+        )
+        .unwrap();
+        // Status must be Ok (subscribed + healthy) before a slot enters N.
+        eng.refresh_usage().unwrap();
+        // Unknown slot → no-eligible for that number.
+        let miss = eng.warmup_now(Some(99)).unwrap();
+        assert!(miss.fired.is_empty());
+        assert!(miss
+            .skipped
+            .iter()
+            .any(|s| s.number == 99 && s.reason == "no-eligible-account"));
+        // Force may try to spawn claude; either fires (spawn ok/fail) or skips
+        // only for window/cooldown — not for the other account.
+        let one = eng.warmup_now(Some(1)).unwrap();
+        assert!(
+            one.fired.iter().all(|f| f.number == 1)
+                && one.skipped.iter().all(|s| s.number == 1),
+            "single-target result must only mention slot 1: {one:?}"
+        );
+    }
+
+    #[test]
+    fn warmup_stagger_n_only_counts_subscribed_healthy_slots() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+        // Slot 1: demo token → Ok after refresh (has subscription windows).
+        eng.add_raw(
+            1,
+            "a@x.com",
+            &oauth_cred("a@x.com", "tok-a"),
+            &oauth_cfg("a@x.com"),
+            None,
+        )
+        .unwrap();
+        // Slot 2: credential present but no mock usage → Unavailable (not Ok).
+        eng.add_raw(
+            2,
+            "dead@x.com",
+            &oauth_cred("dead@x.com", "tok-missing"),
+            &oauth_cfg("dead@x.com"),
+            None,
+        )
+        .unwrap();
+        eng.set_warmup(WarmupSettings {
+            enabled: true,
+            work_start: "09:00".into(),
+            work_end: "18:00".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        eng.refresh_usage().unwrap();
+        assert_eq!(eng.usage.status(1), UsageStatus::Ok);
+        assert_ne!(eng.usage.status(2), UsageStatus::Ok);
+
+        let seq = eng.switcher.load_sequence().unwrap();
+        let settings = eng.get_settings().warmup;
+        let eligible = eng.warmup_eligible(&seq, &settings);
+        assert_eq!(
+            eligible.iter().map(|(n, _, _)| *n).collect::<Vec<_>>(),
+            vec![1],
+            "only subscribed+healthy slots enter N"
+        );
+
+        // Snapshot anchor only for the healthy slot; N=1 → base 06:00 phase.
+        let snap = eng.snapshot().unwrap();
+        let a1 = snap.accounts.iter().find(|a| a.number == 1).unwrap();
+        let a2 = snap.accounts.iter().find(|a| a.number == 2).unwrap();
+        assert!(a1.warmup_anchor.is_some());
+        assert!(a2.warmup_anchor.is_none());
     }
 
     #[test]

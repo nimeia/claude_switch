@@ -71,6 +71,16 @@ impl UsageStatus {
             Self::NeedsLogin | Self::NoCredential | Self::NoSubscription
         )
     }
+
+    /// Account may join 5h-window warmup stagger (N) and receive fires.
+    ///
+    /// Requires a successful usage fetch that returned subscription windows —
+    /// no sub, dead login, API key, or unknown/transient faults are excluded
+    /// so N is not inflated by accounts that cannot actually open a bucket.
+    #[must_use]
+    pub const fn is_warmup_ready(self) -> bool {
+        matches!(self, Self::Ok)
+    }
 }
 
 impl Usage {

@@ -264,6 +264,16 @@ internal static class UiPrefs
     /// </remarks>
     public static string Language { get; set; } = "";
 
+    /// <summary>
+    /// Whether the automation section on the main window is unfolded.
+    /// </summary>
+    /// <remarks>
+    /// Defaults to folded: these are decisions made once, and the list is what
+    /// the window is for. The collapsed header still states what automation is
+    /// currently doing, so nothing is hidden — only quietened.
+    /// </remarks>
+    public static bool SettingsExpanded { get; set; }
+
     private static string Path =>
         System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -284,6 +294,8 @@ internal static class UiPrefs
                     HideEmail = line.Contains("1") || line.Contains("true", StringComparison.OrdinalIgnoreCase);
                 if (line.StartsWith("language=", StringComparison.OrdinalIgnoreCase))
                     Language = line["language=".Length..].Trim();
+                if (line.StartsWith("settings_expanded=", StringComparison.OrdinalIgnoreCase))
+                    SettingsExpanded = line.Contains('1') || line.Contains("true", StringComparison.OrdinalIgnoreCase);
             }
         }
         catch { /* ignore */ }
@@ -295,11 +307,15 @@ internal static class UiPrefs
         {
             var dir = System.IO.Path.GetDirectoryName(Path)!;
             Directory.CreateDirectory(dir);
+            // Language is written back too — Load has always read it, but Save
+            // never wrote it, so a chosen language was forgotten on every exit.
             File.WriteAllText(
                 Path,
                 $"theme={(Theme.Mode == ThemeMode.Dark ? "dark" : "light")}\n" +
                 $"onboarding_done={(OnboardingDone ? "1" : "0")}\n" +
-                $"hide_email={(HideEmail ? "1" : "0")}\n");
+                $"hide_email={(HideEmail ? "1" : "0")}\n" +
+                $"settings_expanded={(SettingsExpanded ? "1" : "0")}\n" +
+                $"language={Language}\n");
         }
         catch { /* ignore */ }
     }

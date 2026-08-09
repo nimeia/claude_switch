@@ -31,10 +31,22 @@ public class AccountPlanDisplayTests
     {
         using var lang = Chinese();
         var line = AccountCard.BuildSubLine(ProAccount(), int.MaxValue);
-        Assert.StartsWith("alice@example.com", line);
+        Assert.StartsWith("#1 · alice@example.com", line);
         Assert.Contains("订阅开始", line);
         // Whatever the local zone, the date is one of the two adjacent days.
         Assert.True(line.Contains("5/24") || line.Contains("5/23") || line.Contains("5/25"), line);
+    }
+
+    [Fact]
+    public void Sub_line_carries_the_slot_number_not_the_card_position()
+    {
+        // The badge used to be a big numbered disc, which read as a rank — and
+        // the list order is the user's own, so #2 could sit above #1. The number
+        // is an identifier, so it belongs in the identity line beside the email.
+        using var lang = Chinese();
+        var line = AccountCard.BuildSubLine(
+            new AccountCardModel { Number = 7, Email = "bob@example.com" }, int.MaxValue);
+        Assert.StartsWith("#7 · ", line);
     }
 
     [Fact]
@@ -42,7 +54,7 @@ public class AccountPlanDisplayTests
     {
         using var lang = Chinese();
         var line = AccountCard.BuildSubLine(ProAccount(), 10);
-        Assert.Equal("alice@example.com", line);
+        Assert.Equal("#1 · alice@example.com", line);
         Assert.DoesNotContain("订阅开始", line);
     }
 
@@ -52,16 +64,16 @@ public class AccountPlanDisplayTests
         var line = AccountCard.BuildSubLine(
             new AccountCardModel { Number = 2, Email = "bob@example.com" },
             int.MaxValue);
-        Assert.Equal("bob@example.com", line);
+        Assert.Equal("#2 · bob@example.com", line);
     }
 
     [Fact]
     public void Unparseable_subscription_date_is_dropped_not_shown_raw()
     {
         var line = AccountCard.BuildSubLine(
-            new AccountCardModel { Email = "bob@example.com", SubscriptionCreatedAt = "soon" },
+            new AccountCardModel { Number = 3, Email = "bob@example.com", SubscriptionCreatedAt = "soon" },
             int.MaxValue);
-        Assert.Equal("bob@example.com", line);
+        Assert.Equal("#3 · bob@example.com", line);
     }
 
     [Fact]
@@ -107,8 +119,52 @@ public class AccountPlanDisplayTests
     {
         using var lang = Chinese();
         // A blank cell can't be told apart from a broken app — always give a reason.
-        Assert.Equal(expected, Theme.UsageLabelCompact(null, status));
+        Assert.Equal(expected, Theme.UsageLabelRemain(null, status));
         Assert.Equal(expected, Theme.UsageStatusShort(status));
+    }
+
+    [Theory]
+    [InlineData("needs-login", true)]
+    [InlineData("no-credential", true)]
+    [InlineData("no-subscription", true)]
+    [InlineData("api-key", false)]
+    [InlineData("unavailable", false)]
+    [InlineData("ok", false)]
+    [InlineData(null, false)]
+    public void Attention_is_only_for_faults_the_user_can_clear(string? status, bool expected)
+    {
+        // "unavailable" retries itself and "api-key" is a permanent property of
+        // the account — flagging either would train the user to ignore amber.
+        Assert.Equal(expected, new AccountCardModel { UsageStatus = status }.NeedsAttention);
+    }
+
+    [Fact]
+    public void Attention_outranks_every_other_state_on_the_badge()
+    {
+        using var lang = Chinese();
+        // A broken account that also happens to be the live login must read as
+        // broken. Showing "in use" would be true and useless — the user cannot
+        // act on it, and the thing they can act on would be the one hidden.
+        var broken = new AccountCardModel { UsageStatus = "needs-login", Active = true };
+        Assert.Equal("需重新登录", AccountCard.StateBadge(broken).Text);
+        Assert.Equal(Theme.Warning, AccountCard.StateBadge(broken).Fg);
+
+        Assert.Equal("当前", AccountCard.StateBadge(new AccountCardModel { Active = true }).Text);
+        Assert.Equal(
+            "已停用",
+            AccountCard.StateBadge(new AccountCardModel { Active = true, Disabled = true }).Text);
+        Assert.Equal("就绪", AccountCard.StateBadge(new AccountCardModel()).Text);
+    }
+
+    [Fact]
+    public void Numbers_not_in_yet_are_told_apart_from_numbers_that_will_never_come()
+    {
+        Assert.True(new AccountCardModel().UsageUnknownYet);
+        Assert.True(new AccountCardModel { UsageStatus = "ok" }.UsageUnknownYet);
+        // A stated reason is an answer, so the cell shows it rather than a
+        // skeleton that would imply something is still on its way.
+        Assert.False(new AccountCardModel { UsageStatus = "needs-login" }.UsageUnknownYet);
+        Assert.False(new AccountCardModel { FiveHour = 0 }.UsageUnknownYet);
     }
 
     [Fact]
@@ -130,9 +186,11 @@ public class AccountPlanDisplayTests
     public void Real_numbers_ignore_the_status_entirely()
     {
         using var lang = Chinese();
-        Assert.Equal("42% · 剩58%", Theme.UsageLabelCompact(42, "ok"));
+        // Remaining only: the bar beside it already draws the spent share.
+        Assert.Equal("剩 58%", Theme.UsageLabelRemain(42, "ok"));
         // Even a stale status string must never mask a number we actually have.
-        Assert.Equal("42% · 剩58%", Theme.UsageLabelCompact(42, "needs-login"));
+        Assert.Equal("剩 58%", Theme.UsageLabelRemain(42, "needs-login"));
+        Assert.Equal("剩 0%", Theme.UsageLabelRemain(100));
     }
 
     [Fact]

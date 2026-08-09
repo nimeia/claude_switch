@@ -70,6 +70,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "claude-switch-acp"
+version = "0.1.0"
+dependencies = [
+ "claude-switch-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "claude-switch-core"
 version = "0.1.0"
 dependencies = [

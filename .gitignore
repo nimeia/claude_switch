@@ -13,6 +13,10 @@ dist/
 # Probe / layout-acceptance output
 _layout_out/
 
+# ACP adapter is installed from npm, not vendored
+/tools/acp/node_modules/
+/tools/acp/package-lock.json
+
 # Vendored upstream + unrelated checkouts (not ours to redistribute)
 /others/
 /reference/

@@ -84,6 +84,8 @@ public sealed class UsageDrawer : Panel
     public event EventHandler? AliasRequested;
     public event EventHandler? DeleteRequested;
     public event EventHandler? ToggleDisableRequested;
+    /// <summary>User asked to open this account's 5h window now.</summary>
+    public event EventHandler? WarmupRequested;
     public event EventHandler? ClosedByUser;
     public event EventHandler? PreferredSizeChanged;
 
@@ -338,6 +340,14 @@ public sealed class UsageDrawer : Panel
         if (_model is null) return;
         _moreMenu.Items.Clear();
 
+        var warmItem = new ToolStripMenuItem(Loc.T("menu.warmup"))
+        {
+            // Only subscribed + healthy (usageStatus ok) participate in N / fires.
+            Enabled = !_model.Disabled && _model.UsageStatus is "ok",
+            ToolTipText = Loc.T("menu.warmup.tip"),
+        };
+        warmItem.Click += (_, _) => WarmupRequested?.Invoke(this, EventArgs.Empty);
+
         var disableItem = new ToolStripMenuItem(
             _model.Disabled ? Loc.T("menu.enable") : Loc.T("menu.disableOne"));
         disableItem.Click += (_, _) => ToggleDisableRequested?.Invoke(this, EventArgs.Empty);
@@ -348,6 +358,8 @@ public sealed class UsageDrawer : Panel
         };
         deleteItem.Click += (_, _) => DeleteRequested?.Invoke(this, EventArgs.Empty);
 
+        _moreMenu.Items.Add(warmItem);
+        _moreMenu.Items.Add(new ToolStripSeparator());
         _moreMenu.Items.Add(disableItem);
         _moreMenu.Items.Add(new ToolStripSeparator());
         _moreMenu.Items.Add(deleteItem);
@@ -642,7 +654,8 @@ public sealed class UsageDrawer : Panel
         BindHealth(model);
         BindUsageWindow(
             model.FiveHour, model.FiveHourResetsAt, model.UsageStatus,
-            _fiveLevel, _fiveUsed, _fiveRemain, _fiveBar, _fiveThresholdHint, _fiveReset);
+            _fiveLevel, _fiveUsed, _fiveRemain, _fiveBar, _fiveThresholdHint, _fiveReset,
+            warmupAnchor: model.WarmupAnchor);
         BindUsageWindow(
             model.SevenDay, model.SevenDayResetsAt, model.UsageStatus,
             _sevenLevel, _sevenUsed, _sevenRemain, _sevenBar, _sevenThresholdHint, _sevenReset);
@@ -819,7 +832,8 @@ public sealed class UsageDrawer : Panel
         Label remain,
         MeterBar bar,
         Label thrHint,
-        Label reset)
+        Label reset,
+        string? warmupAnchor = null)
     {
         string levelText = Theme.UsageLevel(pct);
         Color levelFg = Theme.UsageColor(pct);
@@ -874,11 +888,20 @@ public sealed class UsageDrawer : Panel
         {
             reset.Visible = true;
             reset.Text = Loc.T("drawer.reset", resetRel);
+            reset.ForeColor = Theme.TextSecondary;
+        }
+        else if (Theme.FormatWarmupAnchor(warmupAnchor) is { } warm)
+        {
+            // Window not open yet: show when the guardian plans to open it.
+            reset.Visible = true;
+            reset.Text = Loc.T("drawer.warmup", warm);
+            reset.ForeColor = Theme.TextMuted;
         }
         else if (pct is null && status is not (null or "ok" or "unknown"))
         {
             reset.Visible = true;
             reset.Text = Theme.UsageStatusLong(status);
+            reset.ForeColor = Theme.TextSecondary;
         }
         else
         {

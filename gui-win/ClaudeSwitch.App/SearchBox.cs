@@ -40,4 +40,64 @@ internal static class SearchBox
         box.HandleCreated += (_, _) => Apply();
         Apply();
     }
+
+    private const int EM_SETMARGINS = 0x00D3;
+    private const int EC_RIGHTMARGIN = 0x0002;
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    /// <summary>
+    /// Puts a ✕ inside the search box, visible only while there is a query.
+    /// </summary>
+    /// <remarks>
+    /// The clear action used to be a toolbar button of its own, which spent
+    /// permanent width on something that does nothing most of the time — and
+    /// sat far enough from the box that it read as a separate command. A child
+    /// control plus a right text margin keeps it in the box it clears; the
+    /// margin is what stops a long query running underneath the glyph.
+    /// </remarks>
+    /// <returns>The glyph, so the caller can show and hide it; null if there is no box.</returns>
+    public static Control? AttachInlineClear(TextBox? box, string tip, Action clear)
+    {
+        if (box is null) return null;
+
+        // Design pixels: the glyph is a font, so a fixed device width is a hit
+        // target that shrinks as the text it sits beside grows.
+        int glyphW = (int)Math.Round(GlyphW * box.DeviceDpi / 96.0);
+        var glyph = new Label
+        {
+            Text = "✕",
+            AutoSize = false,
+            Width = glyphW,
+            Dock = DockStyle.Right,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Cursor = Cursors.Hand,
+            Visible = false,
+            Font = Theme.FontSmall,
+            ForeColor = Theme.TextMuted,
+        };
+        // Click, not MouseDown: the box keeps focus, so clearing leaves the
+        // caret where the user was already typing.
+        glyph.Click += (_, _) =>
+        {
+            clear();
+            box.Focus();
+        };
+        glyph.MouseEnter += (_, _) => glyph.ForeColor = Theme.TextPrimary;
+        glyph.MouseLeave += (_, _) => glyph.ForeColor = Theme.TextMuted;
+        new ToolTip().SetToolTip(glyph, tip);
+
+        void ApplyMargin()
+        {
+            if (box.IsHandleCreated)
+                SendMessage(box.Handle, EM_SETMARGINS, EC_RIGHTMARGIN, glyphW << 16);
+        }
+        box.HandleCreated += (_, _) => ApplyMargin();
+        box.Controls.Add(glyph);
+        ApplyMargin();
+        return glyph;
+    }
+
+    private const int GlyphW = 20;
 }

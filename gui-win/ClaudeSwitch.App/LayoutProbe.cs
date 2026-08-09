@@ -25,6 +25,40 @@ internal static class LayoutProbe
     /// </summary>
     public static List<(string FileName, Action Show)> Overlays { get; } = [];
 
+    /// <summary>
+    /// Extra assertions to append to the rects dump.
+    /// </summary>
+    /// <remarks>
+    /// A window used to add its own checks from a second <c>Shown</c> handler,
+    /// which appended to a file this probe then overwrote — so those lines had
+    /// silently not been produced for some time. Anything that wants to be in
+    /// the dump has to be written while the dump is being built.
+    /// </remarks>
+    public static List<Func<string>> ExtraChecks { get; } = [];
+
+    /// <summary>
+    /// Force a window size for the capture (env <c>CLAUDE_SWITCH_PROBE_SIZE</c>,
+    /// as <c>1000x640</c>).
+    /// </summary>
+    /// <remarks>
+    /// The bands only clip at the sizes nobody develops at. Capturing at the
+    /// declared minimum is the one check that catches a toolbar which fits the
+    /// author's window and is cut off in the user's — which is exactly how the
+    /// last toolbar regression shipped.
+    /// </remarks>
+    private static void ApplyProbeSize(Form form)
+    {
+        var raw = Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_SIZE");
+        if (string.IsNullOrWhiteSpace(raw)) return;
+        var parts = raw.Split('x', 'X');
+        if (parts.Length != 2
+            || !int.TryParse(parts[0], out var w)
+            || !int.TryParse(parts[1], out var h))
+            return;
+        form.WindowState = FormWindowState.Normal;
+        form.Size = new Size(w, h);
+    }
+
     public static void RunIfRequested(Form form, params (string Name, Control Control)[] targets)
     {
         var dir = Environment.GetEnvironmentVariable("CLAUDE_SWITCH_LAYOUT_DIR");
@@ -39,6 +73,7 @@ internal static class LayoutProbe
             {
                 try
                 {
+                    ApplyProbeSize(form);
                     form.PerformLayout();
                     Application.DoEvents();
                     // Long enough for background work to land (the activity strip
@@ -182,6 +217,12 @@ internal static class LayoutProbe
                             sb.AppendLine($"FAIL list_status_overlap h={inter.Height}");
                         else
                             sb.AppendLine("OK list_status_no_overlap");
+                    }
+
+                    foreach (var line in ExtraChecks)
+                    {
+                        try { sb.AppendLine(line()); }
+                        catch (Exception ex) { sb.AppendLine($"FAIL extra_check {ex.GetType().Name}"); }
                     }
 
                     File.WriteAllText(Path.Combine(dir, "gui-layout-rects.txt"), sb.ToString(), Encoding.UTF8);

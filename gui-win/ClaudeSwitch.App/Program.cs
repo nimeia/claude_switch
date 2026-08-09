@@ -17,6 +17,7 @@ static class Program
         string? fixture = null;
         bool forceOnboarding = false;
         bool skipOnboarding = false;
+        bool warmupOnce = false;
         for (int i = 0; i < args.Length; i++)
         {
             if (args[i] is "--fixture" or "-f" && i + 1 < args.Length)
@@ -25,6 +26,8 @@ static class Program
                 forceOnboarding = true;
             if (args[i] is "--skip-onboarding")
                 skipOnboarding = true;
+            if (args[i] is "--warmup-once")
+                warmupOnce = true;
         }
 
         // Layout probe mode always skips onboarding dialog.
@@ -43,6 +46,9 @@ static class Program
         using var mutex = new Mutex(true, instanceKey, out bool created);
         if (!created)
         {
+            // Scheduled headless warmup: the live GUI's poll already owns the
+            // guardian — exit quietly instead of popping "already running".
+            if (warmupOnce) return;
             MessageBox.Show(
                 Loc.T("app.alreadyRunning"),
                 "Claude Switch",
@@ -53,6 +59,12 @@ static class Program
 
         try
         {
+            if (warmupOnce)
+            {
+                RunWarmupOnce(fixture);
+                return;
+            }
+
             var form = new MainForm(fixture);
             if (!skipOnboarding && (forceOnboarding || !UiPrefs.OnboardingDone))
             {
@@ -67,8 +79,62 @@ static class Program
         }
         catch (Exception ex)
         {
+            // Headless path must not block a scheduled task on a dialog.
+            if (warmupOnce) return;
             MessageBox.Show(ex.ToString(), Loc.T("app.startFailed"),
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    /// <summary>
+    /// Scheduled-task entry: no UI. Uses <b>scheduled</b> stagger (not force) so
+    /// multi-account phases Aᵢ = A₀ + i·(5/N) stay intact. N is only subscribed
+    /// + healthy accounts. Short catch-up loop covers later anchors the same morning.
+    /// </summary>
+    static void RunWarmupOnce(string? fixtureRoot)
+    {
+        try
+        {
+            using var eng = string.IsNullOrWhiteSpace(fixtureRoot)
+                ? new Engine()
+                : new Engine(fixtureRoot);
+
+            // Stay long enough for N≤4 last phase (e.g. #3 @ 09:45 when A₀=06:00).
+            var deadline = DateTime.UtcNow.AddHours(4);
+            while (DateTime.UtcNow < deadline)
+            {
+                JsonNode? tick = null;
+                try
+                {
+                    // refresh_usage fetches status (defines N) then runs warmup_tick.
+                    tick = eng.Call("refresh_usage");
+                }
+                catch
+                {
+                    try { tick = eng.Call("warmup_tick"); } catch { /* offline */ }
+                }
+
+                // Nested warmup on refresh, or top-level on warmup_tick.
+                var warm = tick?["warmup"] ?? tick;
+                bool waiting = false;
+                if (warm?["skipped"] is JsonArray skipped)
+                {
+                    foreach (var s in skipped)
+                    {
+                        if (s?["reason"]?.GetValue<string>() == "before-anchor")
+                        {
+                            waiting = true;
+                            break;
+                        }
+                    }
+                }
+                if (!waiting) break;
+                Thread.Sleep(30_000);
+            }
+        }
+        catch
+        {
+            // Silent: Task Scheduler would surface a message box as a failure popup.
         }
     }
 }
@@ -81,6 +147,8 @@ sealed class MainForm : Form
     internal Engine Engine => _engine;
 
     private readonly Engine _engine;
+    /// <summary>Journal of supervised runs; survives the app for resume.</summary>
+    private AgentRunStore _agentRuns = null!;
     private readonly FlowLayoutPanel _cardHost;
     private readonly Panel _emptyState;
     private readonly Panel _listOuter;
@@ -90,31 +158,77 @@ sealed class MainForm : Form
     private readonly Panel _actionBar;
     private readonly Panel _settingsStrip;
     private readonly Label _status;
+    /// <summary>Right half of the status band — the countdown, always in the same spot.</summary>
+    private readonly Label _statusRight;
+    private readonly Panel _statusBand;
     private readonly Label _activeChip;
+    /// <summary>Green dot beside the live account; the chip itself stays unpainted.</summary>
+    private readonly Label _activeDot;
     private readonly Label _countLabel;
     private readonly Label _brand;
     private readonly Label _subtitle;
     private readonly NotifyIcon _tray;
     private readonly CheckBox _autoEnabled;
     private readonly CheckBox _startupEnabled;
+    private readonly CheckBox _warmupEnabled;
+    private readonly CheckBox _warmupTask;
+    private readonly Button _warmupNowBtn;
     private readonly NumericUpDown _threshold;
     private readonly Label _thrLabel;
     private readonly Label _thrUnit;
+    private readonly Label _thrWindow;
+    private readonly Label _autoTargetLabel;
+    private readonly Label _autoTargetValue;
+    private readonly Label _advancedLabel;
+    private readonly Label _workHoursLabel;
+    private readonly NumericUpDown _workStartHour;
+    private readonly Label _workHoursSep;
+    private readonly NumericUpDown _workEndHour;
     private readonly ToolStripButton _btnSwitch;
-    private readonly ToolStripButton _btnTheme;
+    private readonly ToolStripMenuItem _btnTheme;
     private readonly ToolStripButton _btnRefresh;
     private readonly ToolStripButton _btnAdd;
-    private readonly ToolStripButton _btnProjects;
-    private readonly ToolStripButton _btnOverview;
-    private readonly ToolStripDropDownButton _btnLang;
+    private readonly ToolStripMenuItem _btnProjects;
+    private readonly ToolStripMenuItem _btnOverview;
+    private readonly ToolStripDropDownButton _btnTools;
+    private readonly ToolStripDropDownButton _btnRuns;
+
+    /// <summary>
+    /// Supervised work, on the main window rather than only behind a dropdown.
+    /// </summary>
+    /// <remarks>
+    /// Auto-continue resumes sessions with nobody watching; without a visible
+    /// band the first thing a user hears about a task is that it already failed.
+    /// </remarks>
+    private readonly TaskBoard _taskBoard;
+    private readonly ToolStripMenuItem _btnLang;
     private bool _fittingSearch;
     private readonly ToolStripTextBox _search;
-    private readonly ToolStripButton _btnSearchClear;
+    /// <summary>The ✕ drawn inside the search box; hidden while the query is empty.</summary>
+    private Control? _searchClear;
     private readonly ToolStripLabel _searchMatchLabel;
     private readonly ToolStrip _toolStrip;
+
+    // ── Collapsible automation section (root row 2) ──────────────────────
+    private readonly TableLayoutPanel _root;
+    private readonly Panel _settingsHeader;
+    private readonly TableLayoutPanel _settingsBody;
+    private readonly Label _settingsToggle;
+    /// <summary>What the section says about itself while it is folded away.</summary>
+    private readonly Label _settingsSummary;
     private readonly UsageDrawer _drawer;
     private Form? _detailForm;
     private readonly System.Windows.Forms.Timer _pollTimer;
+
+    /// <summary>How often to look for stalled terminal sessions.</summary>
+    /// <remarks>
+    /// Two minutes against a ten-minute idle threshold: nothing can become a
+    /// candidate between sweeps that would not still be one at the next.
+    /// </remarks>
+    private const int StalledSweepMs = 2 * 60 * 1000;
+
+    private readonly System.Windows.Forms.Timer _stalledTimer;
+    private StalledWatch _stalled = null!;
     private readonly PollCoordinator _poll = new();
     private readonly Label _autoHint;
     private readonly CheckBox _hideEmail;
@@ -142,9 +256,11 @@ sealed class MainForm : Form
         Text = "Claude Switch";
         Icon = AppIcon.Get();
         // List-only chrome; detail opens in a separate window so nothing is covered.
-        Width = 1200;
-        Height = 800;
-        MinimumSize = new Size(1000, 640);
+        // Provisional; ApplyWindowMetrics re-sizes for the display once the
+        // handle exists and the real DPI is known.
+        Width = DesignWidth;
+        Height = DesignHeight;
+        MinimumSize = new Size(DesignMinWidth, DesignMinHeight);
         StartPosition = FormStartPosition.CenterScreen;
         Font = Theme.FontBody;
         DoubleBuffered = true;
@@ -164,6 +280,8 @@ sealed class MainForm : Form
         {
             _engine = new Engine(null);
         }
+        _agentRuns = new AgentRunStore(_engine);
+        _stalled = new StalledWatch(_engine, _agentRuns, AccountLabelOrUnknown, AskPermissionAsync);
 
         // ═══════════════════════════════════════════════════════════
         // Root chrome: ONE TableLayout (5 rows). No stacked Dock.Top —
@@ -173,20 +291,31 @@ sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 6,
             Margin = new Padding(0),
             Padding = new Padding(0),
         };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         // Bands sized for measured control height (30) + padding — no text clip.
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52f));  // header
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 48f));  // toolbar
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56f));  // settings (taller so checkbox glyph not clipped)
+        // Values are placeholders; ApplyBandHeights sets the real, DPI-scaled
+        // ones once the form knows which display it is on.
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, HeaderBandH));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, ToolbarBandH));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, SettingsCollapsedH));
+        // Supervised work. Zero-height until there is some: auto-continue runs
+        // unattended, so this is the only place its tasks are visible — but an
+        // empty band above the account list would cost every user height to
+        // tell most of them nothing.
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 0f));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));  // content (list)
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 36f));  // status
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, StatusBandH));
+        _root = root;
 
-        // ── Row 0: Header — brand | spring | count + current chip ──
-        _header = new Panel { Dock = DockStyle.Fill, Padding = new Padding(Theme.Space4, 0, Theme.Space3, 0), Margin = new Padding(0) };
+        // ── Row 0: Header — one line. The window's own title bar already says
+        // "Claude Switch", so this band is the app's *state*, not its name: the
+        // wordmark shrinks to a label and the account count sits on the same
+        // line, leaving the height for the list instead.
+        _header = new Panel { Dock = DockStyle.Fill, Padding = new Padding(Theme.Space4, 0, Theme.Space4, 0), Margin = new Padding(0) };
         var headerGrid = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -199,13 +328,22 @@ sealed class MainForm : Form
         headerGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         headerGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
+        var brandRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+        };
         _brand = new Label
         {
             Text = "Claude Switch",
-            Font = Theme.FontBrand,
+            Font = Theme.FontHeading,
             AutoSize = true,
-            Anchor = AnchorStyles.Left,
-            Margin = new Padding(Theme.Space1, 14, Theme.Space2, 0),
+            Margin = new Padding(0, 1, 0, 0),
             TextAlign = ContentAlignment.MiddleLeft,
         };
         _subtitle = new Label
@@ -218,38 +356,58 @@ sealed class MainForm : Form
         _countLabel = new Label
         {
             AutoSize = true,
-            Font = Theme.FontBody,
-            Text = Loc.T("header.count", 0),
-            Margin = new Padding(0, 16, Theme.Space3, 0),
+            Font = Theme.FontSmall,
+            Text = CountText(0),
+            Margin = new Padding(Theme.Space2, 3, 0, 0),
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+        brandRow.Controls.Add(_brand);
+        brandRow.Controls.Add(_countLabel);
+
+        // A dot and a line of text, not a filled pill: this is a readout, and a
+        // block of colour up here competed with the card that says the same
+        // thing in the list below.
+        var activeRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Anchor = AnchorStyles.Right,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+        };
+        _activeDot = new Label
+        {
+            Text = "●",
+            AutoSize = true,
+            Font = Theme.FontCaption,
+            Margin = new Padding(0, 4, Theme.Space1, 0),
             TextAlign = ContentAlignment.MiddleRight,
         };
         _activeChip = new Label
         {
             AutoSize = true,
-            Font = Theme.FontBody,
-            Padding = new Padding(Theme.Space3, 5, Theme.Space3, 5),
-            Margin = new Padding(0, 10, 0, 0),
+            Font = Theme.FontSmall,
+            Margin = new Padding(0, 2, 0, 0),
             Text = Loc.T("header.active", Loc.T("status.none")),
-            TextAlign = ContentAlignment.MiddleCenter,
+            TextAlign = ContentAlignment.MiddleLeft,
         };
-        headerGrid.Controls.Add(_brand, 0, 0);
+        activeRow.Controls.Add(_activeDot);
+        activeRow.Controls.Add(_activeChip);
+
+        headerGrid.Controls.Add(brandRow, 0, 0);
         headerGrid.Controls.Add(new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) }, 1, 0);
-        var metaCol = new FlowLayoutPanel
-        {
-            AutoSize = true,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            Margin = new Padding(0),
-            Padding = new Padding(0),
-        };
-        metaCol.Controls.Add(_countLabel);
-        metaCol.Controls.Add(_activeChip);
-        headerGrid.Controls.Add(metaCol, 2, 0);
+        headerGrid.Controls.Add(activeRow, 2, 0);
         _header.Controls.Add(headerGrid);
 
-        // ── Row 1: Toolbar — primary switch | global ops | theme | search ──
+        // ── Row 1: Toolbar ───────────────────────────────────────────────
+        // Three tiers, not one flat row of nine peers: the primary switch, the
+        // handful of things done often (add / refresh / resume / runs), and a
+        // 工具 menu for the reference windows that are opened once in a while.
+        // Appearance controls sit apart on the right, shrunk to a word each.
         // Per-account ops (alias / disable / detail / delete) live on each card's ⋮ menu.
-        _actionBar = new Panel { Dock = DockStyle.Fill, Padding = new Padding(Theme.Space3, Theme.Space2, Theme.Space3, Theme.Space2), Margin = new Padding(0) };
+        _actionBar = new Panel { Dock = DockStyle.Fill, Padding = new Padding(Theme.Space3, Theme.Space1, Theme.Space3, Theme.Space1), Margin = new Padding(0) };
         _toolStrip = new ToolStrip
         {
             Dock = DockStyle.Fill,
@@ -259,8 +417,9 @@ sealed class MainForm : Form
             Font = Theme.FontBody,
             Padding = new Padding(2),
             AutoSize = false,
-            Height = Theme.ControlHeight + 4,
+            Height = StripItemH + 4,
         };
+
         _btnSwitch = MakeStripBtn(Loc.T("toolbar.switch.select"), "primary");
         _btnSwitch.ToolTipText = Loc.T("toolbar.switch.tip");
         _btnRefresh = MakeStripBtn(Loc.T("toolbar.refresh"), "secondary");
@@ -269,30 +428,38 @@ sealed class MainForm : Form
         _btnAdd = MakeStripBtn(Loc.T("toolbar.add"), "secondary");
         var btnAdd = _btnAdd;
         btnAdd.ToolTipText = Loc.T("toolbar.add.tip");
-        _btnResume = new ToolStripDropDownButton(Loc.T("toolbar.resume"))
-        {
-            DisplayStyle = ToolStripItemDisplayStyle.Text,
-            AutoSize = true,
-            Margin = new Padding(0, 0, Theme.Space1, 0),
-            Padding = new Padding(Theme.Space3, 5, Theme.Space3, 5),
-            Font = Theme.FontBody,
-            Tag = "secondary",
-            Overflow = ToolStripItemOverflow.Never,
-            ToolTipText = Loc.T("toolbar.resume.tip"),
-        };
+        _btnResume = MakeStripDrop(Loc.T("toolbar.resume"), Loc.T("toolbar.resume.tip"));
         // Built on open, not on a timer: the list is only interesting at the
         // moment it is read, and building it costs a directory listing.
         _btnResume.DropDownOpening += (_, _) => FillResumeMenu(_btnResume.DropDownItems);
 
-        _btnProjects = MakeStripBtn(Loc.T("toolbar.projects"), "secondary");
-        var btnProjects = _btnProjects;
-        btnProjects.ToolTipText = Loc.T("toolbar.projects.tip");
-        _btnOverview = MakeStripBtn(Loc.T("toolbar.overview"), "secondary");
-        var btnOverview = _btnOverview;
-        btnOverview.ToolTipText = Loc.T("toolbar.overview.tip");
-        _btnTheme = MakeStripBtn(ThemeToggleText(), "secondary");
-        _btnTheme.ToolTipText = Loc.T("toolbar.theme.tip");
+        _btnRuns = MakeStripDrop(Loc.T("toolbar.runs"), Loc.T("toolbar.runs.tip"));
+        var btnRuns = _btnRuns;
+        // Built on open: a run's state changes under it, and the list is only
+        // interesting at the moment it is read.
+        _btnRuns.DropDownOpening += (_, _) => FillRunsMenu(_btnRuns.DropDownItems);
+
+        _btnProjects = new ToolStripMenuItem(Loc.T("toolbar.projects"))
+        {
+            ToolTipText = Loc.T("toolbar.projects.tip"),
+        };
+        _btnOverview = new ToolStripMenuItem(Loc.T("toolbar.overview"))
+        {
+            ToolTipText = Loc.T("toolbar.overview.tip"),
+        };
+        // Appearance changes the shell, not the data. On the row it cost
+        // permanent width for something touched about twice a year — and it was
+        // the first thing cut off when the labels grew. In the menu it costs
+        // nothing and gains room for the full wording.
+        _btnTheme = new ToolStripMenuItem(ThemeToggleText())
+        {
+            ToolTipText = Loc.T("toolbar.theme.tip"),
+        };
         _btnLang = BuildLanguageButton();
+        _btnTools = MakeStripDrop(Loc.T("toolbar.tools"), Loc.T("toolbar.tools.tip"));
+        _btnTools.DropDownItems.AddRange([
+            _btnProjects, _btnOverview, new ToolStripSeparator(), _btnTheme, _btnLang,
+        ]);
         _search = new ToolStripTextBox("search")
         {
             AutoSize = false,
@@ -306,19 +473,6 @@ sealed class MainForm : Form
             Overflow = ToolStripItemOverflow.Never,
             ToolTipText = Loc.T("toolbar.search.tip"),
         };
-        _btnSearchClear = new ToolStripButton(Loc.T("toolbar.search.clear"))
-        {
-            DisplayStyle = ToolStripItemDisplayStyle.Text,
-            AutoSize = true,
-            Alignment = ToolStripItemAlignment.Right,
-            Overflow = ToolStripItemOverflow.Never,
-            Font = Theme.FontBody,
-            Tag = "secondary",
-            ToolTipText = Loc.T("toolbar.search.clear.tip"),
-            Enabled = false,
-            Margin = new Padding(0, 0, Theme.Space1, 0),
-            Padding = new Padding(Theme.Space2, 5, Theme.Space2, 5),
-        };
         _searchMatchLabel = new ToolStripLabel("")
         {
             Alignment = ToolStripItemAlignment.Right,
@@ -327,16 +481,38 @@ sealed class MainForm : Form
             ForeColor = SystemColors.GrayText,
             Margin = new Padding(0, 0, Theme.Space2, 0),
         };
-        foreach (var item in new ToolStripItem[]
-                 { _btnSwitch, btnRefresh, btnAdd, _btnResume, btnProjects, btnOverview, _btnTheme,
-                   _btnLang, _search, _btnSearchClear, _searchMatchLabel })
+        // The right-hand cluster is pinned; the working actions are allowed to
+        // fall into the chevron. Before this every item was Never, which does
+        // not mean "always fits" — it means "cut off at the edge", and that is
+        // exactly how the last two buttons vanished on a narrow window with no
+        // way to reach them.
+        foreach (var item in new ToolStripItem[] { _search, _searchMatchLabel })
             item.Overflow = ToolStripItemOverflow.Never;
+        foreach (var item in new ToolStripItem[]
+                 { _btnSwitch, btnRefresh, btnAdd, _btnResume, btnRuns, _btnTools })
+            item.Overflow = ToolStripItemOverflow.AsNeeded;
 
         _btnSwitch.Click += (_, _) => DoSwitch();
         btnRefresh.Click += (_, _) => Reload();
         btnAdd.Click += (_, _) => DoAdd();
-        btnProjects.Click += (_, _) => ShowProjectsWindow();
-        btnOverview.Click += (_, _) => ShowOverviewWindow();
+        _btnProjects.Click += (_, _) => ShowProjectsWindow();
+        _btnOverview.Click += (_, _) => ShowOverviewWindow();
+        // Keep the label honest about how many agents are working right now.
+        void OnSupervisedWorkChanged()
+        {
+            UpdateRunsButton();
+            UpdateTaskBoard();
+        }
+
+        BackgroundRuns.Changed += OnSupervisedWorkChanged;
+        _stalled.Changed += OnSupervisedWorkChanged;
+        _stalled.TakeoverFinished += OnTakeoverFinished;
+        FormClosed += (_, _) =>
+        {
+            BackgroundRuns.Changed -= OnSupervisedWorkChanged;
+            _stalled.Changed -= OnSupervisedWorkChanged;
+            _stalled.TakeoverFinished -= OnTakeoverFinished;
+        };
         _btnTheme.Click += (_, _) =>
         {
             Theme.Toggle();
@@ -356,20 +532,20 @@ sealed class MainForm : Form
             e.Handled = true;
             e.SuppressKeyPress = true;
         };
-        _btnSearchClear.Click += (_, _) => ClearSearch();
+        // The ✕ lives in the box it clears, so the toolbar spends no width on a
+        // button that is dead most of the time.
+        _searchClear = SearchBox.AttachInlineClear(
+            _search.TextBox, Loc.T("toolbar.search.clear.tip"), ClearSearch);
 
         // Right cluster first, then left: primary switch + global actions only.
         _toolStrip.Items.Add(_searchMatchLabel);
-        _toolStrip.Items.Add(_btnSearchClear);
         _toolStrip.Items.Add(_search);
         _toolStrip.Items.AddRange([
             _btnSwitch,
             new ToolStripSeparator(),
             btnRefresh, btnAdd,
             new ToolStripSeparator(),
-            _btnResume, btnProjects, btnOverview,
-            new ToolStripSeparator(),
-            _btnTheme, _btnLang,
+            _btnResume, btnRuns, _btnTools,
         ]);
         _actionBar.Controls.Add(_toolStrip);
         // Every item has Overflow = Never, so anything that does not fit is simply
@@ -378,62 +554,139 @@ sealed class MainForm : Form
         // search box is the one item with slack, so it gives that width back.
         _toolStrip.Layout += (_, _) => FitSearchBox();
 
-        // ── Row 2: Auto-switch settings (natural sentence + auto-save) ──
-        // Taller band + padding so WinForms checkbox glyphs are not clipped.
+        // ── Row 2: Automation settings ───────────────────────────────────
+        // One collapsible section. These are set-and-forget options, so the
+        // default is folded away with a one-line summary of what they are
+        // currently doing — the space goes to the account list, which is what
+        // the window is for. Inside, every option is a labelled field rather
+        // than a control embedded mid-sentence.
         _settingsStrip = new Panel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(Theme.Space4, 10, Theme.Space4, 10),
+            Padding = new Padding(Theme.Space4, 0, Theme.Space4, 0),
             Margin = new Padding(0),
         };
-        var settingsFlow = new FlowLayoutPanel
+        _settingsToggle = new Label
+        {
+            AutoSize = true,
+            Font = Theme.FontBody,
+            Margin = new Padding(0, 6, Theme.Space3, 0),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Cursor = Cursors.Hand,
+        };
+        _settingsSummary = new Label
+        {
+            AutoSize = true,
+            Font = Theme.FontSmall,
+            Margin = new Padding(0, 8, Theme.Space3, 0),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Cursor = Cursors.Hand,
+        };
+        _settingsSaved = new Label
+        {
+            Text = "",
+            AutoSize = true,
+            Margin = new Padding(Theme.Space2, 8, 0, 0),
+            Font = Theme.FontSmall,
+            ForeColor = SystemColors.GrayText,
+        };
+        var headerFlow = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
             Margin = new Padding(0),
-            Padding = new Padding(0, 2, 0, 2),
+            Padding = new Padding(0),
         };
-
-        _autoEnabled = new CheckBox
+        headerFlow.Controls.Add(_settingsToggle);
+        headerFlow.Controls.Add(_settingsSummary);
+        headerFlow.Controls.Add(_settingsSaved);
+        _settingsHeader = new Panel
         {
-            Text = Loc.T("settings.autoswitch"),
+            Dock = DockStyle.Top,
+            Height = (int)SettingsCollapsedH,
+            Margin = new Padding(0),
+        };
+        _settingsHeader.Controls.Add(headerFlow);
+        foreach (Control c in new Control[] { _settingsToggle, _settingsSummary })
+            c.Click += (_, _) => ToggleSettings();
+
+        _settingsBody = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+        };
+        _settingsBody.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        for (int i = 0; i < 3; i++)
+            _settingsBody.RowStyles.Add(new RowStyle(SizeType.Absolute, SettingsRowH));
+
+        static FlowLayoutPanel SettingsRow() => new()
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+        };
+        var settingsFlow = SettingsRow();
+        var warmupFlow = SettingsRow();
+        var advancedFlow = SettingsRow();
+
+        // Field label: names the value beside it, in the quieter of the two
+        // weights so the eye lands on the setting rather than on its caption.
+        static Label FieldLabel(string text) => new()
+        {
+            Text = text,
             AutoSize = true,
-            Margin = new Padding(0, 4, Theme.Space1, 4),
+            Margin = new Padding(0, 7, Theme.Space2, 0),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = Theme.FontSmall,
+        };
+        static Label FieldValue(string text) => new()
+        {
+            Text = text,
+            AutoSize = true,
+            Margin = new Padding(0, 6, Theme.Space4, 0),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = Theme.FontBody,
+        };
+        // ThemedCheckBox, not the stock control: the OS renderer draws the box
+        // from the system visual style, so in dark mode it stayed a bright white
+        // square no matter what colours were set around it.
+        static CheckBox OptionBox(string text, bool wide = false) => new ThemedCheckBox
+        {
+            Text = text,
+            AutoSize = true,
+            Margin = new Padding(0, 4, wide ? Theme.Space5 : Theme.Space4, 0),
             Padding = new Padding(0, 2, 0, 2),
             TextAlign = ContentAlignment.MiddleLeft,
             CheckAlign = ContentAlignment.MiddleLeft,
             Font = Theme.FontBody,
-            UseVisualStyleBackColor = true,
         };
-        _thrLabel = new Label
-        {
-            Text = Loc.T("settings.autoswitch.when"),
-            AutoSize = true,
-            Margin = new Padding(0, 8, Theme.Space1, 0),
-            TextAlign = ContentAlignment.MiddleLeft,
-            Font = Theme.FontBody,
-        };
+
+        _autoEnabled = OptionBox(Loc.T("settings.autoswitch"), wide: true);
+        _thrLabel = FieldLabel(Loc.T("settings.autoswitch.trigger"));
+        _thrWindow = FieldValue(Loc.T("settings.autoswitch.window"));
+        _thrWindow.Margin = new Padding(0, 6, Theme.Space2, 0);
         _threshold = new NumericUpDown
         {
             Minimum = 50,
             Maximum = 99,
             Value = 90,
-            Width = 52,
+            Width = ThresholdBoxW,
             Height = Theme.ControlHeight - 2,
-            Margin = new Padding(0, 6, Theme.Space1, 0),
+            Margin = new Padding(0, 4, Theme.Space1, 0),
             BorderStyle = BorderStyle.FixedSingle,
             Font = Theme.FontBody,
             TextAlign = HorizontalAlignment.Center,
         };
-        _thrUnit = new Label
-        {
-            Text = Loc.T("settings.autoswitch.mid"),
-            AutoSize = true,
-            Margin = new Padding(0, 8, Theme.Space3, 0),
-            TextAlign = ContentAlignment.MiddleLeft,
-            Font = Theme.FontBody,
-        };
+        _thrUnit = FieldValue(Loc.T("settings.autoswitch.pct"));
+        _autoTargetLabel = FieldLabel(Loc.T("settings.autoswitch.target"));
+        _autoTargetValue = FieldValue(Loc.T("settings.autoswitch.targetValue"));
+        _advancedLabel = FieldLabel(Loc.T("settings.advanced"));
         _autoHint = new Label
         {
             Text = "",
@@ -441,26 +694,8 @@ sealed class MainForm : Form
             Visible = false,
             Margin = new Padding(0),
         };
-        _settingsSaved = new Label
-        {
-            Text = "",
-            AutoSize = true,
-            Margin = new Padding(Theme.Space2, 8, Theme.Space3, 0),
-            Font = Theme.FontSmall,
-            ForeColor = SystemColors.GrayText,
-        };
-        _startupEnabled = new CheckBox
-        {
-            Text = Loc.T("settings.startup"),
-            AutoSize = true,
-            Margin = new Padding(0, 4, Theme.Space3, 4),
-            Padding = new Padding(0, 2, 0, 2),
-            TextAlign = ContentAlignment.MiddleLeft,
-            CheckAlign = ContentAlignment.MiddleLeft,
-            Font = Theme.FontBody,
-            UseVisualStyleBackColor = true,
-            Checked = StartupHelper.IsEnabled(),
-        };
+        _startupEnabled = OptionBox(Loc.T("settings.startup"));
+        _startupEnabled.Checked = StartupHelper.IsEnabled();
         _startupEnabled.CheckedChanged += (_, _) =>
         {
             try
@@ -476,18 +711,8 @@ sealed class MainForm : Form
                 MessageBox.Show(this, ex.Message, Loc.T("settings.startup"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         };
-        _hideEmail = new CheckBox
-        {
-            Text = Loc.T("settings.hideEmail"),
-            AutoSize = true,
-            Margin = new Padding(0, 4, Theme.Space2, 4),
-            Padding = new Padding(0, 2, 0, 2),
-            TextAlign = ContentAlignment.MiddleLeft,
-            CheckAlign = ContentAlignment.MiddleLeft,
-            Font = Theme.FontBody,
-            UseVisualStyleBackColor = true,
-            Checked = UiPrefs.HideEmail,
-        };
+        _hideEmail = OptionBox(Loc.T("settings.hideEmail"));
+        _hideEmail.Checked = UiPrefs.HideEmail;
         _hideEmail.CheckedChanged += (_, _) =>
         {
             if (_settingsLoading) return;
@@ -498,6 +723,52 @@ sealed class MainForm : Form
                 _drawer.Bind(_selected.Model);
             FlashSettingsSaved(_hideEmail.Checked ? Loc.T("settings.hideEmail.on") : Loc.T("settings.hideEmail.off"));
         };
+
+        _warmupEnabled = OptionBox(Loc.T("settings.warmup"), wide: true);
+        _workHoursLabel = FieldLabel(Loc.T("settings.warmup.hours"));
+        _workStartHour = new NumericUpDown
+        {
+            Minimum = 0,
+            Maximum = 22,
+            Value = 9,
+            Width = HourBoxW,
+            Height = Theme.ControlHeight - 2,
+            Margin = new Padding(0, 4, Theme.Space1, 0),
+            BorderStyle = BorderStyle.FixedSingle,
+            Font = Theme.FontBody,
+            TextAlign = HorizontalAlignment.Center,
+        };
+        _workHoursSep = new Label
+        {
+            Text = "—",
+            AutoSize = true,
+            Margin = new Padding(0, 6, Theme.Space1, 0),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = Theme.FontBody,
+        };
+        _workEndHour = new NumericUpDown
+        {
+            Minimum = 1,
+            Maximum = 23,
+            Value = 18,
+            Width = HourBoxW,
+            Height = Theme.ControlHeight - 2,
+            Margin = new Padding(0, 4, Theme.Space4, 0),
+            BorderStyle = BorderStyle.FixedSingle,
+            Font = Theme.FontBody,
+            TextAlign = HorizontalAlignment.Center,
+        };
+        // The shell's own button, not a raw system one: same height, corner and
+        // padding as everything else on the row.
+        _warmupNowBtn = new SecondaryButton
+        {
+            Text = Loc.T("settings.warmup.now"),
+            Margin = new Padding(0, 3, Theme.Space2, 0),
+        };
+        // Scheduling is an advanced fallback, not part of the everyday warmup
+        // setting — it lives on the "other" row with the rest of the plumbing.
+        _warmupTask = OptionBox(Loc.T("settings.warmup.task"));
+        _warmupTask.Checked = WarmupTaskHelper.IsEnabled();
 
         _autoEnabled.CheckedChanged += (_, _) =>
         {
@@ -519,16 +790,93 @@ sealed class MainForm : Form
                 SaveSettings(auto: true);
             }
         };
+        _warmupEnabled.CheckedChanged += (_, _) =>
+        {
+            // Turning the guardian off must not leave a daily schtask behind —
+            // --warmup-once would keep waking the app for nothing.
+            if (!_settingsLoading && !_warmupEnabled.Checked && _warmupTask.Checked)
+            {
+                _settingsLoading = true;
+                _warmupTask.Checked = false;
+                _settingsLoading = false;
+                try { WarmupTaskHelper.SetEnabled(false, 0, 0); }
+                catch { /* delete is best-effort; next load re-syncs from schtasks */ }
+            }
+            SyncWarmupUiEnabled();
+            if (!_settingsLoading) SaveSettings(auto: true);
+        };
+        _warmupTask.CheckedChanged += (_, _) =>
+        {
+            if (_settingsLoading) return;
+            try
+            {
+                SyncWarmupScheduledTask();
+                // After uncheck, confirm the OS task is gone (not only our checkbox).
+                if (!_warmupTask.Checked && WarmupTaskHelper.IsEnabled())
+                {
+                    WarmupTaskHelper.SetEnabled(false, 0, 0);
+                    if (WarmupTaskHelper.IsEnabled())
+                        throw new InvalidOperationException(
+                            Loc.T("settings.warmup.task.failed", "task still present after delete"));
+                }
+                FlashSettingsSaved(_warmupTask.Checked
+                    ? Loc.T("settings.warmup.task.on", WarmupTaskHelper.FormatBaseAnchor(
+                        (int)_workStartHour.Value, (int)_workEndHour.Value))
+                    : Loc.T("settings.warmup.task.off"));
+            }
+            catch (Exception ex)
+            {
+                _settingsLoading = true;
+                _warmupTask.Checked = WarmupTaskHelper.IsEnabled();
+                _settingsLoading = false;
+                MessageBox.Show(this, ex.Message, Loc.T("settings.warmup.task"),
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        };
+        _warmupNowBtn.Click += (_, _) => DoWarmupNow(onlyNumber: null);
+        void OnWorkHoursChanged(object? _, EventArgs __)
+        {
+            if (_settingsLoading) return;
+            // Keep end strictly after start so core clamp does not reset defaults.
+            if (_workEndHour.Value <= _workStartHour.Value)
+                _workEndHour.Value = Math.Min(23, _workStartHour.Value + 1);
+            SaveSettings(auto: true);
+        }
+        _workStartHour.ValueChanged += OnWorkHoursChanged;
+        _workEndHour.ValueChanged += OnWorkHoursChanged;
 
+        // Switch: the toggle, then what triggers it, then where it goes. Each is
+        // a caption with its value beside it, so the threshold reads as a field
+        // rather than as a hole punched in the middle of a sentence.
         settingsFlow.Controls.Add(_autoEnabled);
         settingsFlow.Controls.Add(_thrLabel);
+        settingsFlow.Controls.Add(_thrWindow);
         settingsFlow.Controls.Add(_threshold);
         settingsFlow.Controls.Add(_thrUnit);
-        settingsFlow.Controls.Add(_startupEnabled);
-        settingsFlow.Controls.Add(_hideEmail);
-        settingsFlow.Controls.Add(_settingsSaved);
+        settingsFlow.Controls.Add(_autoTargetLabel);
+        settingsFlow.Controls.Add(_autoTargetValue);
         settingsFlow.Controls.Add(_autoHint);
-        _settingsStrip.Controls.Add(settingsFlow);
+
+        warmupFlow.Controls.Add(_warmupEnabled);
+        warmupFlow.Controls.Add(_workHoursLabel);
+        warmupFlow.Controls.Add(_workStartHour);
+        warmupFlow.Controls.Add(_workHoursSep);
+        warmupFlow.Controls.Add(_workEndHour);
+        warmupFlow.Controls.Add(_warmupNowBtn);
+
+        // Everything that is configured once and then forgotten.
+        advancedFlow.Controls.Add(_advancedLabel);
+        advancedFlow.Controls.Add(_startupEnabled);
+        advancedFlow.Controls.Add(_hideEmail);
+        advancedFlow.Controls.Add(_warmupTask);
+
+        _settingsBody.Controls.Add(settingsFlow, 0, 0);
+        _settingsBody.Controls.Add(warmupFlow, 0, 1);
+        _settingsBody.Controls.Add(advancedFlow, 0, 2);
+        // Fill goes in first so the docked header above claims its height first.
+        _settingsStrip.Controls.Add(_settingsBody);
+        _settingsStrip.Controls.Add(_settingsHeader);
+        ApplySettingsExpansion(UiPrefs.SettingsExpanded, save: false);
 
         // ── Row 3: Content (account list only — detail is a separate tool window) ──
         _drawer = new UsageDrawer();
@@ -536,6 +884,11 @@ sealed class MainForm : Form
         _drawer.AliasRequested += (_, _) => DoEditAlias();
         _drawer.DeleteRequested += (_, _) => DoDelete();
         _drawer.ToggleDisableRequested += (_, _) => DoToggleDisable();
+        _drawer.WarmupRequested += (_, _) =>
+        {
+            if (_selected is not null)
+                DoWarmupNow(_selected.Model.Number);
+        };
         _drawer.ClosedByUser += (_, _) => CloseDetailWindow();
         _drawer.PreferredSizeChanged += (_, _) => FitDetailFormToContent();
 
@@ -599,21 +952,56 @@ sealed class MainForm : Form
         _listOuter.BringToFront();
 
         // ── Row 4: Status (dynamic state only — no interaction tutorials) ──
+        // Two cells, not one sentence: what just happened on the left, the
+        // countdown pinned right. The clock stops jumping sideways every time
+        // the message beside it changes length.
+        var statusGrid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+        };
+        statusGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        statusGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        statusGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         _status = new Label
         {
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
-            Padding = new Padding(Theme.Space4, 0, Theme.Space3, 0),
+            Padding = new Padding(Theme.Space4, 0, Theme.Space2, 0),
             Font = Theme.FontSmall,
             Text = Loc.T("status.ready"),
             Margin = new Padding(0),
+            AutoEllipsis = true,
         };
+        _statusRight = new Label
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            TextAlign = ContentAlignment.MiddleRight,
+            Padding = new Padding(Theme.Space2, 0, Theme.Space4, 0),
+            Font = Theme.FontSmall,
+            Margin = new Padding(0),
+        };
+        statusGrid.Controls.Add(_status, 0, 0);
+        statusGrid.Controls.Add(_statusRight, 1, 0);
+        _statusBand = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
+        _statusBand.Controls.Add(statusGrid);
+        var statusBand = _statusBand;
+
+        _taskBoard = new TaskBoard { Visible = false };
+        // Expanding and paging happen in place, so the band has to be able to
+        // ask the form for a different height.
+        _taskBoard.LayoutChanged += ApplyBandHeights;
 
         root.Controls.Add(_header, 0, 0);
         root.Controls.Add(_actionBar, 0, 1);
         root.Controls.Add(_settingsStrip, 0, 2);
-        root.Controls.Add(body, 0, 3);
-        root.Controls.Add(_status, 0, 4);
+        root.Controls.Add(_taskBoard, 0, 3);
+        root.Controls.Add(body, 0, 4);
+        root.Controls.Add(statusBand, 0, 5);
         Controls.Add(root);
 
         _tray = new NotifyIcon
@@ -638,6 +1026,13 @@ sealed class MainForm : Form
         _pollTimer = new System.Windows.Forms.Timer { Interval = 1000 };
         _pollTimer.Tick += (_, _) => OnPollUiTick();
 
+        // Terminal sessions that stalled on a quota wall or a network failure.
+        // Slower than the poll loop on purpose: nothing can qualify until it has
+        // been silent for the idle threshold, so sweeping faster only re-reads
+        // the same transcripts.
+        _stalledTimer = new System.Windows.Forms.Timer { Interval = StalledSweepMs };
+        _stalledTimer.Tick += (_, _) => SweepStalledSessions();
+
         FormClosing += (_, e) =>
         {
             if (e.CloseReason == CloseReason.UserClosing && (ModifierKeys & Keys.Shift) == 0)
@@ -659,8 +1054,13 @@ sealed class MainForm : Form
                 catch { /* ignore */ }
                 _detailForm = null;
             }
+            // Supervised agents are child processes: exiting kills them. Mark
+            // them resumable first, so the next launch can offer to continue.
+            BackgroundRuns.ShutdownAll(_agentRuns);
             _pollTimer.Stop();
             _pollTimer.Dispose();
+            _stalledTimer.Stop();
+            _stalledTimer.Dispose();
             _tray.Visible = false;
             Theme.SavePrefs();
             _engine.Dispose();
@@ -686,12 +1086,25 @@ sealed class MainForm : Form
             });
         };
 
+        // Native scrollbars can only be restyled once their control has a
+        // handle, which is after the form is shown — and again whenever the
+        // list is rebuilt, because those are new windows.
+        Shown += (_, _) => NativeScrollbars.Apply(this);
+
+        ApplyBandHeights();
         ApplyShellTheme();
         LoadSettingsUi();
         Reload();
         LoadActivityStripAsync();
         UpdateSwitchEnabled();
+        UpdateRunsButton();
+        UpdateTaskBoard();
+        NoticeResumableRuns();
         _pollTimer.Start();
+        _stalledTimer.Start();
+        // A session that stalled while the app was closed is the case this
+        // exists for; waiting a whole sweep interval to notice would be odd.
+        SweepStalledSessions();
 
         // Visual acceptance: bounds dump + screenshot when CLAUDE_SWITCH_LAYOUT_DIR is set.
         // ToolStrip items aren't Controls — probe host bands + text-box control.
@@ -723,6 +1136,76 @@ sealed class MainForm : Form
             LayoutProbe.ExtraWindows.Add(("gui-stats.png", () =>
                 _projectsWindow?.ProbeRunStats()));
         }
+        // The agent window is built entirely in code and has no other visual
+        // test; a clipped status strip or an unreadable transcript would only
+        // ever be found by a user mid-run.
+        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_AGENT") == "1")
+        {
+            LayoutProbe.ExtraWindows.Add(("gui-agent.png", () =>
+            {
+                Form w = NewAgentWindow(
+                    Environment.CurrentDirectory,
+                    configDir: null,
+                    accountNumber: 1,
+                    accountLabel: "demo@example.com");
+                w.Show(this);
+                return w;
+            }));
+        }
+        // The runs dropdown is the only place a background run is visible once
+        // its window is closed, and an overlay is the only way to capture it.
+        // The expanded task board is a different layout, not just more rows, so
+        // it needs its own capture.
+        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_BOARD") == "1")
+        {
+            LayoutProbe.ExtraChecks.Add(() =>
+            {
+                _taskBoard.ToggleForTest();
+                ApplyBandHeights();
+                PerformLayout();
+                Application.DoEvents();
+                return $"task_board expanded rows={_taskBoard.RowCount}";
+            });
+        }
+        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_RUNS") == "1")
+        {
+            LayoutProbe.Overlays.Add(("gui-runs-menu.png", () => _btnRuns.ShowDropDown()));
+            // A dropdown is its own top-level window, so the overlay's screen
+            // copy only works on a desktop that is actually being composited —
+            // on a headless or disconnected session it captures black. Rendering
+            // the control itself needs no desktop at all, and dumping the rows
+            // as text makes the contents reviewable from a log.
+            LayoutProbe.ExtraChecks.Add(ProbeRunsMenu);
+        }
+        // The automation panel ships collapsed, so its open state is never in
+        // the default capture — and it is three rows of controls whose only
+        // other check is that they compile.
+        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_SETTINGS") == "1")
+        {
+            LayoutProbe.Overlays.Add((
+                "gui-settings-open.png", () => ApplySettingsExpansion(true, save: false)));
+        }
+        // Two states that only exist after an interaction: the ✕ that appears
+        // inside the search box, and the menu that now holds the appearance
+        // controls the toolbar used to show.
+        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_TOOLS") == "1")
+        {
+            LayoutProbe.Overlays.Add(("gui-search-active.png", () =>
+            {
+                _search.Focus();
+                _search.Text = "e";
+            }));
+            LayoutProbe.Overlays.Add(("gui-tools-menu.png", () => _btnTools.ShowDropDown()));
+        }
+        // Dark is a full second palette, and the colour roles — green for the
+        // account in use, slate for focus, amber for attention — have to survive
+        // it. Toggled back afterwards so a probe run never rewrites the shared
+        // preference file in the other mode.
+        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_DARK") == "1")
+        {
+            LayoutProbe.Overlays.Add(("gui-dark.png", Theme.Toggle));
+            LayoutProbe.Overlays.Add(("gui-dark-restored.png", Theme.Toggle));
+        }
         if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_OVERVIEW") == "1")
         {
             LayoutProbe.ExtraWindows.Add(("gui-overview.png", () =>
@@ -743,29 +1226,54 @@ sealed class MainForm : Form
             ("strip", _activityStrip),
             ("toolstrip", _toolStrip),
             ("search", _search.TextBox));
-        // Extra text checks for ToolStrip primary label.
-        Shown += (_, _) =>
-        {
-            var dir = Environment.GetEnvironmentVariable("CLAUDE_SWITCH_LAYOUT_DIR");
-            if (string.IsNullOrWhiteSpace(dir)) return;
-            try
-            {
-                var path = Path.Combine(dir, "gui-layout-rects.txt");
-                File.AppendAllText(
-                    path,
-                    $"switch_toolstrip_text=\"{_btnSwitch.Text}\" " +
-                    $"switch_visible={_btnSwitch.Visible} " +
-                    $"switch_w={_btnSwitch.Width}\n" +
-                    (IsValidSwitchLabel(_btnSwitch.Text)
-                        ? "OK switch_label_complete\n"
-                        : "FAIL switch_label_incomplete\n") +
-                    $"search_text=\"{_search.Text}\" search_w={_search.Width}\n" +
-                    (_search.Width >= 120 ? "OK search_visible\n" : "FAIL search_not_visible\n") +
-                    $"items={_toolStrip.Items.Count} " +
-                    $"theme_visible={_btnTheme.Visible}\n");
-            }
-            catch { /* ignore */ }
-        };
+        // ToolStrip items are not Controls, so the probe cannot measure them
+        // from the target list — these report themselves into the same dump.
+        LayoutProbe.ExtraChecks.Add(() =>
+            $"switch_toolstrip_text=\"{_btnSwitch.Text}\" "
+            + $"switch_visible={_btnSwitch.Visible} switch_w={_btnSwitch.Width}\n"
+            + (IsValidSwitchLabel(_btnSwitch.Text)
+                ? "OK switch_label_complete"
+                : "FAIL switch_label_incomplete"));
+        LayoutProbe.ExtraChecks.Add(() =>
+            $"items={_toolStrip.Items.Count} overflow={_toolStrip.OverflowButton.Visible}\n"
+            + string.Join(
+                "\n",
+                _toolStrip.Items.OfType<ToolStripItem>()
+                    .Where(i => i.Text is { Length: > 0 })
+                    .Select(i => $"  item \"{i.Text}\" placement={i.Placement} w={i.Width}")));
+        LayoutProbe.ExtraChecks.Add(SearchClearReport);
+    }
+
+    /// <summary>
+    /// Where the search box's ✕ actually landed.
+    /// </summary>
+    /// <remarks>
+    /// "Inside the box" is the whole point of moving it off the toolbar, and it
+    /// is the one claim a screenshot cannot settle — the border is drawn by the
+    /// ToolStrip renderer, not by the edit control, so the glyph can sit a few
+    /// pixels past a line that is not the box's real edge. This asserts against
+    /// the client rectangle instead of against a picture of it.
+    /// </remarks>
+    private string SearchClearReport()
+    {
+        var box = _search.TextBox;
+        if (_searchClear is null || box is null) return "FAIL search_clear_missing";
+
+        // Hidden controls are skipped by layout, so an unmeasured glyph sits at
+        // (0,0) and would pass "inside the box" without ever having been placed.
+        bool was = _searchClear.Visible;
+        _searchClear.Visible = true;
+        box.PerformLayout();
+        var r = _searchClear.Bounds;
+        var client = box.ClientSize;
+        _searchClear.Visible = was;
+
+        bool inside = ReferenceEquals(_searchClear.Parent, box)
+            && r.Left >= 0 && r.Right <= client.Width
+            && r.Top >= 0 && r.Bottom <= client.Height
+            && r.Width > 0;
+        return $"search_clear={r} box_client={client}\n"
+            + (inside ? "OK search_clear_inside_box" : "FAIL search_clear_outside_box");
     }
 
     private static bool IsValidSwitchLabel(string? text) =>
@@ -785,8 +1293,10 @@ sealed class MainForm : Form
     /// </remarks>
     private void FitSearchBox()
     {
-        const int MinSearch = 150;
-        const int MaxSearch = 280;
+        // Design pixels: a fixed device width is half a box on a 200% display,
+        // and the placeholder it has to hold grew with the display.
+        int MinSearch = (int)(150 * (DeviceDpi / 96f));
+        int MaxSearch = (int)(280 * (DeviceDpi / 96f));
         if (_fittingSearch) return;
 
         int used = 0;
@@ -811,18 +1321,11 @@ sealed class MainForm : Form
     /// 简体中文) — the one string a user always recognises even when the rest of
     /// the UI is in a language they cannot read.
     /// </summary>
-    private ToolStripDropDownButton BuildLanguageButton()
+    private ToolStripMenuItem BuildLanguageButton()
     {
-        var btn = new ToolStripDropDownButton(Loc.T("language.short"))
+        var btn = new ToolStripMenuItem(Loc.T("toolbar.language"))
         {
-            DisplayStyle = ToolStripItemDisplayStyle.Text,
-            AutoSize = true,
-            Font = Theme.FontBody,
-            Tag = "secondary",
             ToolTipText = Loc.T("toolbar.language.tip"),
-            ShowDropDownArrow = true,
-            Margin = new Padding(0, 0, Theme.Space1, 0),
-            Padding = new Padding(Theme.Space2, 5, Theme.Space2, 5),
         };
         foreach (var (code, name) in Loc.Available)
         {
@@ -851,7 +1354,7 @@ sealed class MainForm : Form
     /// </summary>
     private void ApplyTexts()
     {
-        _btnLang.Text = Loc.T("language.short");
+        _btnLang.Text = Loc.T("toolbar.language");
         _btnLang.ToolTipText = Loc.T("toolbar.language.tip");
 
         _btnRefresh.Text = Loc.T("toolbar.refresh");
@@ -860,6 +1363,8 @@ sealed class MainForm : Form
         _btnAdd.ToolTipText = Loc.T("toolbar.add.tip");
         _btnResume.Text = Loc.T("toolbar.resume");
         _btnResume.ToolTipText = Loc.T("toolbar.resume.tip");
+        _btnTools.Text = Loc.T("toolbar.tools");
+        _btnTools.ToolTipText = Loc.T("toolbar.tools.tip");
         _btnProjects.Text = Loc.T("toolbar.projects");
         _btnProjects.ToolTipText = Loc.T("toolbar.projects.tip");
         _btnOverview.Text = Loc.T("toolbar.overview");
@@ -867,15 +1372,22 @@ sealed class MainForm : Form
         _btnTheme.Text = ThemeToggleText();
         _btnTheme.ToolTipText = Loc.T("toolbar.theme.tip");
         _search.ToolTipText = Loc.T("toolbar.search.tip");
-        _btnSearchClear.Text = Loc.T("toolbar.search.clear");
-        _btnSearchClear.ToolTipText = Loc.T("toolbar.search.clear.tip");
         SearchBox.AttachCueBanner(_search.TextBox, SearchHint);
 
         _autoEnabled.Text = Loc.T("settings.autoswitch");
-        _thrLabel.Text = Loc.T("settings.autoswitch.when");
-        _thrUnit.Text = Loc.T("settings.autoswitch.mid");
+        _thrLabel.Text = Loc.T("settings.autoswitch.trigger");
+        _thrWindow.Text = Loc.T("settings.autoswitch.window");
+        _thrUnit.Text = Loc.T("settings.autoswitch.pct");
+        _autoTargetLabel.Text = Loc.T("settings.autoswitch.target");
+        _autoTargetValue.Text = Loc.T("settings.autoswitch.targetValue");
+        _advancedLabel.Text = Loc.T("settings.advanced");
         _startupEnabled.Text = Loc.T("settings.startup");
         _hideEmail.Text = Loc.T("settings.hideEmail");
+        _warmupEnabled.Text = Loc.T("settings.warmup");
+        _workHoursLabel.Text = Loc.T("settings.warmup.hours");
+        _warmupNowBtn.Text = Loc.T("settings.warmup.now");
+        _warmupTask.Text = Loc.T("settings.warmup.task");
+        ApplySettingsExpansion(UiPrefs.SettingsExpanded, save: false);
 
         // The status line is rebuilt from live state, so a stale sentence in the
         // previous language would otherwise sit there until the next poll.
@@ -890,8 +1402,31 @@ sealed class MainForm : Form
         if (DetailOpen && _selected is not null) _drawer.Bind(_selected.Model);
     }
 
+    /// <summary>
+    /// The appearance toggle's label — a word, not a sentence.
+    /// </summary>
+    /// <remarks>
+    /// It changes the shell rather than the data, so it earns a fraction of the
+    /// width the working actions get. The tooltip carries the full wording.
+    /// </remarks>
     private static string ThemeToggleText() =>
-        Theme.Mode == ThemeMode.Dark ? Loc.T("toolbar.theme.light") : Loc.T("toolbar.theme.dark");
+        Theme.Mode == ThemeMode.Dark
+            ? Loc.T("toolbar.theme.light")
+            : Loc.T("toolbar.theme.dark");
+
+    // ── Band heights (96-DPI design px; see ApplyBandHeights) ────────────
+    private const float HeaderBandH = 34f;
+    private const float ToolbarBandH = 42f;
+    private const float StatusBandH = 28f;
+    private const float SettingsCollapsedH = 28f;
+    private const float SettingsRowH = 34f;
+    private const float SettingsExpandedH = SettingsCollapsedH + SettingsRowH * 3 + 6f;
+    /// <summary>
+    /// One height for every toolbar item, so buttons, dropdowns and the search
+    /// box share a baseline instead of each finding its own.
+    /// </summary>
+    private const int StripItemH = 32;
+    private const int StripPadY = 6;
 
     /// <param name="role">primary | secondary | danger — read by SageToolStripRenderer.</param>
     private static ToolStripButton MakeStripBtn(string text, string role = "secondary")
@@ -901,11 +1436,195 @@ sealed class MainForm : Form
             DisplayStyle = ToolStripItemDisplayStyle.Text,
             AutoSize = true,
             Margin = new Padding(0, 0, Theme.Space1, 0),
-            Padding = new Padding(Theme.Space3, 5, Theme.Space3, 5),
+            Padding = new Padding(Theme.Space3, StripPadY, Theme.Space3, StripPadY),
             Font = Theme.FontBody,
             Tag = role,
             Overflow = ToolStripItemOverflow.Never,
         };
+    }
+
+    /// <summary>A dropdown that measures and paints exactly like <see cref="MakeStripBtn"/>.</summary>
+    private static ToolStripDropDownButton MakeStripDrop(string text, string tip)
+    {
+        return new ToolStripDropDownButton(text)
+        {
+            DisplayStyle = ToolStripItemDisplayStyle.Text,
+            AutoSize = true,
+            Margin = new Padding(0, 0, Theme.Space1, 0),
+            Padding = new Padding(Theme.Space3, StripPadY, Theme.Space2, StripPadY),
+            Font = Theme.FontBody,
+            Tag = "secondary",
+            Overflow = ToolStripItemOverflow.Never,
+            ToolTipText = tip,
+        };
+    }
+
+    /// <summary>The account count as it reads beside the wordmark.</summary>
+    private static string CountText(int n) => "· " + Loc.T("header.count", n);
+
+    private void ToggleSettings() =>
+        ApplySettingsExpansion(!UiPrefs.SettingsExpanded, save: true);
+
+    /// <summary>
+    /// Fold the automation section away, or open it.
+    /// </summary>
+    /// <remarks>
+    /// Collapsed is the default because these are decisions made once. The
+    /// summary line is what makes that safe: folding a setting out of sight is
+    /// only acceptable while the header still says what it is currently doing.
+    /// </remarks>
+    private void ApplySettingsExpansion(bool expanded, bool save)
+    {
+        UiPrefs.SettingsExpanded = expanded;
+        if (save) UiPrefs.Save();
+        _settingsBody.Visible = expanded;
+        _settingsToggle.Text = (expanded ? "▾  " : "▸  ") + Loc.T("settings.section");
+        ApplyBandHeights();
+        UpdateSettingsSummary();
+    }
+
+    /// <summary>
+    /// Sizes the fixed chrome bands for the current display.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TableLayoutPanel"/> row styles are device pixels and are not
+    /// rescaled for us, but the fonts inside them are points and grow with the
+    /// display. A band written as a bare constant therefore fits at 100% and
+    /// clips its own text at 125% — which is what happened to the settings
+    /// header. Everything here is a design pixel put through the same scale.
+    /// </remarks>
+    private void ApplyBandHeights()
+    {
+        float s = DeviceDpi / 96f;
+        float S(float designPx) => designPx * s;
+
+        _root.RowStyles[0] = new RowStyle(SizeType.Absolute, S(HeaderBandH));
+        _root.RowStyles[1] = new RowStyle(SizeType.Absolute, S(ToolbarBandH));
+        _root.RowStyles[2] = new RowStyle(
+            SizeType.Absolute,
+            S(UiPrefs.SettingsExpanded ? SettingsExpandedH : SettingsCollapsedH));
+        _root.RowStyles[3] = new RowStyle(SizeType.Absolute, TaskBoardHeight(S));
+        _root.RowStyles[5] = new RowStyle(SizeType.Absolute, S(StatusBandH));
+
+        for (int i = 0; i < _settingsBody.RowStyles.Count; i++)
+            _settingsBody.RowStyles[i] = new RowStyle(SizeType.Absolute, S(SettingsRowH));
+
+        _settingsHeader.Height = (int)S(SettingsCollapsedH);
+        _toolStrip.Height = (int)S(StripItemH + 4);
+
+        // Spin boxes are fixed-width by necessity (AutoSize ignores the spin
+        // buttons), so they need the same treatment: at 200% the threshold box
+        // rendered "90" as "9(" — the digits grew and the box did not.
+        _threshold.Width = (int)S(ThresholdBoxW);
+        foreach (var box in new[] { _workStartHour, _workEndHour })
+            box.Width = (int)S(HourBoxW);
+        foreach (var box in new[] { _threshold, _workStartHour, _workEndHour })
+            box.Height = (int)S(Theme.ControlHeight - 2);
+    }
+
+    /// <summary>
+    /// Height the supervised-work band needs, scaled; zero when it has nothing.
+    /// </summary>
+    /// <remarks>
+    /// The band computes its own figure — it is the only thing that knows
+    /// whether it is expanded and whether a pager is showing.
+    /// </remarks>
+    private float TaskBoardHeight(Func<float, float> scale)
+    {
+        if (_taskBoard is null) return 0f;
+
+        // This app is an account list first, so the band is told how many rows
+        // the window can spare before it decides how tall to be. Fitting by row
+        // count rather than by clipping means it never needs a scrollbar — which
+        // on Windows is native, unthemed, and glaring in a dark window.
+        float shareDesignPx = ClientSize.Height * TaskBoard.MaxHeightShare / scale(1f);
+        _taskBoard.SetMaxVisibleRows(TaskBoard.RowsThatFit(shareDesignPx));
+
+        return scale(_taskBoard.DesiredHeight);
+    }
+
+    // Wide enough for the digits plus the spin buttons, at 96 DPI.
+    private const int ThresholdBoxW = 62;
+    private const int HourBoxW = 62;
+
+    // Window size in 96-DPI design px — see ApplyWindowMetrics.
+    private const int DesignWidth = 1200;
+    private const int DesignHeight = 800;
+    private const int DesignMinWidth = 1000;
+    private const int DesignMinHeight = 640;
+
+    /// <summary>
+    /// Sizes the window for the display it opened on.
+    /// </summary>
+    /// <remarks>
+    /// <c>Width = 1200</c> in the constructor is 1200 <em>device</em> pixels:
+    /// nothing scales a code-built form's own bounds. On a 200% display that is
+    /// a 600×400 window holding text sized for 1200×800, and the toolbar ran out
+    /// of room before the settings row even loaded. The design size is scaled
+    /// here and clamped to the work area, so the window is the same apparent
+    /// size on every display and never opens larger than the screen.
+    /// </remarks>
+    private void ApplyWindowMetrics()
+    {
+        float s = DeviceDpi / 96f;
+        var work = Screen.FromHandle(Handle).WorkingArea;
+        Size Fit(int w, int h) => new(
+            Math.Min((int)(w * s), (int)(work.Width * 0.94)),
+            Math.Min((int)(h * s), (int)(work.Height * 0.94)));
+
+        // Minimum first: a MinimumSize above the incoming Size grows the window.
+        MinimumSize = Fit(DesignMinWidth, DesignMinHeight);
+        var want = Fit(DesignWidth, DesignHeight);
+        if (Size.Width < want.Width || Size.Height < want.Height)
+            Size = want;
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        ApplyWindowMetrics();
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs e)
+    {
+        base.OnDpiChangedAfterParent(e);
+        ApplyBandHeights();
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        ApplyBandHeights();
+        AccountCard.InvalidateMetrics();
+        RebuildCards();
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        // The strip is a glance under the list, never the reason the list has
+        // nowhere to go: at the small end of the window it gives its height back.
+        _activityStrip?.CapHeight(ClientSize.Height);
+    }
+
+    /// <summary>
+    /// One line naming what automation is on. Shown only while collapsed — open,
+    /// the controls themselves are the summary, and repeating it would be noise.
+    /// </summary>
+    private void UpdateSettingsSummary()
+    {
+        if (UiPrefs.SettingsExpanded)
+        {
+            _settingsSummary.Text = "";
+            return;
+        }
+        string auto = _autoEnabled.Checked
+            ? Loc.T("settings.summary.autoOn", (int)_threshold.Value)
+            : Loc.T("settings.summary.autoOff");
+        string warm = _warmupEnabled.Checked
+            ? Loc.T("settings.summary.warmOn", (int)_workStartHour.Value, (int)_workEndHour.Value)
+            : Loc.T("settings.summary.warmOff");
+        _settingsSummary.Text = $"{auto}   ·   {warm}";
     }
 
     private void ApplyShellTheme()
@@ -918,18 +1637,37 @@ sealed class MainForm : Form
         _listOuter.BackColor = Theme.BgApp;
         _cardHost.BackColor = Theme.BgApp;
         _emptyState.BackColor = Theme.BgApp;
+        _taskBoard.ApplyTheme();
+        // Scrollbars are drawn by the OS, so they need asking separately or a
+        // dark window keeps a white stripe down its edge. Only reaches controls
+        // that already have a handle, which is why it is also applied on Shown
+        // and after the card list is rebuilt.
+        NativeScrollbars.Apply(this);
+        _statusBand.BackColor = Theme.BgHeader;
         _status.BackColor = Theme.BgHeader;
         _status.ForeColor = Theme.TextSecondary;
+        _statusRight.BackColor = Theme.BgHeader;
+        _statusRight.ForeColor = Theme.TextMuted;
         _brand.ForeColor = Theme.PrimaryDark;
         _subtitle.ForeColor = Theme.TextSecondary;
-        _activeChip.ForeColor = Theme.PrimaryDark;
-        _activeChip.BackColor = Theme.PrimarySoft;
+        // A readout, not a badge: the dot carries the colour so the text can
+        // stay the same weight as everything else in the band.
+        _activeDot.ForeColor = _models.Any(a => a.Active) ? Theme.Primary : Theme.TextMuted;
+        _activeChip.ForeColor = Theme.TextSecondary;
         _countLabel.ForeColor = Theme.TextMuted;
         _autoEnabled.ForeColor = Theme.TextPrimary;
         _startupEnabled.ForeColor = Theme.TextPrimary;
         _hideEmail.ForeColor = Theme.TextPrimary;
+        _warmupEnabled.ForeColor = Theme.TextPrimary;
+        _warmupTask.ForeColor = Theme.TextPrimary;
         _settingsSaved.ForeColor = Theme.TextMuted;
+        _settingsToggle.ForeColor = Theme.TextPrimary;
+        _settingsSummary.ForeColor = Theme.TextMuted;
+        _advancedLabel.ForeColor = Theme.TextMuted;
+        _autoTargetValue.ForeColor = Theme.TextPrimary;
+        _thrWindow.ForeColor = Theme.TextPrimary;
         SyncAutoSwitchUiEnabled();
+        SyncWarmupUiEnabled();
         _toolStrip.BackColor = Theme.BgApp;
         _toolStrip.ForeColor = Theme.TextPrimary;
         _toolStrip.Renderer = new SageToolStripRenderer();
@@ -949,23 +1687,157 @@ sealed class MainForm : Form
         Tint(_settingsStrip, Theme.BgSidebar);
         Tint(_header, Theme.BgHeader);
         Tint(_actionBar, Theme.BgApp);
-        _activeChip.BackColor = Theme.PrimarySoft;
-        _activeChip.ForeColor = Theme.PrimaryDark;
+        Tint(_statusBand, Theme.BgHeader);
         Icon = AppIcon.Get();
         _tray.Icon = AppIcon.Get();
         Invalidate(true);
     }
 
+    /// <summary>
+    /// Field caption colour. Explanatory text stays at
+    /// <see cref="Theme.TextSecondary"/>; only a control that is genuinely
+    /// switched off drops to <see cref="Theme.TextDisabled"/>, so "grey" always
+    /// means the one thing.
+    /// </summary>
+    private static Color CaptionColor(bool enabled) =>
+        enabled ? Theme.TextSecondary : Theme.TextDisabled;
+
+    private static Color ValueColor(bool enabled) =>
+        enabled ? Theme.TextPrimary : Theme.TextDisabled;
+
     private void SyncAutoSwitchUiEnabled()
     {
         bool on = _autoEnabled.Checked;
-        _threshold.Enabled = on;
-        _thrLabel.Enabled = on;
-        _thrUnit.Enabled = on;
-        _thrLabel.ForeColor = on ? Theme.TextSecondary : Theme.TextMuted;
-        _thrUnit.ForeColor = on ? Theme.TextSecondary : Theme.TextMuted;
+        foreach (Control c in new Control[]
+                 { _threshold, _thrLabel, _thrWindow, _thrUnit, _autoTargetLabel, _autoTargetValue })
+            c.Enabled = on;
+        _thrLabel.ForeColor = CaptionColor(on);
+        _autoTargetLabel.ForeColor = CaptionColor(on);
+        _thrWindow.ForeColor = ValueColor(on);
+        _thrUnit.ForeColor = ValueColor(on);
+        _autoTargetValue.ForeColor = ValueColor(on);
         _threshold.BackColor = on ? Theme.BgSurface : Theme.BgDisabled;
-        _threshold.ForeColor = on ? Theme.TextPrimary : Theme.TextMuted;
+        _threshold.ForeColor = ValueColor(on);
+        UpdateSettingsSummary();
+    }
+
+    private void SyncWarmupUiEnabled()
+    {
+        bool on = _warmupEnabled.Checked;
+        _workHoursLabel.Enabled = on;
+        _workStartHour.Enabled = on;
+        _workHoursSep.Enabled = on;
+        _workEndHour.Enabled = on;
+        // Manual fire and the daily task still work when the guardian toggle is
+        // off (force path); grey them only when there is nothing useful to do.
+        _warmupNowBtn.Enabled = true;
+        _warmupTask.Enabled = true;
+        _workHoursLabel.ForeColor = CaptionColor(on);
+        _workHoursSep.ForeColor = ValueColor(on);
+        _workStartHour.BackColor = on ? Theme.BgSurface : Theme.BgDisabled;
+        _workEndHour.BackColor = on ? Theme.BgSurface : Theme.BgDisabled;
+        _workStartHour.ForeColor = ValueColor(on);
+        _workEndHour.ForeColor = ValueColor(on);
+        _warmupTask.ForeColor = Theme.TextPrimary;
+        UpdateSettingsSummary();
+        var (ah, am) = WarmupTaskHelper.BaseAnchor((int)_workStartHour.Value, (int)_workEndHour.Value);
+        _warmupTask.Text = Loc.T("settings.warmup.task");
+        _toolTipWarmup ??= new ToolTip();
+        _toolTipWarmup.SetToolTip(_warmupTask,
+            Loc.T("settings.warmup.task.tip", $"{ah}:{am:D2}"));
+        _toolTipWarmup.SetToolTip(_warmupNowBtn, Loc.T("settings.warmup.now.tip"));
+    }
+
+    private ToolTip? _toolTipWarmup;
+
+    /// <summary>
+    /// Register or refresh the daily schtask at the base anchor time, or remove
+    /// it. Uncheck always deletes <c>ClaudeSwitch-Warmup</c>; there is no other
+    /// on-disk flag — Task Scheduler is the sole source of truth.
+    /// </summary>
+    private void SyncWarmupScheduledTask()
+    {
+        if (!_warmupTask.Checked || !_warmupEnabled.Checked)
+        {
+            WarmupTaskHelper.SetEnabled(false, 0, 0);
+            return;
+        }
+        var (h, m) = WarmupTaskHelper.BaseAnchor((int)_workStartHour.Value, (int)_workEndHour.Value);
+        WarmupTaskHelper.SetEnabled(true, h, m);
+    }
+
+    /// <param name="onlyNumber">
+    /// Warm a single slot; null warms every eligible OAuth account.
+    /// </param>
+    private void DoWarmupNow(int? onlyNumber)
+    {
+        try
+        {
+            // Fresh usage so open windows are reported as window-active skips.
+            // Pass force path only — do not let scheduled guardian double-fire first.
+            try
+            {
+                // Snapshot-only refresh of usage numbers without nested guardian
+                // would be ideal; refresh_usage runs guardian when enabled, so we
+                // accept that and still call warmup_now (cooldown protects doubles).
+                _engine.Call("refresh_usage");
+            }
+            catch { /* offline ok */ }
+
+            object payload = onlyNumber is { } n
+                ? new { id = n.ToString() }
+                : new { };
+            var result = _engine.Call("warmup_now", payload);
+            int fired = result["fired"]?.AsArray()?.Count ?? 0;
+            int skipped = result["skipped"]?.AsArray()?.Count ?? 0;
+            int ok = WarmupNotice.SuccessfulFires(result).Count;
+            string msg = ok > 0
+                ? (onlyNumber is { } slot
+                    ? Loc.T("settings.warmup.now.slot", slot)
+                    : Loc.T("settings.warmup.now.done", ok, fired, skipped))
+                : Loc.T("settings.warmup.now.none", skipped);
+            FlashSettingsSaved(msg);
+            NotifyIfWarmed(result);
+            // Pull cards so warmupAnchor / resetsAt update after a fire.
+            Reload();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, Loc.T("settings.warmup.now"),
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    /// <summary>
+    /// Tray balloon for successful window opens (manual or guardian poll).
+    /// </summary>
+    private void NotifyIfWarmed(JsonNode? result)
+    {
+        var fires = WarmupNotice.SuccessfulFires(result);
+        if (fires.Count == 0) return;
+
+        var labels = new List<string>(fires.Count);
+        foreach (var f in fires)
+        {
+            var m = _models.FirstOrDefault(x => x.Number == f.Number);
+            labels.Add(WarmupNotice.LabelFor(
+                f.Number,
+                m?.Alias,
+                string.IsNullOrEmpty(f.Email) ? (m?.Email ?? "") : f.Email));
+        }
+
+        try
+        {
+            _tray.ShowBalloonTip(
+                5000,
+                WarmupNotice.Title,
+                WarmupNotice.Body(labels),
+                ToolTipIcon.Info);
+        }
+        catch
+        {
+            // Balloon can fail when the tray is not ready; status flash is enough.
+        }
     }
 
     /// <summary>
@@ -1099,15 +1971,25 @@ sealed class MainForm : Form
         ComposeStatusLine();
     }
 
-    /// <summary>Open a terminal running one account, leaving the default login alone.</summary>
+    /// <summary>
+    /// Open a terminal running one account, leaving the default login alone.
+    /// </summary>
+    /// <remarks>
+    /// Picks from recent working directories first (continue last chat or start
+    /// new), with browse-for-folder as a fallback — not a bare directory dialog.
+    /// </remarks>
     private void DoOpenSessionTerminal(AccountCardModel model)
     {
-        if (SessionMode.AskDirectory(this) is not { } directory)
+        string label = string.IsNullOrWhiteSpace(model.Alias)
+            ? Pii.MaskEmail(model.Email)
+            : $"{model.Alias} · {Pii.MaskEmail(model.Email)}";
+        if (SessionLaunchDialog.Pick(this, _engine, model.Number, label) is not { } pick)
         {
             return;
         }
 
-        var result = SessionMode.Launch(_engine, model.Number.ToString(), directory);
+        var result = SessionMode.Launch(
+            _engine, model.Number.ToString(), pick.Directory, pick.SessionId);
         if (!result.Launched)
         {
             MessageBox.Show(
@@ -1119,12 +2001,598 @@ sealed class MainForm : Form
             return;
         }
 
+        string dirName = System.IO.Path.GetFileName(pick.Directory.TrimEnd('\\', '/'));
+        if (string.IsNullOrEmpty(dirName)) dirName = pick.Directory;
         _baseStatus = result.Note
-            ?? Loc.T("status.sessionOpened", model.Number, Pii.MaskEmail(model.Email));
+            ?? (pick.SessionId is null
+                ? Loc.T("status.sessionOpenedNew", model.Number, dirName)
+                : Loc.T("status.sessionOpenedResume", model.Number, dirName));
         ComposeStatusLine();
         // The new terminal writes its PID file as it starts, so the card's
         // session count only becomes true on the next snapshot.
         Reload();
+    }
+
+    /// <summary>
+    /// Open a supervised ACP run for one account.
+    /// </summary>
+    /// <remarks>
+    /// Shares the directory picker with the terminal path — the choice is the
+    /// same one, only the thing that gets launched differs. The account profile
+    /// comes from <c>session_prepare</c>, so this run is authenticated as the
+    /// named account exactly as a session-mode terminal would be.
+    /// </remarks>
+    private void DoOpenAgentWindow(AccountCardModel model)
+    {
+        if (AcpLaunch.FindAdapter() is null)
+        {
+            MessageBox.Show(
+                this,
+                Loc.T("acp.err.adapterSetup", AcpLaunch.AdapterPackage),
+                Loc.T("acp.window.plain"),
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        string label = string.IsNullOrWhiteSpace(model.Alias)
+            ? Pii.MaskEmail(model.Email)
+            : $"{model.Alias} · {Pii.MaskEmail(model.Email)}";
+
+        if (SessionLaunchDialog.Pick(this, _engine, model.Number, label) is not { } pick)
+        {
+            return;
+        }
+
+        string? configDir;
+        try
+        {
+            var prepared = _engine.Call("session_prepare", new { id = model.Number.ToString() });
+            // "Use the default login" means this account already *is* the active
+            // one; a second profile copy of its token would drift from it.
+            configDir = prepared["useDefaultLogin"]?.GetValue<bool>() == true
+                ? null
+                : prepared["configDir"]?.GetValue<string>();
+        }
+        catch (EngineException ex)
+        {
+            MessageBox.Show(
+                this,
+                ex.Message,
+                Loc.T("session.failed.title"),
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        var window = NewAgentWindow(pick.Directory, configDir, model.Number, label);
+        // Modeless: a supervised run can take a long time, and the main window
+        // has to stay usable while it does.
+        window.Show(this);
+    }
+
+    /// <summary>
+    /// Build a run view with this app's engine, journal and permission handler.
+    /// </summary>
+    private AgentWindow NewAgentWindow(
+        string workDir, string? configDir, int? accountNumber, string accountLabel) =>
+        new(_engine, _agentRuns, workDir, configDir, accountNumber, accountLabel, AskPermissionAsync);
+
+    /// <summary>
+    /// Answer an agent's permission request with a dialog.
+    /// </summary>
+    /// <remarks>
+    /// Owned by the main window rather than a run's own view: a background run
+    /// can ask while its view is closed, and the question still has to reach
+    /// somebody. If nobody is there the turn simply waits, which is the honest
+    /// outcome — the alternative is approving on a user's behalf.
+    /// </remarks>
+    private Task<string?> AskPermissionAsync(JsonNode request) =>
+        AcpPermissionDialog.AskAsync(this, request);
+
+    /// <summary>Open a window that resumes a journaled run.</summary>
+    private AgentWindow? OpenAgentRun(AgentRunRecord record)
+    {
+        if (!Directory.Exists(record.Cwd))
+        {
+            MessageBox.Show(
+                this,
+                Loc.T("acp.err.workDir", record.Cwd),
+                Loc.T("acp.window.plain"),
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return null;
+        }
+
+        string label = record.AccountNumber is { } n
+            ? LabelForAccount(n)
+            : Loc.T("acp.runs.unknownAccount");
+
+        var window = NewAgentWindow(record.Cwd, record.ConfigDir, record.AccountNumber, label);
+        if (record.IsResumable) window.PrepareResume(record);
+        return window;
+    }
+
+    /// <summary>
+    /// Render the Runs dropdown offscreen and report its rows.
+    /// </summary>
+    /// <remarks>
+    /// The visual check for the stalled-session section. Unlike the overlay
+    /// capture this does not need a composited desktop, so it also works over a
+    /// remote or headless session — which is where the screen copy comes back
+    /// black.
+    /// </remarks>
+    private string ProbeRunsMenu()
+    {
+        FillRunsMenu(_btnRuns.DropDownItems);
+        var drop = _btnRuns.DropDown;
+        drop.PerformLayout();
+        Application.DoEvents();
+
+        var rows = _btnRuns.DropDownItems
+            .OfType<ToolStripItem>()
+            .Select(i => i is ToolStripSeparator ? "  ---" : $"  [{i.Text}]")
+            .ToList();
+
+        string? dir = Environment.GetEnvironmentVariable("CLAUDE_SWITCH_LAYOUT_DIR");
+        string saved = "(not saved)";
+        if (!string.IsNullOrWhiteSpace(dir) && drop.Width > 0 && drop.Height > 0)
+        {
+            try
+            {
+                using var bmp = new Bitmap(drop.Width, drop.Height);
+                drop.DrawToBitmap(bmp, new Rectangle(0, 0, drop.Width, drop.Height));
+                string path = Path.Combine(dir, "gui-runs-menu-rendered.png");
+                bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                saved = path;
+            }
+            catch (Exception ex)
+            {
+                saved = $"(render failed: {ex.GetType().Name})";
+            }
+        }
+
+        return $"runs_menu items={rows.Count} render={saved}\n{string.Join("\n", rows)}";
+    }
+
+    /// <summary>Account label for a run whose slot may not be recorded.</summary>
+    private string AccountLabelOrUnknown(int? number) =>
+        number is { } n ? LabelForAccount(n) : Loc.T("acp.runs.unknownAccount");
+
+    /// <summary>
+    /// Look for terminal sessions that stalled, and resume them.
+    /// </summary>
+    /// <remarks>
+    /// Runs on the UI timer but does its work off it: the scan reads transcripts
+    /// and the takeover spawns agents, neither of which belongs on the thread
+    /// painting the window.
+    /// </remarks>
+    private void SweepStalledSessions()
+    {
+        if (IsDisposed || Disposing) return;
+        _ = Task.Run(() =>
+        {
+            int started;
+            try
+            {
+                started = _stalled.SweepAndResume();
+            }
+            catch (Exception ex) when (ex is EngineException or ObjectDisposedException
+                                          or IOException or InvalidOperationException)
+            {
+                // A sweep is opportunistic; failing one must not take the app
+                // down or stop later sweeps from running.
+                return;
+            }
+            if (started == 0) return;
+
+            if (IsDisposed || Disposing) return;
+            try
+            {
+                BeginInvoke(() =>
+                {
+                    _baseStatus = Loc.T("stalled.status.resumed", started);
+                    ComposeStatusLine();
+                    UpdateRunsButton();
+                });
+            }
+            catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
+            {
+                // Shutting down mid-sweep.
+            }
+        });
+    }
+
+    /// <summary>
+    /// Say what a takeover did, once it is settled.
+    /// </summary>
+    /// <remarks>
+    /// A balloon rather than a dialog: this happens while the user is elsewhere,
+    /// which is the entire point of the feature. A modal would be waiting for
+    /// them instead of the work being done.
+    /// </remarks>
+    private void OnTakeoverFinished(StalledRecord record, bool ok, string? detail)
+    {
+        if (IsDisposed || Disposing) return;
+        try
+        {
+            BeginInvoke(() =>
+            {
+                string kind = Loc.T($"stalled.kind.{record.Reason}");
+                _tray.BalloonTipTitle = Loc.T("stalled.notice.title");
+                _tray.BalloonTipText = ok
+                    ? Loc.T("stalled.notice.resumed.single", kind)
+                    : Loc.T("stalled.notice.failed.single", detail ?? kind);
+                _tray.ShowBalloonTip(8000);
+                UpdateRunsButton();
+            });
+        }
+        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
+        {
+            // Shutting down as a run reported.
+        }
+    }
+
+    private string LabelForAccount(int number)
+    {
+        var model = _models.FirstOrDefault(m => m.Number == number);
+        if (model is null) return Loc.T("alias.account", number);
+        return string.IsNullOrWhiteSpace(model.Alias)
+            ? Pii.MaskEmail(model.Email)
+            : $"{model.Alias} · {Pii.MaskEmail(model.Email)}";
+    }
+
+    /// <summary>
+    /// Show how many agents are working, on the button that opens them.
+    /// </summary>
+    /// <remarks>
+    /// Background runs are invisible by construction — this is the only place
+    /// the app admits one is happening once its window is closed.
+    /// </remarks>
+    private void UpdateRunsButton()
+    {
+        if (IsDisposed || Disposing) return;
+        try
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(UpdateRunsButton);
+                return;
+            }
+            // Sessions a takeover could not rescue count too: they are the ones
+            // that need a person, and the dropdown is where they live.
+            int active = BackgroundRuns.ActiveCount + _stalled.Failures.Count;
+            _btnRuns.Text = active == 0
+                ? Loc.T("toolbar.runs")
+                : Loc.T("toolbar.runs.active", active);
+        }
+        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
+        {
+            // Shutting down while a run reported.
+        }
+    }
+
+    /// <summary>
+    /// Refresh the supervised-work band on the main window.
+    /// </summary>
+    /// <remarks>
+    /// Ordered by what needs a person soonest: sessions a takeover could not
+    /// rescue, then agents still working, then work that can be picked up. The
+    /// band hides itself when all three are empty, so it costs nothing on a
+    /// machine that never uses supervised runs.
+    /// </remarks>
+    private void UpdateTaskBoard()
+    {
+        if (IsDisposed || Disposing) return;
+        try
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(UpdateTaskBoard);
+                return;
+            }
+
+            var entries = new List<TaskEntry>();
+
+            // A live run has no dismiss: hiding work that is still happening is
+            // how a supervised run quietly becomes an unsupervised one.
+            foreach (var run in BackgroundRuns.Active)
+            {
+                var captured = run;
+                bool blocked = run.AwaitingPermission;
+                entries.Add(new TaskEntry(
+                    blocked ? TaskState.AwaitingPermission : TaskState.Running,
+                    Title(run.Prompt),
+                    AccountText(run),
+                    run.Cwd,
+                    Elapsed(DateTime.UtcNow - run.StartedUtc),
+                    () => OpenLiveRun(captured),
+                    // A run parked on a question needs answering, not watching,
+                    // and the answer is in the window this opens.
+                    blocked ? Loc.T("board.action.continue") : Loc.T("board.action.view"),
+                    Stop: () => captured.Cancel(),
+                    OpenFolder: () => OpenFolder(captured.Cwd)));
+            }
+
+            foreach (var failure in _stalled.Failures)
+            {
+                var record = failure.Record;
+                entries.Add(new TaskEntry(
+                    TaskState.NeedsAttention,
+                    Loc.T($"stalled.kind.{record.Reason}"),
+                    record.AccountNumber is { } n ? LabelForAccount(n) : null,
+                    record.Cwd,
+                    Elapsed(TimeSpan.FromMilliseconds(record.IdleMs)),
+                    () => OpenStalledSession(record),
+                    Loc.T("board.action.retry"),
+                    // Dismissing drops the warning, not the session: the
+                    // transcript stays where it is and the terminal is untouched.
+                    Ignore: () => _stalled.Forget(record.SessionId),
+                    OpenFolder: () => OpenFolder(record.Cwd),
+                    Note: failure.Detail));
+            }
+
+            foreach (var record in _agentRuns.Resumable())
+            {
+                var captured = record;
+                entries.Add(new TaskEntry(
+                    StateOf(record.Status),
+                    record.Title,
+                    record.AccountNumber is { } n ? LabelForAccount(n) : null,
+                    record.Cwd,
+                    Since(record.UpdatedMs),
+                    () => OpenAgentRun(captured)?.Show(this),
+                    Loc.T("board.action.continue"),
+                    Ignore: () => ForgetRun(captured.Id),
+                    OpenFolder: () => OpenFolder(captured.Cwd)));
+            }
+
+            // Most urgent first, so the top of the band is what actually wants a
+            // person rather than whatever happened to be created last.
+            entries.Sort((a, b) => a.State.CompareTo(b.State));
+
+            _taskBoard.Show(entries);
+            _taskBoard.Visible = entries.Count > 0;
+            ApplyBandHeights();
+        }
+        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
+        {
+            // Shutting down while a run reported.
+        }
+    }
+
+    /// <summary>
+    /// The account a run is spending, showing a handover when there was one.
+    /// </summary>
+    /// <remarks>
+    /// A run that changed account did so because the first one hit its quota
+    /// wall. In an app whose whole job is juggling accounts, that is the most
+    /// useful thing a row can say about a long run.
+    /// </remarks>
+    private static string AccountText(LiveRun run) =>
+        run.PreviousAccountLabel is { Length: > 0 } from
+            ? Loc.T("board.switched", from, run.AccountLabel)
+            : run.AccountLabel;
+
+    /// <summary>Map a journal status onto what the board shows.</summary>
+    private static TaskState StateOf(string status) => status switch
+    {
+        "failed" => TaskState.Failed,
+        "cancelled" => TaskState.Cancelled,
+        _ => TaskState.Interrupted,
+    };
+
+    /// <summary>A duration a person can read at a glance.</summary>
+    private static string Elapsed(TimeSpan span)
+    {
+        if (span < TimeSpan.Zero) return "";
+        if (span.TotalMinutes < 1) return Loc.T("board.elapsed.justNow");
+        if (span.TotalHours < 1) return Loc.T("board.elapsed.minutes", (int)span.TotalMinutes);
+        if (span.TotalDays < 1) return Loc.T("board.elapsed.hours", (int)span.TotalHours);
+        return Loc.T("board.elapsed.days", (int)span.TotalDays);
+    }
+
+    private static string Since(long epochMs) =>
+        Elapsed(DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeMilliseconds(epochMs));
+
+    /// <summary>Show a task's working directory in Explorer.</summary>
+    private void OpenFolder(string path)
+    {
+        if (!Directory.Exists(path))
+        {
+            MessageBox.Show(
+                this,
+                Loc.T("acp.err.workDir", path),
+                Loc.T("acp.window.plain"),
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+        try
+        {
+            using var _ = System.Diagnostics.Process.Start(
+                new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException)
+        {
+            // Explorer refused; not worth taking the window down over.
+        }
+    }
+
+    /// <summary>
+    /// Drop a run's journal entry, so it stops being offered.
+    /// </summary>
+    /// <remarks>
+    /// The record goes; the conversation does not. Its transcript is still on
+    /// disk and still reachable from <b>Resume</b>, which is what makes this
+    /// safe to do without a confirmation on every row — the journal is a list of
+    /// reminders, and a reminder you have read is one you should be able to
+    /// clear in one click.
+    /// </remarks>
+    private void ForgetRun(string id)
+    {
+        _agentRuns.Remove(id);
+        UpdateRunsButton();
+        UpdateTaskBoard();
+    }
+
+    /// <summary>
+    /// List supervised runs: the ones still going, then the ones worth resuming.
+    /// </summary>
+    /// <remarks>
+    /// A dropdown rather than a window. Background runs need <em>somewhere</em>
+    /// to be reachable — closing a run's view must not hide work that is still
+    /// happening — but a handful of rows does not earn a form of its own.
+    /// </remarks>
+    private void FillRunsMenu(ToolStripItemCollection items)
+    {
+        items.Clear();
+
+        var live = BackgroundRuns.Active;
+        foreach (var run in live)
+        {
+            var item = new ToolStripMenuItem(Loc.T("acp.runs.item.live", Title(run.Prompt)))
+            {
+                ToolTipText = run.Cwd,
+            };
+            var captured = run;
+            item.Click += (_, _) => OpenLiveRun(captured);
+            items.Add(item);
+        }
+
+        // Resumable records are what a crash or a quit leaves behind. Without a
+        // way to act on them here they would only ever be a startup balloon.
+        var resumable = _agentRuns.Resumable();
+        if (live.Count > 0 && resumable.Count > 0)
+        {
+            items.Add(new ToolStripSeparator());
+        }
+        foreach (var record in resumable.Take(8))
+        {
+            var item = new ToolStripMenuItem(Loc.T("acp.runs.item.resume", record.Title))
+            {
+                ToolTipText = record.LastError is { Length: > 0 } why
+                    ? $"{record.Cwd}\n{why}"
+                    : record.Cwd,
+            };
+            var captured = record;
+            item.Click += (_, _) => OpenAgentRun(captured)?.Show(this);
+            items.Add(item);
+        }
+
+        // Stalled terminals a takeover could not rescue. They are somebody
+        // else's window, so the only thing offered is a way to look at them —
+        // the automatic attempt already happened and did not work.
+        var failures = _stalled.Failures;
+        if (failures.Count > 0)
+        {
+            if (items.Count > 0) items.Add(new ToolStripSeparator());
+            items.Add(new ToolStripMenuItem(Loc.T("stalled.section")) { Enabled = false });
+
+            foreach (var failure in failures.Take(8))
+            {
+                var record = failure.Record;
+                // The reason is in the label, not only the tooltip: two sessions
+                // stalled in the same directory are otherwise the same row twice.
+                var item = new ToolStripMenuItem(Loc.T(
+                    "stalled.item.failed",
+                    Loc.T($"stalled.kind.{record.Reason}"),
+                    Title(record.Cwd)))
+                {
+                    ToolTipText = Loc.T(
+                        "stalled.item.tip",
+                        record.Cwd,
+                        record.IdleMinutes,
+                        Loc.T($"stalled.kind.{record.Reason}"),
+                        failure.Detail),
+                };
+                item.Click += (_, _) => OpenStalledSession(record);
+                items.Add(item);
+            }
+        }
+
+        if (items.Count == 0)
+        {
+            items.Add(new ToolStripMenuItem(Loc.T("acp.runs.empty")) { Enabled = false });
+        }
+    }
+
+    /// <summary>
+    /// Open a window on a stalled session the automatic takeover could not fix.
+    /// </summary>
+    /// <remarks>
+    /// Dismisses the row on the way: the user is now looking at it, and a
+    /// warning that outlives the thing it warned about trains people to ignore
+    /// the next one.
+    /// </remarks>
+    private void OpenStalledSession(StalledRecord record)
+    {
+        if (!Directory.Exists(record.Cwd))
+        {
+            MessageBox.Show(
+                this,
+                Loc.T("acp.err.workDir", record.Cwd),
+                Loc.T("acp.window.plain"),
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        var window = NewAgentWindow(
+            record.Cwd,
+            record.ConfigDir,
+            record.AccountNumber,
+            AccountLabelOrUnknown(record.AccountNumber));
+        _stalled.Forget(record.SessionId);
+        window.Show(this);
+        UpdateRunsButton();
+    }
+
+    /// <summary>First line of a prompt, bounded for a menu row.</summary>
+    private static string Title(string prompt)
+    {
+        string first = prompt
+            .Split('\n')
+            .Select(l => l.Trim())
+            .FirstOrDefault(l => l.Length > 0) ?? "";
+        return first.Length <= 60 ? first : string.Concat(first.AsSpan(0, 59), "\u2026");
+    }
+
+    /// <summary>Open a window already watching a run that is in flight.</summary>
+    private void OpenLiveRun(LiveRun live)
+    {
+        var window = NewAgentWindow(
+            live.Cwd,
+            configDir: null,
+            accountNumber: live.Runner.AccountNumber,
+            accountLabel: live.AccountLabel);
+        window.Attach(live);
+        window.Show(this);
+    }
+
+    /// <summary>
+    /// Point out runs left unfinished by a previous session.
+    /// </summary>
+    /// <remarks>
+    /// A balloon rather than a modal: the app has just started, and a dialog
+    /// demanding a decision about work from yesterday is the wrong way to open.
+    /// The runs window is where the decision belongs.
+    /// </remarks>
+    private void NoticeResumableRuns()
+    {
+        var resumable = _agentRuns.Resumable();
+        if (resumable.Count == 0) return;
+
+        _tray.BalloonTipTitle = Loc.T("acp.runs.notice.title");
+        _tray.BalloonTipText = resumable.Count == 1
+            ? Loc.T("acp.runs.notice.single", resumable[0].Title)
+            : Loc.T("acp.runs.notice.several", resumable.Count);
+        _tray.ShowBalloonTip(8000);
+
+        _baseStatus = resumable.Count == 1
+            ? Loc.T("acp.runs.left.single")
+            : Loc.T("acp.runs.left.several", resumable.Count);
+        ComposeStatusLine();
     }
 
     private ContextMenuStrip BuildTrayMenu()
@@ -1144,9 +2612,11 @@ sealed class MainForm : Form
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(Loc.T("tray.exit"), null, (_, _) =>
         {
-            _tray.Visible = false;
-            Theme.SavePrefs();
-            _engine.Dispose();
+            // Just ask to exit. `Application.Exit` raises FormClosing with
+            // ApplicationExitCall, and that handler already hides the tray icon,
+            // saves prefs, stops live runs and disposes the engine — in an order
+            // that works. Doing any of it here first disposed the engine out
+            // from under the shutdown that still needs it.
             Application.Exit();
         });
         return menu;
@@ -1507,6 +2977,22 @@ sealed class MainForm : Form
             return new JsonObject { ["claudeAiOauth"] = oauth }.ToJsonString();
         }
 
+        // Expired, and no refresh token to renew it with — the shape a slot ends
+        // up in after the account is signed out elsewhere.
+        static string DeadCred(string email) =>
+            new JsonObject
+            {
+                ["claudeAiOauth"] = new JsonObject
+                {
+                    ["accessToken"] = "tok-dead",
+                    ["refreshToken"] = "",
+                    ["expiresAt"] = 0,
+                    ["scopes"] = new JsonArray("user:inference", "user:profile"),
+                    ["emailAddress"] = email,
+                    ["subscriptionType"] = "pro",
+                },
+            }.ToJsonString();
+
         static string Cfg(
             string email,
             string? orgType = null,
@@ -1590,6 +3076,18 @@ sealed class MainForm : Form
             config = Cfg("erin@example.com", "claude_enterprise", "invoice",
                 "2025-12-20T00:00:00Z", orgName: "Globex", role: "member", seat: "premium"),
             alias = "lab",
+        });
+        // A slot whose credential can no longer be renewed. The attention state
+        // is the one card layout with a different shape — an amber badge and a
+        // button where the plan tag goes — and without a fixture for it the only
+        // way to see it rendered is to break a real account.
+        eng.Call("add_raw", new
+        {
+            number = 7,
+            email = "frank@example.com",
+            credentials = DeadCred("frank@example.com"),
+            config = Cfg("frank@example.com"),
+            alias = "old",
         });
 
         SeedFixtureSession(eng, Path.Combine(root, ".claude"));
@@ -1677,13 +3175,26 @@ sealed class MainForm : Form
         {
             var s = _engine.Call("get_settings");
             var auto = s["autoswitch"];
-            if (auto is null) return;
-            _autoEnabled.Checked = auto["enabled"]?.GetValue<bool>() ?? false;
-            if (auto["threshold"] is JsonValue t && t.TryGetValue<double>(out var th))
-                _threshold.Value = (decimal)Math.Clamp(th, 50, 99);
+            if (auto is not null)
+            {
+                _autoEnabled.Checked = auto["enabled"]?.GetValue<bool>() ?? false;
+                if (auto["threshold"] is JsonValue t && t.TryGetValue<double>(out var th))
+                    _threshold.Value = (decimal)Math.Clamp(th, 50, 99);
+            }
+            var warmup = s["warmup"];
+            if (warmup is not null)
+            {
+                _warmupEnabled.Checked = warmup["enabled"]?.GetValue<bool>() ?? false;
+                _workStartHour.Value = Math.Min(23, ParseHour(warmup["workStart"]?.GetValue<string>(), 9));
+                _workEndHour.Value = Math.Clamp(ParseHour(warmup["workEnd"]?.GetValue<string>(), 18), 1, 23);
+                if (_workEndHour.Value <= _workStartHour.Value)
+                    _workEndHour.Value = Math.Min(23, _workStartHour.Value + 1);
+            }
             ApplyThresholdMarker();
             _hideEmail.Checked = UiPrefs.HideEmail;
+            _warmupTask.Checked = WarmupTaskHelper.IsEnabled();
             SyncAutoSwitchUiEnabled();
+            SyncWarmupUiEnabled();
         }
         catch (Exception ex)
         {
@@ -1693,6 +3204,15 @@ sealed class MainForm : Form
         {
             _settingsLoading = false;
         }
+    }
+
+    /// <summary>Read the hour from a core <c>HH:MM</c> string; fall back on bad input.</summary>
+    private static decimal ParseHour(string? hhmm, int fallback)
+    {
+        if (string.IsNullOrWhiteSpace(hhmm)) return fallback;
+        var part = hhmm.Split(':')[0];
+        if (!int.TryParse(part, out int h)) return fallback;
+        return Math.Clamp(h, 0, 24);
     }
 
     private void SaveSettings(bool auto = false)
@@ -1710,12 +3230,33 @@ sealed class MainForm : Form
                 unhealthyTicks = 3,
                 enabled = _autoEnabled.Checked,
             });
+            int startH = (int)_workStartHour.Value;
+            int endH = (int)_workEndHour.Value;
+            if (endH <= startH) endH = Math.Min(23, startH + 1);
+            _engine.Call("set_warmup", new
+            {
+                enabled = _warmupEnabled.Checked,
+                workStart = $"{startH:D2}:00",
+                workEnd = $"{endH:D2}:00",
+            });
+            // Keep the daily task in sync: create/update when both toggles are on,
+            // otherwise delete so unchecking never leaves an orphan schtask.
+            SyncWarmupScheduledTask();
+            if (!_warmupTask.Checked || !_warmupEnabled.Checked)
+            {
+                // Checkbox can lag if guardian was turned off above; force UI.
+                if (_warmupTask.Checked && !_warmupEnabled.Checked)
+                {
+                    _settingsLoading = true;
+                    _warmupTask.Checked = false;
+                    _settingsLoading = false;
+                }
+            }
             ApplyThresholdMarker();
+            SyncWarmupUiEnabled();
             if (DetailOpen && _selected is not null)
                 _drawer.Bind(_selected.Model);
-            string msg = _autoEnabled.Checked
-                ? Loc.T("settings.saved.on", _threshold.Value)
-                : Loc.T("settings.saved.off");
+            string msg = SettingsSavedMessage();
             if (auto)
                 FlashSettingsSaved(msg);
             else
@@ -1723,8 +3264,8 @@ sealed class MainForm : Form
                 _baseStatus = msg;
                 ComposeStatusLine();
             }
-            // After enabling autoswitch, pull usage + tick path once so status updates soon.
-            if (_autoEnabled.Checked)
+            // After enabling autoswitch or warmup, pull usage (+ guardian) once.
+            if (_autoEnabled.Checked || _warmupEnabled.Checked)
                 RunEnginePoll(force: true);
             else
                 ComposeStatusLine();
@@ -1734,6 +3275,17 @@ sealed class MainForm : Form
         {
             MessageBox.Show(ex.Message, Loc.T("settings.saveFailed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+    }
+
+    private string SettingsSavedMessage()
+    {
+        string auto = _autoEnabled.Checked
+            ? Loc.T("settings.saved.on", _threshold.Value)
+            : Loc.T("settings.saved.off");
+        string warm = _warmupEnabled.Checked
+            ? Loc.T("settings.warmup.saved.on", (int)_workStartHour.Value, (int)_workEndHour.Value)
+            : Loc.T("settings.warmup.saved.off");
+        return $"{auto} · {warm}";
     }
 
     /// <summary>
@@ -1810,6 +3362,10 @@ sealed class MainForm : Form
                 : Loc.T("status.polled", _poll.TickCount);
             ComposeStatusLine();
             NotifyIfSwitched(result, wasActive);
+            // Guardian fires live inside refresh_usage / autoswitch_tick; surface
+            // them the same way as a manual Warm now so a closed main window still
+            // explains the morning open.
+            NotifyIfWarmed(result);
         }
         catch (Exception ex)
         {
@@ -1835,8 +3391,20 @@ sealed class MainForm : Form
                 PollCoordinator.IntervalMsFromSeconds(_nextPollSeconds));
     }
 
+    /// <summary>
+    /// Fills the status band: what is going on, and when the next refresh lands.
+    /// </summary>
+    /// <remarks>
+    /// The countdown is written to its own right-hand cell rather than appended
+    /// to the sentence. It is the one part that changes every second, and in a
+    /// single label it dragged the whole line sideways as the message beside it
+    /// grew or shrank.
+    /// </remarks>
     private void ComposeStatusLine()
     {
+        int remain = (int)Math.Max(0, Math.Ceiling((_nextPollUtc - DateTime.UtcNow).TotalSeconds));
+        _statusRight.Text = Loc.T("status.nextRefresh", FormatClock(remain));
+
         string q = _search.Text.Trim();
         var filtered = AccountListFilter.Filter(_models, q);
         var filterMsg = AccountListFilter.FormatFilterMessage(filtered.Count, _models.Count, q);
@@ -1846,10 +3414,15 @@ sealed class MainForm : Form
             return;
         }
 
+        if (!string.IsNullOrEmpty(_baseStatus) && remain > 0 && _poll.TickCount == 0)
+        {
+            // Keep one-shot messages visible until first poll completes.
+            _status.Text = _baseStatus;
+            return;
+        }
+
         var active = _models.FirstOrDefault(m => m.Active);
         var masked = ActiveLabel();
-        int remain = (int)Math.Max(0, Math.Ceiling((_nextPollUtc - DateTime.UtcNow).TotalSeconds));
-        string pollText = Loc.T("status.nextRefresh", Theme.FormatDuration(remain));
         string auto = _autoEnabled.Checked
             ? Loc.T("status.autoswitch.on", _threshold.Value)
             : Loc.T("status.autoswitch.off");
@@ -1860,13 +3433,15 @@ sealed class MainForm : Form
             : Loc.T("status.poll.position", pos, total);
         // Separators for scanability. No slot number when no slot is live.
         string who = active is null ? masked : $"#{active.Number} {masked}";
-        _status.Text = $"{Loc.T("status.active", who)}  |  {auto}  |  {pollPos}  |  {pollText}";
-        if (!string.IsNullOrEmpty(_baseStatus) && _baseStatus.Length > 0
-            && remain > 0 && _poll.TickCount == 0)
-        {
-            // Keep one-shot messages visible until first poll completes.
-            _status.Text = $"{_baseStatus}  |  {pollText}";
-        }
+        _status.Text = $"{Loc.T("status.active", who)}   ·   {auto}   ·   {pollPos}";
+    }
+
+    /// <summary>Seconds as mm:ss — a clock that never changes width as it ticks.</summary>
+    private static string FormatClock(int seconds)
+    {
+        if (seconds < 0) seconds = 0;
+        if (seconds >= 3600) return Theme.FormatDuration(seconds);
+        return $"{seconds / 60:00}:{seconds % 60:00}";
     }
 
     private void ClearSearch()
@@ -1939,6 +3514,7 @@ sealed class MainForm : Form
                     SevenDay = seven,
                     FiveHourResetsAt = fiveReset,
                     SevenDayResetsAt = sevenReset,
+                    WarmupAnchor = a["warmupAnchor"]?.GetValue<string>(),
                     UsageStatus = a["usageStatus"]?.GetValue<string>(),
                     PlanLabel = p?["label"]?.GetValue<string>(),
                     PlanTier = p?["tier"]?.GetValue<string>(),
@@ -1981,7 +3557,8 @@ sealed class MainForm : Form
         _activeChip.Text = sessions > 0
             ? Loc.T("header.activeWithSessions", maskedActive, Loc.Plural("header.sessions", sessions))
             : Loc.T("header.active", maskedActive);
-        _countLabel.Text = Loc.T("header.count", _models.Count);
+        _activeDot.ForeColor = _models.Any(a => a.Active) ? Theme.Primary : Theme.TextMuted;
+        _countLabel.Text = CountText(_models.Count);
         var trayLabel = maskedActive.Length > 40
             ? maskedActive[..37] + "…"
             : maskedActive;
@@ -2047,6 +3624,11 @@ sealed class MainForm : Form
                 SelectCard(card);
                 ShowAccountMenu(card);
             };
+            card.FixRequested += (_, _) =>
+            {
+                SelectCard(card);
+                DoFixCredential(card.Model);
+            };
             if (keepSelected == model.Number || (keepSelected is null && model.Active))
             {
                 card.Selected = true;
@@ -2056,6 +3638,9 @@ sealed class MainForm : Form
         }
         _cardHost.ResumeLayout(true);
         LayoutCardHost();
+        // The list's scrollbars belong to windows that were just recreated, so
+        // the dark variant has to be asked for again.
+        NativeScrollbars.Apply(_listOuter);
 
         bool noData = _models.Count == 0;
         bool filterEmpty = !noData && filtered.Count == 0 && q.Length > 0;
@@ -2080,7 +3665,7 @@ sealed class MainForm : Form
 
         // Match chrome
         var filterMsg = AccountListFilter.FormatFilterMessage(filtered.Count, _models.Count, q);
-        _btnSearchClear.Enabled = q.Length > 0;
+        if (_searchClear is not null) _searchClear.Visible = q.Length > 0;
         _searchMatchLabel.Text = q.Length == 0
             ? ""
             : filtered.Count == 0
@@ -2192,6 +3777,24 @@ sealed class MainForm : Form
         };
         sessionItem.Click += (_, _) => Run(() => DoOpenSessionTerminal(m));
 
+        // Supervised run: same account, same working directory, but the agent
+        // stays a child of this app so an interruption can be resumed instead of
+        // stalling a terminal nobody is watching.
+        var agentItem = new ToolStripMenuItem(Loc.T("menu.openAgent"))
+        {
+            Enabled = !m.Disabled,
+            ToolTipText = Loc.T("menu.openAgent.tip"),
+        };
+        agentItem.Click += (_, _) => Run(() => DoOpenAgentWindow(m));
+
+        var warmItem = new ToolStripMenuItem(Loc.T("menu.warmup"))
+        {
+            // Only subscribed + healthy (usageStatus ok) participate in N / fires.
+            Enabled = !m.Disabled && m.UsageStatus is "ok",
+            ToolTipText = Loc.T("menu.warmup.tip"),
+        };
+        warmItem.Click += (_, _) => Run(() => DoWarmupNow(m.Number));
+
         var aliasItem = new ToolStripMenuItem(Loc.T("menu.alias"));
         aliasItem.Click += (_, _) => Run(DoEditAlias);
 
@@ -2209,6 +3812,8 @@ sealed class MainForm : Form
 
         menu.Items.Add(switchItem);
         menu.Items.Add(sessionItem);
+        menu.Items.Add(agentItem);
+        menu.Items.Add(warmItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(aliasItem);
         menu.Items.Add(detailItem);
@@ -2285,6 +3890,28 @@ sealed class MainForm : Form
             Cursor = Cursors.Default;
             UpdateSwitchEnabled();
         }
+    }
+
+    /// <summary>
+    /// The card's amber "sign in again" button.
+    /// </summary>
+    /// <remarks>
+    /// There is no way to re-authenticate a slot from here: the credential lives
+    /// in Claude Code, so the only real fix is to sign in there and overwrite
+    /// this slot from the live login. The dialog says exactly that and then
+    /// offers the overwrite, rather than leaving the user to work out that
+    /// "Add account" is what repairs an existing one.
+    /// </remarks>
+    private void DoFixCredential(AccountCardModel m)
+    {
+        string who = Pii.MaskAccountLabel(m.Alias, m.Email);
+        var answer = MessageBox.Show(
+            this,
+            Loc.T("card.relogin.body", who, Theme.UsageStatusLong(m.UsageStatus)),
+            Loc.T("card.relogin"),
+            MessageBoxButtons.OKCancel,
+            MessageBoxIcon.Information);
+        if (answer == DialogResult.OK) DoAdd();
     }
 
     private void DoAdd()

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/ffi",
+    "crates/acp",
 ]
 # ffi and gui-linux join the workspace in later PRs once their crates exist.
 # gui-mac / gui-win are non-Cargo projects (see docs/design-claude-switch.md §3.1).

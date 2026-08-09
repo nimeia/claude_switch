@@ -118,6 +118,53 @@ internal abstract class ThemedButton : Button
         UseVisualStyleBackColor = false;
         Font = Theme.FontBody;
         Cursor = Cursors.Hand;
+        Theme.Changed += OnThemeChanged;
+    }
+
+    private void OnThemeChanged(object? sender, EventArgs e)
+    {
+        if (!IsDisposed) ApplyAppearance();
+    }
+
+    /// <summary>
+    /// Repaint for the current theme <em>and</em> the current enabled state.
+    /// </summary>
+    /// <remarks>
+    /// <c>FlatStyle.Flat</c> plus an explicit <c>BackColor</c> means Windows
+    /// draws no disabled state of its own: a greyed-out button kept its full
+    /// colour and stayed indistinguishable from a live one. Every flavour gets
+    /// the same disabled palette from here, so a new button cannot forget it.
+    /// </remarks>
+    protected void ApplyAppearance()
+    {
+        UseVisualStyleBackColor = false;
+        if (Enabled)
+        {
+            Cursor = Cursors.Hand;
+            ApplyEnabledPalette();
+            return;
+        }
+        BackColor = Theme.BgDisabled;
+        ForeColor = Theme.TextDisabled;
+        FlatAppearance.BorderColor = Theme.BorderSoft;
+        FlatAppearance.MouseOverBackColor = Theme.BgDisabled;
+        FlatAppearance.MouseDownBackColor = Theme.BgDisabled;
+        Cursor = Cursors.Default;
+    }
+
+    /// <summary>Colours for the live button — the disabled case is handled above.</summary>
+    protected abstract void ApplyEnabledPalette();
+
+    protected override void OnEnabledChanged(EventArgs e)
+    {
+        ApplyAppearance();
+        base.OnEnabledChanged(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) Theme.Changed -= OnThemeChanged;
+        base.Dispose(disposing);
     }
 
     public int MinWidth
@@ -189,13 +236,11 @@ internal sealed class GhostButton : ThemedButton
         AutoSize = false;
         Padding = new Padding(8, 2, 8, 2);
         ApplyMetrics();
-        ApplyTheme();
-        Theme.Changed += (_, _) => ApplyTheme();
+        ApplyAppearance();
     }
 
-    private void ApplyTheme()
+    protected override void ApplyEnabledPalette()
     {
-        UseVisualStyleBackColor = false;
         BackColor = Theme.BgDrawer;
         ForeColor = Theme.TextSecondary;
         FlatAppearance.BorderColor = Theme.BgDrawer;
@@ -206,15 +251,17 @@ internal sealed class GhostButton : ThemedButton
 
     protected override void OnMouseEnter(EventArgs e)
     {
-        ForeColor = Theme.TextPrimary;
-        BackColor = Theme.BgHover;
+        if (Enabled)
+        {
+            ForeColor = Theme.TextPrimary;
+            BackColor = Theme.BgHover;
+        }
         base.OnMouseEnter(e);
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
-        ForeColor = Theme.TextSecondary;
-        BackColor = Theme.BgDrawer;
+        ApplyAppearance();
         base.OnMouseLeave(e);
     }
 }
@@ -231,30 +278,16 @@ internal sealed class PrimaryButton : ThemedButton
         Padding = new Padding(12, 3, 12, 3);
         Margin = new Padding(0, 0, 6, 0);
         ApplyMetrics();
-        ApplyTheme();
-        Theme.Changed += (_, _) => ApplyTheme();
+        ApplyAppearance();
     }
 
-    private void ApplyTheme()
+    protected override void ApplyEnabledPalette()
     {
-        UseVisualStyleBackColor = false;
-        if (Enabled)
-        {
-            BackColor = Theme.Primary;
-            ForeColor = Theme.TextOnPrimary;
-            FlatAppearance.BorderColor = Theme.Primary;
-            FlatAppearance.MouseOverBackColor = Theme.PrimaryDark;
-            FlatAppearance.MouseDownBackColor = Theme.PrimaryDark;
-        }
-        else
-        {
-            // Keep label readable when disabled (audit: not washed soft-green).
-            BackColor = Theme.BgDisabled;
-            ForeColor = Theme.TextDisabled;
-            FlatAppearance.BorderColor = Theme.Border;
-            FlatAppearance.MouseOverBackColor = Theme.BgDisabled;
-            FlatAppearance.MouseDownBackColor = Theme.BgDisabled;
-        }
+        BackColor = Theme.Primary;
+        ForeColor = Theme.TextOnPrimary;
+        FlatAppearance.BorderColor = Theme.Primary;
+        FlatAppearance.MouseOverBackColor = Theme.PrimaryDark;
+        FlatAppearance.MouseDownBackColor = Theme.PrimaryDark;
     }
 
     protected override void OnMouseEnter(EventArgs e)
@@ -265,14 +298,8 @@ internal sealed class PrimaryButton : ThemedButton
 
     protected override void OnMouseLeave(EventArgs e)
     {
-        BackColor = Enabled ? Theme.Primary : Theme.BgDisabled;
+        ApplyAppearance();
         base.OnMouseLeave(e);
-    }
-
-    protected override void OnEnabledChanged(EventArgs e)
-    {
-        ApplyTheme();
-        base.OnEnabledChanged(e);
     }
 }
 
@@ -287,13 +314,11 @@ internal sealed class SecondaryButton : ThemedButton
         Padding = new Padding(10, 3, 10, 3);
         Margin = new Padding(0, 0, 6, 0);
         ApplyMetrics();
-        ApplyTheme();
-        Theme.Changed += (_, _) => ApplyTheme();
+        ApplyAppearance();
     }
 
-    private void ApplyTheme()
+    protected override void ApplyEnabledPalette()
     {
-        UseVisualStyleBackColor = false;
         FlatAppearance.BorderColor = Theme.Border;
         BackColor = Theme.BgSurface;
         ForeColor = Theme.TextPrimary;
@@ -303,13 +328,13 @@ internal sealed class SecondaryButton : ThemedButton
 
     protected override void OnMouseEnter(EventArgs e)
     {
-        BackColor = Theme.BgHover;
+        if (Enabled) BackColor = Theme.BgHover;
         base.OnMouseEnter(e);
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
-        BackColor = Theme.BgSurface;
+        ApplyAppearance();
         base.OnMouseLeave(e);
     }
 }
@@ -406,13 +431,11 @@ internal sealed class DangerButton : ThemedButton
         Padding = new Padding(12, 3, 12, 3);
         Margin = new Padding(0, 0, 6, 0);
         ApplyMetrics();
-        ApplyTheme();
-        Theme.Changed += (_, _) => ApplyTheme();
+        ApplyAppearance();
     }
 
-    private void ApplyTheme()
+    protected override void ApplyEnabledPalette()
     {
-        UseVisualStyleBackColor = false;
         BackColor = Theme.UsageHigh;
         ForeColor = Color.White;
         FlatAppearance.BorderColor = Theme.UsageHigh;
@@ -422,13 +445,13 @@ internal sealed class DangerButton : ThemedButton
 
     protected override void OnMouseEnter(EventArgs e)
     {
-        BackColor = Theme.Danger;
+        if (Enabled) BackColor = Theme.Danger;
         base.OnMouseEnter(e);
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
-        BackColor = Theme.UsageHigh;
+        ApplyAppearance();
         base.OnMouseLeave(e);
     }
 }
@@ -451,5 +474,172 @@ internal sealed class SoftPanel : Panel
         base.OnPaint(e);
         using var pen = new Pen(Theme.BorderSoft);
         e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+    }
+}
+
+/// <summary>
+/// A check box that follows the app theme.
+/// </summary>
+/// <remarks>
+/// The stock control draws its box through the OS visual style renderer, which
+/// knows nothing about our palette: in dark mode it stays a bright white square,
+/// which is the first thing the eye lands on and the last thing that should be.
+/// Painting the box ourselves is the only way to make it match — there is no
+/// property that recolours the glyph.
+/// </remarks>
+internal sealed class ThemedCheckBox : CheckBox
+{
+    /// <summary>Box edge in design px, before DPI scaling.</summary>
+    private const int BoxSize = 14;
+
+    /// <summary>Gap between the box and its label, in design px.</summary>
+    private const int Gap = 7;
+
+    private bool _hot;
+
+    public ThemedCheckBox()
+    {
+        SetStyle(
+            ControlStyles.UserPaint
+                | ControlStyles.AllPaintingInWmPaint
+                | ControlStyles.OptimizedDoubleBuffer
+                | ControlStyles.SupportsTransparentBackColor,
+            true);
+        // The parent's colour shows through, so the row it sits in stays one
+        // continuous surface instead of a label on a patch.
+        BackColor = Color.Transparent;
+        Theme.Changed += (_, _) => Invalidate();
+    }
+
+    private float Scale => DeviceDpi / 96f;
+
+    private int Box => (int)(BoxSize * Scale);
+
+    public override Size GetPreferredSize(Size proposedSize)
+    {
+        var text = TextRenderer.MeasureText(Text, Font);
+        return new Size(
+            Box + (int)(Gap * Scale) + text.Width + Padding.Horizontal,
+            Math.Max(Box, text.Height) + Padding.Vertical);
+    }
+
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        _hot = true;
+        Invalidate();
+        base.OnMouseEnter(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hot = false;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        g.Clear(Parent?.BackColor ?? Theme.BgApp);
+
+        int box = Box;
+        int top = (Height - box) / 2;
+        var rect = new Rectangle(Padding.Left, top, box, box);
+
+        if (Checked)
+        {
+            using var fill = new SolidBrush(Enabled ? Theme.Primary : Theme.BgDisabled);
+            g.FillRectangle(fill, rect);
+        }
+        else
+        {
+            using var fill = new SolidBrush(Enabled ? Theme.BgSurface : Theme.BgDisabled);
+            g.FillRectangle(fill, rect);
+        }
+
+        using var border = new Pen(
+            !Enabled ? Theme.BorderSoft
+            : Checked ? Theme.Primary
+            : _hot ? Theme.Primary
+            : Theme.Border);
+        g.DrawRectangle(border, rect);
+
+        if (Checked)
+        {
+            // Drawn rather than a glyph font: a tick from a font would be at the
+            // mercy of whatever is installed.
+            using var tick = new Pen(Theme.TextOnPrimary, Math.Max(1.6f, box * 0.14f))
+            {
+                StartCap = System.Drawing.Drawing2D.LineCap.Round,
+                EndCap = System.Drawing.Drawing2D.LineCap.Round,
+            };
+            float l = rect.Left + box * 0.24f;
+            float m = rect.Left + box * 0.44f;
+            float r = rect.Left + box * 0.76f;
+            float midY = rect.Top + box * 0.62f;
+            g.DrawLines(tick,
+            [
+                new PointF(l, rect.Top + box * 0.5f),
+                new PointF(m, midY),
+                new PointF(r, rect.Top + box * 0.3f),
+            ]);
+        }
+
+        var textRect = new Rectangle(
+            rect.Right + (int)(Gap * Scale),
+            0,
+            Width - rect.Right - (int)(Gap * Scale) - Padding.Right,
+            Height);
+        TextRenderer.DrawText(
+            g,
+            Text,
+            Font,
+            textRect,
+            Enabled ? Theme.TextPrimary : Theme.TextDisabled,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+    }
+}
+
+/// <summary>
+/// Makes native scrollbars follow the app theme.
+/// </summary>
+/// <remarks>
+/// Scrollbars on an <c>AutoScroll</c> container are drawn by the OS, not by us,
+/// so a dark window gets a bright white stripe down its edge that no colour
+/// property reaches. Windows 10 1809 and later expose a dark variant of the
+/// Explorer visual style; asking for it by name is the supported way in. On
+/// anything older the call simply does nothing, which is the right fallback.
+/// </remarks>
+internal static class NativeScrollbars
+{
+    [System.Runtime.InteropServices.DllImport("uxtheme.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int SetWindowTheme(IntPtr hWnd, string? subAppName, string? subIdList);
+
+    /// <summary>Apply the current theme's scrollbars to <paramref name="control"/> and its children.</summary>
+    public static void Apply(Control control)
+    {
+        if (control.IsDisposed) return;
+        try
+        {
+            if (control.IsHandleCreated)
+            {
+                SetWindowTheme(
+                    control.Handle,
+                    Theme.Mode == ThemeMode.Dark ? "DarkMode_Explorer" : "Explorer",
+                    null);
+            }
+        }
+        catch (DllNotFoundException)
+        {
+            // No uxtheme: nothing to restyle, and not worth failing over.
+            return;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return;
+        }
+
+        foreach (Control child in control.Controls) Apply(child);
     }
 }

@@ -1,5 +1,7 @@
 //! `claude-switch-core` — business logic for Claude Code multi-account switching.
 
+pub mod agentruns;
+pub mod autocontinue;
 pub mod autoswitch;
 pub mod credentials;
 pub mod engine;
@@ -16,8 +18,10 @@ pub mod proxy;
 pub mod sequence;
 pub mod session;
 pub mod settings;
+pub mod stalled;
 pub mod switcher;
 pub mod usage;
+pub mod warmup;
 
 /// Package version from Cargo (kept in sync with root `VERSION` via CI / workspace).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
