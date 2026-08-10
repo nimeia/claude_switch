@@ -465,7 +465,12 @@ sealed class MainForm : Form
             AutoSize = false,
             // Wider so placeholder and queries are readable without clipping.
             Width = 280,
-            BorderStyle = BorderStyle.FixedSingle,
+            // No native border: the OS draws it square and unthemed, which made
+            // this the one hard-edged box on a window of rounded surfaces. The
+            // renderer paints a rounded one behind the hosted text box, and the
+            // padding is what leaves it room to show.
+            BorderStyle = BorderStyle.None,
+            Padding = new Padding(3, 2, 3, 2),
             Font = Theme.FontBody,
             // Hint is a native watermark, never Text — see SearchBox.
             Text = "",
@@ -533,6 +538,28 @@ sealed class MainForm : Form
         // button that is dead most of the time.
         _searchClear = SearchBox.AttachInlineClear(
             _search.TextBox, Loc.T("toolbar.search.clear.tip"), ClearSearch);
+
+        // The surround is drawn by the strip's renderer, so focus moving in and
+        // out of the hosted text box has to invalidate the strip — the text box
+        // repainting itself leaves the border it does not own untouched.
+        if (_search.TextBox is { } searchBox)
+        {
+            searchBox.Enter += (_, _) => _toolStrip.Invalidate();
+            searchBox.Leave += (_, _) => _toolStrip.Invalidate();
+        }
+
+        // Painted here rather than by the renderer: a ToolStripControlHost does
+        // not route its background through one, so a render override drew
+        // nothing. The strip's Paint runs after the items, and the hosted text
+        // box is shorter than its item, so the surround shows around it.
+        _toolStrip.Paint += (_, e) =>
+        {
+            if (!_search.Visible || _search.Bounds.Width <= 0) return;
+            SageToolStripRenderer.PaintTextBoxSurround(
+                e.Graphics,
+                Rectangle.Inflate(_search.Bounds, -1, -1),
+                _search.TextBox?.Focused == true);
+        };
 
         // Right cluster first, then left: primary switch + global actions only.
         _toolStrip.Items.Add(_searchMatchLabel);

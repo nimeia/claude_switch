@@ -224,22 +224,8 @@ internal sealed class TaskRow : Panel
     /// <summary>Second line: account, where, state, and how long.</summary>
     public string Detail { get; init; } = "";
 
-    internal static GraphicsPath Rounded(Rectangle r, int radius)
-    {
-        var path = new GraphicsPath();
-        if (r.Width <= 0 || r.Height <= 0)
-        {
-            path.AddRectangle(r);
-            return path;
-        }
-        int d = Math.Max(1, Math.Min(radius * 2, Math.Min(r.Width, r.Height)));
-        path.AddArc(r.X, r.Y, d, d, 180, 90);
-        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
-    }
+    /// <summary>Local name for the shared shape; the pills reach it through here.</summary>
+    internal static GraphicsPath Rounded(Rectangle r, int radius) => Shapes.Rounded(r, radius);
 }
 
 /// <summary>

@@ -206,17 +206,15 @@ internal sealed class CardPanel : Panel
         g.DrawPath(pen, path);
     }
 
-    internal static GraphicsPath Rounded(Rectangle r, int radius)
-    {
-        var path = new GraphicsPath();
-        int d = Math.Max(1, radius * 2);
-        path.AddArc(r.X, r.Y, d, d, 180, 90);
-        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
-    }
+    /// <summary>
+    /// Local name for the shared shape.
+    /// </summary>
+    /// <remarks>
+    /// The copy that used to live here clamped the corner diameter only against
+    /// the radius, not against the rectangle — a short row folded the path in on
+    /// itself. <see cref="Shapes.Rounded"/> guards both.
+    /// </remarks>
+    internal static GraphicsPath Rounded(Rectangle r, int radius) => Shapes.Rounded(r, radius);
 
     protected override void Dispose(bool disposing)
     {

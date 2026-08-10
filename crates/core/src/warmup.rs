@@ -597,7 +597,12 @@ mod tests {
             .and_local_timezone(Local)
             .single()
             .unwrap();
-        let reset = (Utc::now() + chrono::Duration::hours(3)).to_rfc3339();
+        // Derived from `now`, not from the real clock. Taking it from
+        // `Utc::now()` left the reset unrelated to the 10:00 this test
+        // fabricates, so the assertion only held while the wall clock happened
+        // to fall in a window of a few hours — the test passed all morning and
+        // failed at night.
+        let reset = (now + chrono::Duration::hours(3)).to_utc().to_rfc3339();
         let d = decide(
             &settings,
             now,

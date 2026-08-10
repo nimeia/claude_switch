@@ -4,6 +4,45 @@ using System.Drawing.Text;
 namespace ClaudeSwitch.App;
 
 /// <summary>
+/// Shared geometry for the app's painted chrome.
+/// </summary>
+/// <remarks>
+/// Rounded corners are the one shape every surface here uses — cards, list
+/// rows, pills, toolbar buttons — and the helper had been copied into four
+/// files, each with slightly different guards. The copies disagreed on the
+/// case that matters: only one of them clamped the corner diameter to the
+/// rectangle, so a short control drew a broken path or threw inside
+/// <c>AddArc</c>. One implementation, with the strictest guards of the four.
+/// </remarks>
+internal static class Shapes
+{
+    /// <summary>A rounded rectangle, safe for any size including degenerate ones.</summary>
+    public static GraphicsPath Rounded(Rectangle r, int radius)
+    {
+        // Too small to round: AddArc throws on a zero or negative rect, and a
+        // 1px control has no corners to speak of anyway.
+        if (r.Width < 2 || r.Height < 2)
+        {
+            var square = new GraphicsPath();
+            square.AddRectangle(new Rectangle(
+                r.X, r.Y, Math.Max(1, r.Width), Math.Max(1, r.Height)));
+            return square;
+        }
+
+        // The diameter can never exceed the shorter side, or opposite arcs
+        // overlap and the path folds in on itself.
+        int d = Math.Min(Math.Max(2, radius * 2), Math.Min(r.Width, r.Height));
+        var path = new GraphicsPath();
+        path.AddArc(r.X, r.Y, d, d, 180, 90);
+        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+}
+
+/// <summary>
 /// Compact title-bar close (×). Soft circle on hover — no system red chrome.
 /// </summary>
 internal sealed class IconCloseButton : Control
@@ -70,7 +109,7 @@ internal sealed class IconCloseButton : Control
         {
             // Soft neutral disc — not system-red.
             Color fill = _pressed ? Theme.BorderSoft : Theme.BgHover;
-            using var path = RoundRect(bounds, bounds.Height / 2);
+            using var path = Shapes.Rounded(bounds, bounds.Height / 2);
             using var brush = new SolidBrush(fill);
             g.FillPath(brush, path);
         }
@@ -87,17 +126,6 @@ internal sealed class IconCloseButton : Control
         g.DrawLine(pen, Width - m - 1, m, m, Height - m - 1);
     }
 
-    private static GraphicsPath RoundRect(Rectangle r, int radius)
-    {
-        int d = Math.Max(2, Math.Min(radius * 2, Math.Min(r.Width, r.Height)));
-        var p = new GraphicsPath();
-        p.AddArc(r.X, r.Y, d, d, 180, 90);
-        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-        p.CloseFigure();
-        return p;
-    }
 }
 
 /// <summary>
@@ -717,11 +745,17 @@ internal sealed class ThemedNumericUpDown : NumericUpDown
     protected override void OnLayout(LayoutEventArgs e)
     {
         base.OnLayout(e);
-        // Keep the text clear of the painted arrows.
+
+        // Inset the hosted edit box on every side. The border painted in
+        // OnPaint sits at the control's own edge, and the edit box covered it —
+        // invisible in a light theme, where its fill matches the panel behind
+        // it, so the field read as loose text with no boundary at all.
         if (Controls.Count > 1 && Controls[1] is Control edit)
         {
+            int inset = Math.Max(2, (int)(2 * ScaleF));
             var area = ButtonArea;
-            edit.SetBounds(edit.Left, edit.Top, Math.Max(4, area.Left - edit.Left - 2), edit.Height);
+            int width = Math.Max(4, area.Left - inset - inset);
+            edit.SetBounds(inset, inset, width, Math.Max(4, Height - inset * 2));
         }
     }
 

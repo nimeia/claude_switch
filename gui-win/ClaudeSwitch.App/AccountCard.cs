@@ -1027,25 +1027,8 @@ internal sealed class AccountCard : Control
             g.FillEllipse(brush, cx, cy + i * pitch, dot, dot);
     }
 
-    private static GraphicsPath RoundRect(Rectangle r, int radius)
-    {
-        // Guard against zero/negative rects (can throw in AddArc).
-        if (r.Width < 2 || r.Height < 2)
-        {
-            var empty = new GraphicsPath();
-            empty.AddRectangle(new Rectangle(
-                r.X, r.Y, Math.Max(1, r.Width), Math.Max(1, r.Height)));
-            return empty;
-        }
-        int d = Math.Min(Math.Max(2, radius * 2), Math.Min(r.Width, r.Height));
-        var path = new GraphicsPath();
-        path.AddArc(r.X, r.Y, d, d, 180, 90);
-        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
-    }
+    /// <summary>Local name for the shared shape; this file draws a dozen of them.</summary>
+    private static GraphicsPath RoundRect(Rectangle r, int radius) => Shapes.Rounded(r, radius);
 
     protected override void Dispose(bool disposing)
     {
