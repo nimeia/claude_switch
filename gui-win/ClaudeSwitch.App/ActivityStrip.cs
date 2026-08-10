@@ -152,6 +152,9 @@ internal sealed class ActivityStrip : Panel
     /// Populate from an `overview_stats` payload. Safe to call with nothing
     /// worth showing — the strip then stays collapsed.
     /// </summary>
+    /// <summary>Whether real figures have landed, for the layout probe.</summary>
+    internal bool LoadedForProbe => _loaded;
+
     public void Apply(JsonNode? stats)
     {
         _loaded = true;

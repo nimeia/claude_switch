@@ -214,6 +214,46 @@ public class TaskBoardTests : IDisposable
     }
 
     [Fact]
+    public void The_total_is_every_task_not_the_page_on_screen()
+    {
+        // The toolbar quotes this. It counted only live runs while the band
+        // counted everything, so one window stated two totals for "tasks".
+        using var board = new TaskBoard();
+        var many = Many(TaskBoard.PageSize + 3);
+
+        board.SetExpandedForTest(false);
+        board.Show(many);
+        Assert.Equal(TaskBoard.MaxRows, board.RowCount);
+        Assert.Equal(many.Count, board.TaskCount);
+
+        board.SetExpandedForTest(true);
+        Assert.Equal(TaskBoard.PageSize, board.RowCount);
+        Assert.Equal(many.Count, board.TaskCount);
+
+        board.Show([]);
+        Assert.Equal(0, board.TaskCount);
+    }
+
+    [Fact]
+    public void A_row_and_its_actions_are_reachable_by_keyboard()
+    {
+        // The account cards next to this one have been keyboard-reachable all
+        // along; a painted row that is mouse-only is a step down from the app's
+        // own standard, not merely an accessibility nicety.
+        using var board = new TaskBoard();
+        board.Show([Entry(TaskState.NeedsAttention, "t", () => { })]);
+
+        var rows = TaskRow.Descendants(board).OfType<TaskRow>().ToList();
+        Assert.Single(rows);
+        Assert.True(rows[0].TabStop);
+
+        var pills = TaskRow.Descendants(board).OfType<PillButton>().ToList();
+        Assert.NotEmpty(pills);
+        Assert.All(pills, p => Assert.True(p.TabStop));
+        Assert.All(pills, p => Assert.False(string.IsNullOrEmpty(p.AccessibleName)));
+    }
+
+    [Fact]
     public void Urgent_states_sort_above_healthy_ones()
     {
         // The top of the band must be what wants a person, not whatever was

@@ -497,12 +497,9 @@ sealed class MainForm : Form
         btnAdd.Click += (_, _) => DoAdd();
         _btnProjects.Click += (_, _) => ShowProjectsWindow();
         _btnOverview.Click += (_, _) => ShowOverviewWindow();
-        // Keep the label honest about how many agents are working right now.
-        void OnSupervisedWorkChanged()
-        {
-            UpdateRunsButton();
-            UpdateTaskBoard();
-        }
+        // Refreshing the band refreshes the toolbar count with it, since the
+        // count is the band's own total.
+        void OnSupervisedWorkChanged() => UpdateTaskBoard();
 
         BackgroundRuns.Changed += OnSupervisedWorkChanged;
         _stalled.Changed += OnSupervisedWorkChanged;
@@ -671,7 +668,7 @@ sealed class MainForm : Form
         _thrLabel = FieldLabel(Loc.T("settings.autoswitch.trigger"));
         _thrWindow = FieldValue(Loc.T("settings.autoswitch.window"));
         _thrWindow.Margin = new Padding(0, 6, Theme.Space2, 0);
-        _threshold = new NumericUpDown
+        _threshold = new ThemedNumericUpDown
         {
             Minimum = 50,
             Maximum = 99,
@@ -679,7 +676,6 @@ sealed class MainForm : Form
             Width = ThresholdBoxW,
             Height = Theme.ControlHeight - 2,
             Margin = new Padding(0, 4, Theme.Space1, 0),
-            BorderStyle = BorderStyle.FixedSingle,
             Font = Theme.FontBody,
             TextAlign = HorizontalAlignment.Center,
         };
@@ -726,7 +722,7 @@ sealed class MainForm : Form
 
         _warmupEnabled = OptionBox(Loc.T("settings.warmup"), wide: true);
         _workHoursLabel = FieldLabel(Loc.T("settings.warmup.hours"));
-        _workStartHour = new NumericUpDown
+        _workStartHour = new ThemedNumericUpDown
         {
             Minimum = 0,
             Maximum = 22,
@@ -734,7 +730,6 @@ sealed class MainForm : Form
             Width = HourBoxW,
             Height = Theme.ControlHeight - 2,
             Margin = new Padding(0, 4, Theme.Space1, 0),
-            BorderStyle = BorderStyle.FixedSingle,
             Font = Theme.FontBody,
             TextAlign = HorizontalAlignment.Center,
         };
@@ -746,7 +741,7 @@ sealed class MainForm : Form
             TextAlign = ContentAlignment.MiddleLeft,
             Font = Theme.FontBody,
         };
-        _workEndHour = new NumericUpDown
+        _workEndHour = new ThemedNumericUpDown
         {
             Minimum = 1,
             Maximum = 23,
@@ -754,7 +749,6 @@ sealed class MainForm : Form
             Width = HourBoxW,
             Height = Theme.ControlHeight - 2,
             Margin = new Padding(0, 4, Theme.Space4, 0),
-            BorderStyle = BorderStyle.FixedSingle,
             Font = Theme.FontBody,
             TextAlign = HorizontalAlignment.Center,
         };
@@ -1097,7 +1091,6 @@ sealed class MainForm : Form
         Reload();
         LoadActivityStripAsync();
         UpdateSwitchEnabled();
-        UpdateRunsButton();
         UpdateTaskBoard();
         NoticeResumableRuns();
         _pollTimer.Start();
@@ -1167,6 +1160,24 @@ sealed class MainForm : Form
                 Theme.Toggle();
                 Application.DoEvents();
                 return $"theme flipped to {Theme.Mode}";
+            });
+        }
+        // Answers "did the strip paint from cache, and if not why" from inside
+        // the real process, which is the only place the real native engine is.
+        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_PEEK") == "1")
+        {
+            LayoutProbe.ExtraChecks.Add(() =>
+            {
+                try
+                {
+                    var v = _engine.Call("overview_peek");
+                    return $"overview_peek found={v["found"]} stale={v["stale"]} "
+                        + $"statsNull={v["stats"] is null} strip_loaded={_activityStrip.LoadedForProbe}";
+                }
+                catch (Exception ex)
+                {
+                    return $"overview_peek THREW {ex.GetType().Name}: {ex.Message}";
+                }
             });
         }
         if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_BOARD") == "1")
@@ -2206,7 +2217,7 @@ sealed class MainForm : Form
                 {
                     _baseStatus = Loc.T("stalled.status.resumed", started);
                     ComposeStatusLine();
-                    UpdateRunsButton();
+                    UpdateTaskBoard();
                 });
             }
             catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
@@ -2237,7 +2248,7 @@ sealed class MainForm : Form
                     ? Loc.T("stalled.notice.resumed.single", kind)
                     : Loc.T("stalled.notice.failed.single", detail ?? kind);
                 _tray.ShowBalloonTip(8000);
-                UpdateRunsButton();
+                UpdateTaskBoard();
             });
         }
         catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
@@ -2272,12 +2283,13 @@ sealed class MainForm : Form
                 BeginInvoke(UpdateRunsButton);
                 return;
             }
-            // Sessions a takeover could not rescue count too: they are the ones
-            // that need a person, and the dropdown is where they live.
-            int active = BackgroundRuns.ActiveCount + _stalled.Failures.Count;
-            _btnRuns.Text = active == 0
+            // The same total the task band shows, not a subset of it. Counting
+            // only live runs here while the band counted everything put two
+            // different figures for "tasks" in one window.
+            int total = _taskBoard?.TaskCount ?? 0;
+            _btnRuns.Text = total == 0
                 ? Loc.T("toolbar.runs")
-                : Loc.T("toolbar.runs.active", active);
+                : Loc.T("toolbar.runs.active", total);
         }
         catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
         {
@@ -2324,7 +2336,7 @@ sealed class MainForm : Form
                     // and the answer is in the window this opens.
                     blocked ? Loc.T("board.action.continue") : Loc.T("board.action.view"),
                     Stop: () => captured.Cancel(),
-                    OpenFolder: () => OpenFolder(captured.Cwd)));
+                    OpenFolder: FolderAction(captured.Cwd)));
             }
 
             foreach (var failure in _stalled.Failures)
@@ -2341,7 +2353,7 @@ sealed class MainForm : Form
                     // Dismissing drops the warning, not the session: the
                     // transcript stays where it is and the terminal is untouched.
                     Ignore: () => _stalled.Forget(record.SessionId),
-                    OpenFolder: () => OpenFolder(record.Cwd),
+                    OpenFolder: FolderAction(record.Cwd),
                     Note: failure.Detail));
             }
 
@@ -2357,7 +2369,7 @@ sealed class MainForm : Form
                     () => OpenAgentRun(captured)?.Show(this),
                     Loc.T("board.action.continue"),
                     Ignore: () => ForgetRun(captured.Id),
-                    OpenFolder: () => OpenFolder(captured.Cwd)));
+                    OpenFolder: FolderAction(captured.Cwd)));
             }
 
             // Most urgent first, so the top of the band is what actually wants a
@@ -2367,6 +2379,10 @@ sealed class MainForm : Form
             _taskBoard.Show(entries);
             _taskBoard.Visible = entries.Count > 0;
             ApplyBandHeights();
+            // The toolbar quotes the band's total, so it is refreshed from here
+            // rather than by each caller — one of them would eventually forget,
+            // and the window would state two totals again.
+            UpdateRunsButton();
         }
         catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
         {
@@ -2408,11 +2424,24 @@ sealed class MainForm : Form
     private static string Since(long epochMs) =>
         Elapsed(DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeMilliseconds(epochMs));
 
+    /// <summary>
+    /// An "open folder" action, or null when there is no folder to open.
+    /// </summary>
+    /// <remarks>
+    /// A row that says <i>working directory is gone</i> used to offer the button
+    /// anyway, and clicking it produced a dialog restating what the row already
+    /// said. Withholding the action is the honest form of that message.
+    /// </remarks>
+    private Action? FolderAction(string path) =>
+        Directory.Exists(path) ? () => OpenFolder(path) : null;
+
     /// <summary>Show a task's working directory in Explorer.</summary>
     private void OpenFolder(string path)
     {
         if (!Directory.Exists(path))
         {
+            // Still guarded: the directory can vanish between the board being
+            // built and the button being clicked.
             MessageBox.Show(
                 this,
                 Loc.T("acp.err.workDir", path),
@@ -2445,7 +2474,6 @@ sealed class MainForm : Form
     private void ForgetRun(string id)
     {
         _agentRuns.Remove(id);
-        UpdateRunsButton();
         UpdateTaskBoard();
     }
 
@@ -2558,7 +2586,7 @@ sealed class MainForm : Form
             AccountLabelOrUnknown(record.AccountNumber));
         _stalled.Forget(record.SessionId);
         window.Show(this);
-        UpdateRunsButton();
+        UpdateTaskBoard();
     }
 
     /// <summary>First line of a prompt, bounded for a menu row.</summary>
@@ -2602,10 +2630,10 @@ sealed class MainForm : Form
             : Loc.T("acp.runs.notice.several", resumable.Count);
         _tray.ShowBalloonTip(8000);
 
-        _baseStatus = resumable.Count == 1
-            ? Loc.T("acp.runs.left.single")
-            : Loc.T("acp.runs.left.several", resumable.Count);
-        ComposeStatusLine();
+        // No status-line copy of the count. The task band is directly above and
+        // says it with more context; a second figure in the status bar counted a
+        // different subset, so the window stated two totals for the same thing
+        // and pointed at the weaker surface to resolve them.
     }
 
     private ContextMenuStrip BuildTrayMenu()
@@ -2839,19 +2867,56 @@ sealed class MainForm : Form
     /// thread. The native engine serialises calls behind its own mutex, so a poll
     /// tick during the scan waits rather than racing.
     /// </remarks>
+    /// <summary>
+    /// Fill the activity strip: the stored figures at once, then the fresh ones.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The scan behind this reads every transcript byte on the machine — over a
+    /// minute on a working developer's history. Worse, the cache it fills is
+    /// keyed on total bytes and newest mtime, and this app's users are by
+    /// definition running Claude Code, which appends continuously: the key
+    /// changes between launches, so the cache missed nearly every time and the
+    /// strip sat in its loading state indefinitely.
+    /// </para>
+    /// <para>
+    /// So the stored answer is painted first, however old, and the rescan
+    /// replaces it when it lands. A figure from the last launch, visible now,
+    /// is worth more than an exact one that never arrives.
+    /// </para>
+    /// </remarks>
     private void LoadActivityStripAsync()
     {
         _ = Task.Run(() =>
         {
-            JsonNode? stats = null;
-            // Probe hook: the scan usually finishes before the window finishes
-            // opening, so the loading state needs forcing to be reviewed.
+            bool needsRefresh = true;
+            try
+            {
+                var peek = _engine.Call("overview_peek");
+                if (peek["found"]?.GetValue<bool>() == true)
+                {
+                    ApplyActivityStrip(peek["stats"]);
+                    needsRefresh = peek["stale"]?.GetValue<bool>() != false;
+                }
+            }
+            catch (Exception ex) when (ex is EngineException or ObjectDisposedException)
+            {
+                // An engine without the method, or one on its way out: fall
+                // through to the full scan.
+            }
+
+            if (!needsRefresh) return;
+
+            // Probe hook: the peek makes the loading state almost unreachable,
+            // so it needs forcing to be reviewed.
             if (int.TryParse(
                     Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_STRIP_DELAY_MS"),
                     out var delay) && delay > 0)
             {
                 Thread.Sleep(delay);
             }
+
+            JsonNode? stats = null;
             try
             {
                 stats = _engine.Call("overview_stats");
@@ -2860,19 +2925,46 @@ sealed class MainForm : Form
             {
                 // No transcripts, or an unreadable store: the strip stays hidden.
             }
-            if (IsDisposed || !IsHandleCreated) return;
-            try
-            {
-                BeginInvoke(new Action(() =>
-                {
-                    if (!IsDisposed) _activityStrip.Apply(stats);
-                }));
-            }
-            catch (ObjectDisposedException)
-            {
-                // Window closed while the scan was running.
-            }
+            ApplyActivityStrip(stats);
         });
+    }
+
+    private void ApplyActivityStrip(JsonNode? stats)
+    {
+        if (IsDisposed) return;
+
+        // The cache peek answers in milliseconds — before the window has a
+        // handle, since this starts in the constructor. Dropping the result
+        // there left the strip loading forever, because a fresh cache also
+        // means no rescan follows to try again.
+        if (!IsHandleCreated)
+        {
+            void OnReady(object? sender, EventArgs e)
+            {
+                HandleCreated -= OnReady;
+                ApplyActivityStrip(stats);
+            }
+            HandleCreated += OnReady;
+            // The handle can appear between the test and the subscription.
+            if (IsHandleCreated)
+            {
+                HandleCreated -= OnReady;
+                ApplyActivityStrip(stats);
+            }
+            return;
+        }
+
+        try
+        {
+            BeginInvoke(new Action(() =>
+            {
+                if (!IsDisposed) _activityStrip.Apply(stats);
+            }));
+        }
+        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
+        {
+            // Window closed while the scan was running.
+        }
     }
 
     /// <summary>

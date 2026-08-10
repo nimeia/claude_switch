@@ -925,6 +925,37 @@ pub fn overview_key_in(envs: &[PathEnv]) -> String {
     format!("v2:{}:{files}:{bytes}:{newest}", envs.len())
 }
 
+/// A cached overview and whether it still describes the transcripts on disk.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewSnapshot {
+    pub stats: OverviewStats,
+    /// The transcripts have changed since this was written.
+    pub stale: bool,
+}
+
+/// Read the stored overview without scanning anything.
+///
+/// The key is computed from file metadata alone, so freshness costs a `stat`
+/// per transcript — microseconds — while the scan behind it reads every byte on
+/// the machine and takes over a minute on a working developer's history.
+///
+/// Answering with a stale overview is the point. The key includes total bytes
+/// and the newest mtime, and this app's users are by definition running Claude
+/// Code, which appends to a transcript continuously: the cache therefore misses
+/// on essentially every launch. Waiting for a fresh answer meant the strip that
+/// shows it never finished loading. A figure from a minute ago, on screen now,
+/// beats a perfect one that never arrives.
+#[must_use]
+pub fn peek_overview_in(envs: &[PathEnv], cache_dir: &Path) -> Option<OverviewSnapshot> {
+    let text = std::fs::read_to_string(cache_dir.join("overview.json")).ok()?;
+    let cached: CachedOverview = serde_json::from_str(&text).ok()?;
+    Some(OverviewSnapshot {
+        stale: cached.key != overview_key_in(envs),
+        stats: cached.stats,
+    })
+}
+
 /// Overview served from `<cache_dir>/overview.json` when the transcripts have
 /// not changed since it was written.
 ///

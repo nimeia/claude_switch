@@ -1970,6 +1970,24 @@ impl Engine {
                 )?;
                 Ok(serde_json::to_value(o).map_err(|e| Error::Internal(e.to_string()))?)
             }
+            // The stored overview, whatever its age, without scanning. Lets a
+            // caller paint immediately and refresh behind itself, instead of
+            // showing a loading state for the minute the full scan takes.
+            "overview_peek" => {
+                let peek = crate::projects::peek_overview_in(
+                    &self.scan_envs(),
+                    &self.paths.cache_dir,
+                );
+                Ok(match peek {
+                    Some(p) => json!({
+                        "found": true,
+                        "stale": p.stale,
+                        "stats": serde_json::to_value(p.stats)
+                            .map_err(|e| Error::Internal(e.to_string()))?,
+                    }),
+                    None => json!({ "found": false, "stale": true }),
+                })
+            }
             "project_stats" => {
                 let dirs = transcript_dirs_param(params)?;
                 let stats = crate::projects::scan_stats_in(&dirs)?;
@@ -2589,6 +2607,45 @@ mod tests {
         assert!(eng
             .call_json("stalled_scan", &json!({ "criteria": { "idleMinutes": "soon" } }))
             .is_err());
+    }
+
+    #[test]
+    fn overview_peek_answers_from_the_cache_and_admits_when_it_is_stale() {
+        // The strip's whole problem: the cache key moves whenever a transcript
+        // grows, which for this app's users is continuously. Peeking has to
+        // return the old figures anyway, flagged, rather than nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+
+        let projects = eng.paths.claude_config_home.join("projects").join("D--work");
+        std::fs::create_dir_all(&projects).unwrap();
+        let line = json!({
+            "type": "user", "cwd": "D:\\work",
+            "timestamp": "2026-01-02T03:04:05.000Z",
+            "message": { "role": "user", "content": "hi" }
+        });
+        std::fs::write(projects.join("s1.jsonl"), format!("{line}\n")).unwrap();
+
+        // Nothing cached yet.
+        let v = eng.call_json("overview_peek", &json!({})).unwrap();
+        assert_eq!(v["found"], false);
+        assert_eq!(v["stale"], true, "with no cache there is nothing to trust");
+
+        // A full scan writes the cache.
+        eng.call_json("overview_stats", &json!({})).unwrap();
+
+        let v = eng.call_json("overview_peek", &json!({})).unwrap();
+        assert_eq!(v["found"], true);
+        assert_eq!(v["stale"], false);
+        assert!(v["stats"].is_object(), "the figures come back, not just a flag");
+
+        // Growing a transcript is what a running Claude Code does every turn.
+        std::fs::write(projects.join("s2.jsonl"), format!("{line}\n")).unwrap();
+
+        let v = eng.call_json("overview_peek", &json!({})).unwrap();
+        assert_eq!(v["found"], true, "stale is still worth showing");
+        assert_eq!(v["stale"], true);
+        assert!(v["stats"].is_object());
     }
 
     #[test]

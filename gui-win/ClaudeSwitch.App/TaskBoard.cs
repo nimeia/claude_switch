@@ -32,9 +32,48 @@ internal sealed class TaskRow : Panel
             ControlStyles.UserPaint
                 | ControlStyles.AllPaintingInWmPaint
                 | ControlStyles.OptimizedDoubleBuffer
-                | ControlStyles.ResizeRedraw,
+                | ControlStyles.ResizeRedraw
+                | ControlStyles.Selectable,
             true);
         Cursor = Cursors.Hand;
+        // The account cards next to this one are reachable by keyboard; a row
+        // that can only be clicked is a step down from the app's own standard.
+        TabStop = true;
+        AccessibleRole = AccessibleRole.ListItem;
+        AccessibleName = entry.Title;
+    }
+
+    protected override bool IsInputKey(Keys keyData) =>
+        keyData is Keys.Enter or Keys.Space || base.IsInputKey(keyData);
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        if (e.KeyCode is Keys.Enter or Keys.Space)
+        {
+            _entry.Primary();
+            e.Handled = true;
+        }
+        base.OnKeyDown(e);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        // Clicking a row should also focus it, or tabbing afterwards resumes
+        // from wherever the keyboard happened to be.
+        Focus();
+        base.OnMouseDown(e);
+    }
+
+    protected override void OnGotFocus(EventArgs e)
+    {
+        Invalidate();
+        base.OnGotFocus(e);
+    }
+
+    protected override void OnLostFocus(EventArgs e)
+    {
+        Invalidate();
+        base.OnLostFocus(e);
     }
 
     private float Scale => DeviceDpi / 96f;
@@ -47,10 +86,34 @@ internal sealed class TaskRow : Panel
         base.OnMouseEnter(e);
     }
 
+    /// <summary>
+    /// Leave only when the pointer has really left the row.
+    /// </summary>
+    /// <remarks>
+    /// Moving onto a child control raises MouseLeave on its parent, so aiming
+    /// at one of the row's own buttons dropped the highlight at the exact
+    /// moment the user was reaching for it. The account cards never hit this
+    /// because they are painted whole, with no children to cross into.
+    /// </remarks>
     protected override void OnMouseLeave(EventArgs e)
     {
-        SetHover(false);
+        SyncHoverFromPointer();
         base.OnMouseLeave(e);
+    }
+
+    /// <summary>
+    /// Set the highlight from where the pointer actually is.
+    /// </summary>
+    /// <remarks>
+    /// The children call this on their own enter and leave: once the pointer
+    /// crosses into a button the row has already had its MouseLeave, so it
+    /// never gets a second one when the pointer finally leaves for good and
+    /// would otherwise stay lit.
+    /// </remarks>
+    public void SyncHoverFromPointer()
+    {
+        if (IsDisposed) return;
+        SetHover(ClientRectangle.Contains(PointToClient(MousePosition)));
     }
 
     /// <summary>
@@ -74,7 +137,8 @@ internal sealed class TaskRow : Panel
 
     private Color SurfaceColor => _hover ? Theme.BgHover : Theme.BgSurface;
 
-    private static IEnumerable<Control> Descendants(Control root)
+    /// <summary>Every control under <paramref name="root"/>, at any depth.</summary>
+    internal static IEnumerable<Control> Descendants(Control root)
     {
         foreach (Control child in root.Controls)
         {
@@ -120,8 +184,13 @@ internal sealed class TaskRow : Panel
             g.Clip = saved;
         }
 
+        // Focus has to be visible or the keyboard path is only theoretically
+        // there: a thicker border in the selection colour, matching how the
+        // account cards mark the row that has focus.
         using (var path = Rounded(bounds, radius))
-        using (var pen = new Pen(_hover ? Theme.Border : Theme.BorderSoft))
+        using (var pen = Focused
+            ? new Pen(Theme.SelectionBorder, 2f)
+            : new Pen(_hover ? Theme.Border : Theme.BorderSoft))
             g.DrawPath(pen, path);
 
         int left = Sc(AccentWidth) + Sc(12);
@@ -215,8 +284,60 @@ internal sealed class PillButton : Control
         // A bare Control starts 0×0, and a flow layout measuring that lays out
         // nothing at all — the buttons were invisible until this was set.
         AutoSize = true;
+        // A Control is not a Button: focus, Enter/Space and a focus ring are all
+        // things it has to be given. Without them these were mouse-only.
+        TabStop = true;
+        AccessibleRole = AccessibleRole.PushButton;
         Text = text;
+        AccessibleName = text;
         Size = GetPreferredSize(Size.Empty);
+    }
+
+    protected override bool IsInputKey(Keys keyData) =>
+        keyData is Keys.Enter or Keys.Space || base.IsInputKey(keyData);
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        if (e.KeyCode is Keys.Enter or Keys.Space)
+        {
+            _down = true;
+            Invalidate();
+            e.Handled = true;
+        }
+        base.OnKeyDown(e);
+    }
+
+    protected override void OnKeyUp(KeyEventArgs e)
+    {
+        if (e.KeyCode is Keys.Enter or Keys.Space)
+        {
+            _down = false;
+            Invalidate();
+            OnClick(EventArgs.Empty);
+            e.Handled = true;
+        }
+        base.OnKeyUp(e);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        Focus();
+        _down = true;
+        Invalidate();
+        base.OnMouseDown(e);
+    }
+
+    protected override void OnGotFocus(EventArgs e)
+    {
+        Invalidate();
+        base.OnGotFocus(e);
+    }
+
+    protected override void OnLostFocus(EventArgs e)
+    {
+        _down = false;
+        Invalidate();
+        base.OnLostFocus(e);
     }
 
     private float Scale => DeviceDpi / 96f;
@@ -260,13 +381,6 @@ internal sealed class PillButton : Control
         base.OnMouseLeave(e);
     }
 
-    protected override void OnMouseDown(MouseEventArgs e)
-    {
-        _down = true;
-        Invalidate();
-        base.OnMouseDown(e);
-    }
-
     protected override void OnMouseUp(MouseEventArgs e)
     {
         _down = false;
@@ -293,7 +407,9 @@ internal sealed class PillButton : Control
             g.FillPath(brush, path);
         }
 
-        using (var pen = new Pen(Emphasis || _hover ? Theme.Primary : Theme.BorderSoft))
+        using (var pen = Focused
+            ? new Pen(Theme.SelectionBorder, 2f)
+            : new Pen(Emphasis || _hover ? Theme.Primary : Theme.BorderSoft))
             g.DrawPath(pen, path);
 
         TextRenderer.DrawText(
@@ -499,6 +615,16 @@ internal sealed class TaskBoard : Panel
 
     /// <summary>Rows currently displayed, for measuring the band.</summary>
     public int RowCount { get; private set; }
+
+    /// <summary>
+    /// Every task the band knows about, shown or not.
+    /// </summary>
+    /// <remarks>
+    /// The one figure the window quotes. Anywhere else that wants to say how
+    /// many tasks there are reads this, so a second surface cannot invent a
+    /// different total by counting a different subset.
+    /// </remarks>
+    public int TaskCount => _entries.Count;
 
     /// <summary>
     /// Height this band needs, in design px before DPI scaling.
@@ -853,6 +979,14 @@ internal sealed class TaskBoard : Panel
 
         row.Controls.Add(actions);
         row.RefreshSurfaces();
+
+        // Children report the pointer back, so the row's highlight tracks the
+        // whole row rather than dropping the moment a button is aimed at.
+        foreach (var child in TaskRow.Descendants(actions).Prepend<Control>(actions))
+        {
+            child.MouseEnter += (_, _) => row.SyncHoverFromPointer();
+            child.MouseLeave += (_, _) => row.SyncHoverFromPointer();
+        }
         // The painted row needs to know how much room the buttons take so its
         // text ellipsises before running under them.
         row.Layout += (_, _) => PlaceActions(row, actions);

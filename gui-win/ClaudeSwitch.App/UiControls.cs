@@ -655,3 +655,163 @@ internal static class NativeScrollbars
         foreach (Control child in control.Controls) Apply(child);
     }
 }
+
+/// <summary>
+/// A spin box whose buttons follow the app theme.
+/// </summary>
+/// <remarks>
+/// <see cref="NumericUpDown"/> hosts a native up-down control, so its two
+/// arrows are drawn by the OS from the system visual style and stay bright
+/// white in a dark window — the loudest thing on the settings row. The control
+/// gives no way to recolour them, so the buttons are hidden and painted here,
+/// over the same edit box the base class already manages.
+/// </remarks>
+internal sealed class ThemedNumericUpDown : NumericUpDown
+{
+    /// <summary>Design-px width reserved for the two arrows.</summary>
+    private const int ButtonWidth = 17;
+
+    private bool _upHot;
+    private bool _downHot;
+
+    public ThemedNumericUpDown()
+    {
+        BorderStyle = BorderStyle.None;
+        TextAlign = HorizontalAlignment.Center;
+        // The base class positions its native buttons on top of everything; the
+        // only reliable way to be rid of them is to stop them being shown.
+        Controls[0].Visible = false;
+        Theme.Changed += OnThemeChanged;
+        ApplyTheme();
+    }
+
+    private void OnThemeChanged(object? sender, EventArgs e)
+    {
+        if (IsDisposed) return;
+        ApplyTheme();
+        Invalidate(true);
+    }
+
+    private void ApplyTheme()
+    {
+        BackColor = Enabled ? Theme.BgSurface : Theme.BgDisabled;
+        ForeColor = Enabled ? Theme.TextPrimary : Theme.TextDisabled;
+        foreach (Control c in Controls)
+        {
+            c.BackColor = BackColor;
+            c.ForeColor = ForeColor;
+        }
+    }
+
+    protected override void OnEnabledChanged(EventArgs e)
+    {
+        ApplyTheme();
+        base.OnEnabledChanged(e);
+    }
+
+    private float ScaleF => DeviceDpi / 96f;
+
+    private Rectangle ButtonArea =>
+        new(Width - (int)(ButtonWidth * ScaleF) - 1, 1, (int)(ButtonWidth * ScaleF), Height - 2);
+
+    protected override void OnLayout(LayoutEventArgs e)
+    {
+        base.OnLayout(e);
+        // Keep the text clear of the painted arrows.
+        if (Controls.Count > 1 && Controls[1] is Control edit)
+        {
+            var area = ButtonArea;
+            edit.SetBounds(edit.Left, edit.Top, Math.Max(4, area.Left - edit.Left - 2), edit.Height);
+        }
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        var area = ButtonArea;
+        bool up = area.Contains(e.Location) && e.Y < area.Top + area.Height / 2;
+        bool down = area.Contains(e.Location) && !up;
+        if (up != _upHot || down != _downHot)
+        {
+            _upHot = up;
+            _downHot = down;
+            Invalidate();
+        }
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _upHot = _downHot = false;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        var area = ButtonArea;
+        if (area.Contains(e.Location))
+        {
+            if (e.Y < area.Top + area.Height / 2) UpButton();
+            else DownButton();
+            Invalidate();
+            return;
+        }
+        base.OnMouseDown(e);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        var g = e.Graphics;
+        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+        var box = new Rectangle(0, 0, Width - 1, Height - 1);
+        using (var fill = new SolidBrush(BackColor))
+            g.FillRectangle(fill, ButtonArea);
+        using (var border = new Pen(Enabled ? Theme.Border : Theme.BorderSoft))
+            g.DrawRectangle(border, box);
+
+        var area = ButtonArea;
+        DrawArrow(g, new Rectangle(area.X, area.Y, area.Width, area.Height / 2), up: true, hot: _upHot);
+        DrawArrow(
+            g,
+            new Rectangle(area.X, area.Y + area.Height / 2, area.Width, area.Height / 2),
+            up: false,
+            hot: _downHot);
+    }
+
+    private void DrawArrow(Graphics g, Rectangle r, bool up, bool hot)
+    {
+        if (hot && Enabled)
+        {
+            using var glow = new SolidBrush(Theme.BgHover);
+            g.FillRectangle(glow, r);
+        }
+        float w = Math.Max(3f, r.Width * 0.30f);
+        float cx = r.X + r.Width / 2f;
+        float cy = r.Y + r.Height / 2f;
+        float h = w * 0.55f;
+        var points = up
+            ? new[]
+            {
+                new PointF(cx - w / 2, cy + h / 2),
+                new PointF(cx + w / 2, cy + h / 2),
+                new PointF(cx, cy - h / 2),
+            }
+            : new[]
+            {
+                new PointF(cx - w / 2, cy - h / 2),
+                new PointF(cx + w / 2, cy - h / 2),
+                new PointF(cx, cy + h / 2),
+            };
+        using var brush = new SolidBrush(
+            !Enabled ? Theme.TextDisabled : hot ? Theme.PrimaryDark : Theme.TextSecondary);
+        g.FillPolygon(brush, points);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) Theme.Changed -= OnThemeChanged;
+        base.Dispose(disposing);
+    }
+}
