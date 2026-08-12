@@ -2182,6 +2182,14 @@ impl Engine {
             // Terminals the user opened themselves: a stalled Claude Code keeps
             // running, so only its transcript says whether it is stuck.
             "stalled_scan" => self.stalled_scan(params),
+            // The resume text, so a caller that types it into a terminal rather
+            // than sending it over ACP still uses the one wording. Deliberately
+            // the constant and not the policy's: a policy may carry a message in
+            // any language, and a console's input code page mangles anything
+            // outside ASCII.
+            "continue_message" => Ok(json!({
+                "text": crate::autocontinue::DEFAULT_CONTINUE_MESSAGE,
+            })),
             // `stopReason` alone cannot tell work done from work swallowed; the
             // transcript can. Callers verify a takeover with this.
             "session_tail" => self.session_tail(params),

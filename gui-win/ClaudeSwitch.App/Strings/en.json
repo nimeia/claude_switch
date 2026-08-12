@@ -82,6 +82,7 @@
   "stalled.kind.rateLimit": "usage limit",
   "stalled.noRealReply": "The agent replied but produced no real output — the turn was swallowed.",
   "stalled.notice.failed.several": "{0} stalled sessions could not be resumed. See Runs.",
+  "stalled.notice.nudged": "Nudged the original terminal to continue ({0}); nothing was taken over.",
   "stalled.notice.failed.single": "A stalled session could not be resumed: {0}",
   "stalled.notice.resumed.several": "Resumed {0} stalled sessions ({1}).",
   "stalled.notice.resumed.single": "Resumed a stalled session ({0}).",

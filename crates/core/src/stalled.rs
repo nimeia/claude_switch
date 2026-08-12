@@ -187,6 +187,15 @@ pub struct StalledSession {
     pub reason: StallReason,
     /// The failure text, for a UI that has to explain itself.
     pub last_error: String,
+    /// The Claude Code process still sitting on this session, when one is.
+    ///
+    /// Read from the `sessions/<pid>.json` files Claude Code writes for itself,
+    /// so the mapping is its own claim rather than a guess from window titles.
+    /// A caller that wants to prod the original terminal back to life needs
+    /// this; without it the only option is to take the conversation over in a
+    /// separate agent, which leaves that terminal showing a stale screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
 }
 
 /// Whether an assistant record is one Claude Code synthesised rather than
@@ -359,6 +368,16 @@ pub fn scan_root(
         return out;
     };
 
+    // Which live process owns which session, read once for the whole root.
+    // `live_sessions_for` has already dropped the records whose process is
+    // gone, so a pid that survives here is one worth talking to.
+    let owners: std::collections::HashMap<String, u32> =
+        crate::session::live_sessions_for(&env.claude_config_home())
+            .into_iter()
+            .filter(|s| !s.session_id.is_empty())
+            .map(|s| (s.session_id, s.pid))
+            .collect();
+
     for dir in dirs.flatten() {
         let path = dir.path();
         if !path.is_dir() {
@@ -370,7 +389,8 @@ pub fn scan_root(
         for file in files.flatten() {
             let f = file.path();
             if f.extension().is_some_and(|e| e == "jsonl") {
-                if let Some(found) = inspect(&f, account_number, config_dir, now_ms, criteria) {
+                if let Some(mut found) = inspect(&f, account_number, config_dir, now_ms, criteria) {
+                    found.pid = owners.get(&found.session_id).copied();
                     out.push(found);
                 }
             }
@@ -419,6 +439,8 @@ fn inspect(
         idle_ms: idle,
         reason,
         last_error: message,
+        // Filled in by the caller, which reads the pid map once per root.
+        pid: None,
     })
 }
 

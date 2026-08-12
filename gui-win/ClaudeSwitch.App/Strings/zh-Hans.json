@@ -82,6 +82,7 @@
   "stalled.kind.rateLimit": "用量已达上限",
   "stalled.noRealReply": "代理有响应但没有产生真正的输出——这一轮被吞掉了。",
   "stalled.notice.failed.several": "有 {0} 个停滞的会话无法接管。请查看「运行」。",
+  "stalled.notice.nudged": "已在原终端里继续（{0}），没有接管你的窗口。",
   "stalled.notice.failed.single": "有一个停滞的会话无法接管：{0}",
   "stalled.notice.resumed.several": "已接管 {0} 个停滞的会话（{1}）。",
   "stalled.notice.resumed.single": "已接管一个停滞的会话（{0}）。",

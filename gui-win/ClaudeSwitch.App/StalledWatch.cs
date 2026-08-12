@@ -13,7 +13,9 @@ internal sealed record StalledRecord(
     long ModifiedMs,
     long IdleMs,
     string Reason,
-    string LastError)
+    string LastError,
+    string File = "",
+    int? Pid = null)
 {
     public DateTime ModifiedLocal =>
         DateTimeOffset.FromUnixTimeMilliseconds(ModifiedMs).LocalDateTime;
@@ -31,7 +33,9 @@ internal sealed record StalledRecord(
             n["modifiedMs"]?.GetValue<long>() ?? 0,
             n["idleMs"]?.GetValue<long>() ?? 0,
             n["reason"]?.GetValue<string>() ?? "network",
-            n["lastError"]?.GetValue<string>() ?? "");
+            n["lastError"]?.GetValue<string>() ?? "",
+            n["file"]?.GetValue<string>() ?? "",
+            n["pid"]?.GetValue<int>());
     }
 }
 
@@ -119,6 +123,15 @@ internal sealed class StalledWatch
     /// <summary>A takeover finished. Arguments: the session, and whether it worked.</summary>
     public event Action<StalledRecord, bool, string?>? TakeoverFinished;
 
+    /// <summary>
+    /// The original terminal was woken and carried on by itself.
+    /// </summary>
+    /// <remarks>
+    /// Worth telling apart from a takeover: nothing was moved, the user's own
+    /// window is still the one doing the work, and there is no run to open.
+    /// </remarks>
+    public event Action<StalledRecord>? NudgeSucceeded;
+
     public StalledWatch(
         Engine engine,
         AgentRunStore runs,
@@ -193,8 +206,106 @@ internal sealed class StalledWatch
     }
 
     /// <summary>Start one takeover. False when it could not even be attempted.</summary>
+    /// <summary>
+    /// How long to wait for a nudged terminal to show signs of life.
+    /// </summary>
+    /// <remarks>
+    /// Long enough for the model to start answering, short enough that a
+    /// terminal which ignored the keystrokes does not hold up the takeover that
+    /// would have worked.
+    /// </remarks>
+    private static readonly TimeSpan NudgeWindow = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Prod the terminal the session is already in, and say whether it woke up.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Preferred over a takeover when it works, because the conversation stays
+    /// in the window the user opened: nothing goes stale, and there is no second
+    /// process writing the same transcript.
+    /// </para>
+    /// <para>
+    /// Delivering keystrokes is not success. The console accepts them whether or
+    /// not anything reads them, and a session sitting on a quota wall that has
+    /// not reset will simply fail again. So the transcript is watched: the tail
+    /// was a failure when this session qualified, and anything else — a reply,
+    /// or a turn in progress — means it moved.
+    /// </para>
+    /// </remarks>
+    private bool TryNudge(StalledRecord record)
+    {
+        if (record.Pid is not { } pid) return false;
+
+        // The engine's own English message: the console's input code page is
+        // the user's, not ours, and anything outside ASCII arrives corrupted.
+        var result = TerminalNudge.Send(pid, ContinueText());
+        if (!result.Delivered) return false;
+
+        var deadline = DateTime.UtcNow + NudgeWindow;
+        while (DateTime.UtcNow < deadline)
+        {
+            Thread.Sleep(2000);
+            if (TailState(record.SessionId) is { Length: > 0 } state && state != "failed")
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// The resume wording, from the engine so there is one of it.
+    /// </summary>
+    /// <remarks>
+    /// The localized string is not used here: it is Chinese in a Chinese UI, and
+    /// a console's input code page turns that into one replacement character per
+    /// glyph. The engine's constant is ASCII by construction.
+    /// </remarks>
+    private string ContinueText()
+    {
+        try
+        {
+            if (_engine.Call("continue_message")["text"]?.GetValue<string>() is { Length: > 0 } t)
+            {
+                return t;
+            }
+        }
+        catch (Exception ex) when (ex is EngineException or ObjectDisposedException)
+        {
+            // An engine without the method; the wording below is that constant.
+        }
+        return "Continue from where you left off. Do not repeat work that is already done.";
+    }
+
+    /// <summary>The session's current tail state, or null when it cannot be read.</summary>
+    private string? TailState(string sessionId)
+    {
+        try
+        {
+            var tail = _engine.Call("session_tail", new JsonObject { ["sessionId"] = sessionId });
+            return tail["found"]?.GetValue<bool>() == true
+                ? tail["state"]?.GetValue<string>()
+                : null;
+        }
+        catch (Exception ex) when (ex is EngineException or ObjectDisposedException)
+        {
+            return null;
+        }
+    }
+
     public bool TryResume(StalledRecord record)
     {
+        // First choice: wake the terminal it is already in. Falls through to a
+        // takeover when there is no live process, the keystrokes do not land,
+        // or nothing happens after they do.
+        if (TryNudge(record))
+        {
+            NudgeSucceeded?.Invoke(record);
+            Changed?.Invoke();
+            return true;
+        }
+
         if (!Directory.Exists(record.Cwd))
         {
             // The conversation is fine, but an agent has to be rooted somewhere.

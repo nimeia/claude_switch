@@ -509,11 +509,13 @@ sealed class MainForm : Form
         BackgroundRuns.Changed += OnSupervisedWorkChanged;
         _stalled.Changed += OnSupervisedWorkChanged;
         _stalled.TakeoverFinished += OnTakeoverFinished;
+        _stalled.NudgeSucceeded += OnNudgeSucceeded;
         FormClosed += (_, _) =>
         {
             BackgroundRuns.Changed -= OnSupervisedWorkChanged;
             _stalled.Changed -= OnSupervisedWorkChanged;
             _stalled.TakeoverFinished -= OnTakeoverFinished;
+            _stalled.NudgeSucceeded -= OnNudgeSucceeded;
         };
         _btnTheme.Click += (_, _) =>
         {
@@ -1205,6 +1207,21 @@ sealed class MainForm : Form
                 {
                     return $"overview_peek THREW {ex.GetType().Name}: {ex.Message}";
                 }
+            });
+        }
+        // Types into a nominated pid and reports what the API said. Exercises
+        // the shipping code rather than a script that resembles it — the
+        // interesting failures here are all in the Win32 details.
+        if (int.TryParse(
+                Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_NUDGE_PID"),
+                out var nudgePid) && nudgePid > 0)
+        {
+            LayoutProbe.ExtraChecks.Add(() =>
+            {
+                string text = Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_NUDGE_TEXT")
+                    ?? "Reply with exactly: NUDGE-OK";
+                var r = TerminalNudge.Send(nudgePid, text);
+                return $"nudge pid={nudgePid} outcome={r.Outcome} detail={r.Detail}";
             });
         }
         if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_BOARD") == "1")
@@ -2262,6 +2279,35 @@ sealed class MainForm : Form
     /// which is the entire point of the feature. A modal would be waiting for
     /// them instead of the work being done.
     /// </remarks>
+    /// <summary>
+    /// Say that a terminal was woken rather than taken over.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately worded differently from a takeover: nothing moved, the
+    /// user's own window is still doing the work, and there is no run to open.
+    /// Telling the two apart is the difference between "your terminal carried
+    /// on" and "something else is now driving your conversation".
+    /// </remarks>
+    private void OnNudgeSucceeded(StalledRecord record)
+    {
+        if (IsDisposed || Disposing) return;
+        try
+        {
+            BeginInvoke(() =>
+            {
+                _tray.BalloonTipTitle = Loc.T("stalled.notice.title");
+                _tray.BalloonTipText = Loc.T(
+                    "stalled.notice.nudged", Loc.T($"stalled.kind.{record.Reason}"));
+                _tray.ShowBalloonTip(6000);
+                UpdateTaskBoard();
+            });
+        }
+        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
+        {
+            // Shutting down as the terminal replied.
+        }
+    }
+
     private void OnTakeoverFinished(StalledRecord record, bool ok, string? detail)
     {
         if (IsDisposed || Disposing) return;
