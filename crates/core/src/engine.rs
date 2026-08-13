@@ -1847,12 +1847,22 @@ impl Engine {
             stalled::TailState::Failed { message } => Some(message.clone()),
             _ => None,
         };
+        // The mtime is the only reliable "something was appended" signal: a
+        // nudged terminal that retries into the *same* error leaves the state
+        // reading `failed` exactly as before, and only the clock tells that
+        // apart from keystrokes nobody read.
+        let modified_ms = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| i64::try_from(d.as_millis()).ok());
         Ok(json!({
             "found": true,
             "file": path.to_string_lossy(),
             "state": tail.label(),
             "producedRealReply": tail.produced_real_reply(),
             "message": message,
+            "modifiedMs": modified_ms,
         }))
     }
 
@@ -2759,6 +2769,8 @@ mod tests {
         assert_eq!(v["found"], true);
         assert_eq!(v["state"], "awaitingUser");
         assert_eq!(v["producedRealReply"], true);
+        // The nudge loop's "did anything move" signal must always be present.
+        assert!(v["modifiedMs"].as_i64().unwrap_or(0) > 0);
 
         // The case the protocol reports as `end_turn` regardless.
         let v = eng.call_json("session_tail", &json!({ "sessionId": "swallowed" })).unwrap();

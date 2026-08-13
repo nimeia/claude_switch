@@ -37,6 +37,8 @@ sessions it owns.
 | `gui-win/…/BackgroundRuns.cs` | Runs that outlive their window; journals their progress |
 | `gui-win/…/AgentRunStore.cs` | Read/write model over the engine's journal |
 | `gui-win/…/AgentWindow.cs` | A *view* onto a run — it does not own one |
+| `gui-win/…/StalledWatch.cs` | Finds stalled user terminals; nudges first, takes over when that fails |
+| `gui-win/…/TerminalNudge.cs` | Types a line into another console's input buffer |
 | `tools/acp/probe.mjs` | Raw-protocol probe, for pinning down wire shapes |
 | `tools/acp/kill-adapter-test.ps1` | Fault injection: kill the adapter mid-turn |
 
@@ -229,6 +231,93 @@ All three pass:
   *same* session id, and finishes the work (the test kills the exact pid the
   runner reports, so it cannot pass by accident);
 - denying permission does not spin on retries.
+
+## Stalled terminals: wake first, take over second
+
+A Claude Code the **user** launched cannot be attached to (see the top of this
+doc), but it can still be *prodded*. Before any takeover, `StalledWatch` tries
+to wake the terminal the session is already in — the conversation stays in the
+window the user opened, nothing goes stale, and no second process writes the
+same transcript.
+
+**How the pid is trusted.** The session→pid mapping is Claude Code's own
+`~/.claude/sessions/<pid>.json`. A live pid proves nothing by itself — Windows
+recycles pids quickly and the file survives a crash — so the file's own timing
+evidence is checked against the real process creation time: `procStart` (the
+creation FILETIME Claude Code records) must match within 2s, else `startedAt`
+must not predate the process by more than a minute. A mismatch means the pid
+now belongs to somebody else's console, and the mapping is dropped — without
+this the nudge would type a sentence into an innocent terminal.
+
+**How the line is delivered.** `AttachConsole(pid)` + `CONIN$` +
+`WriteConsoleInputW` — addressed to a process, not aimed at a window, so no
+focus is stolen and the wrong tab cannot receive it. Letters carry a real
+virtual key (`VkKeyScanW`, Shift only — Ctrl/Alt would fire shortcuts).
+Non-ASCII is refused (the console's input code page is the user's and would
+mangle it). The write goes out in 64-event chunks with a bounded retry, so a
+briefly busy reader drains its queue instead of failing the whole line.
+`AttachConsole` is process-wide and is locked; if the recorded pid has no
+console, children then shell parents (`cmd` / `powershell` / `node` / …)
+are tried, never a GUI host (`WindowsTerminal`, `warp`, `explorer`).
+
+A process whose stdin is a **pipe** holds the read end — there is nothing to
+write. Those hosts fall through to a takeover. Warp's **GUI shell prompt**
+is a related miss: stdin is a console nobody is reading (Warp types into the
+PTY from the GUI). A Claude TUI in that window is passthrough and follows
+the OpenConsole path below.
+
+| Host | Topology | Nudge |
+|---|---|---|
+| conhost | `CREATE_NEW_CONSOLE` → reader | works (cooked + raw) |
+| `cmd.exe` | `cmd /d /s /c` → reader | works (the app's own launch wraps Claude in cmd) |
+| Windows Terminal | `wt -w new --` → reader | works |
+| Warp OpenConsole | Warp's own `OpenConsole.exe --headless` | works (Claude TUI / passthrough) |
+| Warp GUI prompt | `warp.exe` → `pwsh` (no OpenConsole) | delivered, not consumed → takeover |
+
+**How success is judged.** Delivered keystrokes are not success — the console
+buffer accepts anything. Claude Code appends a submitted line to its
+transcript the moment it is accepted, so the transcript is the witness
+(`session_tail`, polled every 2s for up to 30s), and its **mtime** is the
+arbiter:
+
+- tail moved to a turn in progress or a reply → **woken**;
+- tail moved and reads `failed` again → the line was taken and the wall is
+  still up: straight to a takeover, no waiting out the window;
+- tail unmoved after 10s → nobody read the line (a transient dialog ate it):
+  **sent again, once**, then the takeover if that too achieves nothing.
+
+**If it stalls again.** A successful nudge only proves the terminal listened,
+not that the wall lifted. The session is marked, and if a later sweep finds it
+stalled again the wall is known to be real: straight to a takeover (whose
+`onRateLimit` policy exists for exactly this) instead of burning another turn
+in the terminal.
+
+### Verified
+
+`gui-win/ClaudeSwitch.App.Tests/TerminalNudgeLiveTests.cs` — opt-in, spawns
+real short-lived consoles:
+
+```sh
+CLAUDE_SWITCH_NUDGE_E2E=1 dotnet test gui-win/ClaudeSwitch.App.Tests --filter "FullyQualifiedName~TerminalNudgeLive"
+# E2E also covers wt and Warp OpenConsole; override individually with:
+#   CLAUDE_SWITCH_NUDGE_WT=1 / CLAUDE_SWITCH_NUDGE_WARP=1
+```
+
+All seven pass on Windows 11 (Claude Code 2.1.225, Warp 0.2026.07.29, WT 1.24):
+
+- delivery to a cooked-mode reader and to a **raw-mode node reader** — the
+  exact input path Claude Code uses — with the full sentence arriving intact;
+- delivery under **cmd**, **Windows Terminal**, and **Warp's OpenConsole**;
+- the whole `TryResume` loop against a real console and a real engine,
+  including a session hosted in cmd: nudge sent, transcript gains the line,
+  `NudgeSucceeded` fires, no takeover is started;
+- a console that accepts input and never reads it is taken over, with the
+  sends bounded at two.
+
+`StalledNudgeTests.cs` pins the judgement calls without a console: the resend
+is exactly one, an unreadable tail is neither success nor failure, a retry
+into the same wall skips the resend, and a session stalled again after a
+successful nudge goes straight to a takeover.
 
 ## Unattended runs
 

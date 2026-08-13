@@ -109,6 +109,19 @@ internal sealed class StalledWatch
     /// <summary>Turns allowed to be swallowed before a session is handed to a human.</summary>
     private const int MaxSwallowedTurns = 2;
 
+    /// <summary>
+    /// Sessions whose terminal was successfully woken once.
+    /// </summary>
+    /// <remarks>
+    /// A nudge that lands only proves the terminal is listening — it says
+    /// nothing about the wall that stalled the session having lifted. When the
+    /// same session shows up stalled again, the wall is real: prodding the
+    /// terminal a second time would only burn another turn against it, so the
+    /// sweep goes straight to a takeover (whose <c>onRateLimit</c> policy exists
+    /// for exactly this).
+    /// </remarks>
+    private readonly HashSet<string> _nudged = [];
+
     private readonly List<TakeoverFailure> _failures = [];
     private readonly object _gate = new();
 
@@ -116,6 +129,16 @@ internal sealed class StalledWatch
     private readonly AgentRunStore _runs;
     private readonly Func<JsonNode, Task<string?>>? _permission;
     private readonly Func<int?, string> _accountLabel;
+
+    /// <summary>The keystroke delivery; <see cref="TerminalNudge.Send"/> in production.</summary>
+    private readonly Func<int, string, NudgeResult> _send;
+
+    /// <summary>The takeover half of a resume; the real thing in production.</summary>
+    private readonly Func<StalledRecord, bool> _takeover;
+
+    private readonly TimeSpan _nudgeWindow;
+    private readonly TimeSpan _resendAfter;
+    private readonly TimeSpan _pollEvery;
 
     /// <summary>Raised when a takeover starts, succeeds, or fails.</summary>
     public event Action? Changed;
@@ -137,11 +160,31 @@ internal sealed class StalledWatch
         AgentRunStore runs,
         Func<int?, string> accountLabel,
         Func<JsonNode, Task<string?>>? permission)
+        : this(engine, runs, accountLabel, permission, null, null, NudgeWindow, ResendAfter, PollEvery)
+    {
+    }
+
+    /// <summary>Constructor with the seams and timings a test drives.</summary>
+    internal StalledWatch(
+        Engine engine,
+        AgentRunStore runs,
+        Func<int?, string> accountLabel,
+        Func<JsonNode, Task<string?>>? permission,
+        Func<int, string, NudgeResult>? send,
+        Func<StalledRecord, bool>? takeover,
+        TimeSpan nudgeWindow,
+        TimeSpan resendAfter,
+        TimeSpan pollEvery)
     {
         _engine = engine;
         _runs = runs;
         _accountLabel = accountLabel;
         _permission = permission;
+        _send = send ?? TerminalNudge.Send;
+        _takeover = takeover ?? StartTakeover;
+        _nudgeWindow = nudgeWindow;
+        _resendAfter = resendAfter;
+        _pollEvery = pollEvery;
     }
 
     /// <summary>Sessions a takeover could not rescue; the user has to look.</summary>
@@ -205,7 +248,6 @@ internal sealed class StalledWatch
         return started;
     }
 
-    /// <summary>Start one takeover. False when it could not even be attempted.</summary>
     /// <summary>
     /// How long to wait for a nudged terminal to show signs of life.
     /// </summary>
@@ -215,6 +257,20 @@ internal sealed class StalledWatch
     /// would have worked.
     /// </remarks>
     private static readonly TimeSpan NudgeWindow = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// When a line nobody has read is sent again.
+    /// </summary>
+    /// <remarks>
+    /// Claude Code appends the submitted line to its transcript the moment it is
+    /// accepted — before any API call. So a tail that has not moved after this
+    /// long means the keystrokes were swallowed (a transient dialog, a redraw),
+    /// not that the turn is slow, and one more send is safe: with the session
+    /// stalled there is no turn in flight the line could queue behind.
+    /// </remarks>
+    private static readonly TimeSpan ResendAfter = TimeSpan.FromSeconds(10);
+
+    private static readonly TimeSpan PollEvery = TimeSpan.FromSeconds(2);
 
     /// <summary>
     /// Prod the terminal the session is already in, and say whether it woke up.
@@ -227,10 +283,14 @@ internal sealed class StalledWatch
     /// </para>
     /// <para>
     /// Delivering keystrokes is not success. The console accepts them whether or
-    /// not anything reads them, and a session sitting on a quota wall that has
-    /// not reset will simply fail again. So the transcript is watched: the tail
-    /// was a failure when this session qualified, and anything else — a reply,
-    /// or a turn in progress — means it moved.
+    /// not anything reads them, so the transcript is watched for what actually
+    /// happened, and its <b>mtime</b> is the arbiter: a tail that moved to a
+    /// turn in progress or a reply means the line was taken; a tail that moved
+    /// and reads <c>failed</c> again means the line was taken and the wall is
+    /// still up — the takeover this returns false for is the right tool for
+    /// that, and waiting out the window would only delay it. A tail that has
+    /// not moved at all means nobody read the line, which is the one case worth
+    /// a second send.
     /// </para>
     /// </remarks>
     private bool TryNudge(StalledRecord record)
@@ -239,16 +299,35 @@ internal sealed class StalledWatch
 
         // The engine's own English message: the console's input code page is
         // the user's, not ours, and anything outside ASCII arrives corrupted.
-        var result = TerminalNudge.Send(pid, ContinueText());
-        if (!result.Delivered) return false;
+        var text = ContinueText();
+        if (!_send(pid, text).Delivered) return false;
 
-        var deadline = DateTime.UtcNow + NudgeWindow;
-        while (DateTime.UtcNow < deadline)
+        var start = DateTime.UtcNow;
+        var resent = false;
+        while (DateTime.UtcNow - start < _nudgeWindow)
         {
-            Thread.Sleep(2000);
-            if (TailState(record.SessionId) is { Length: > 0 } state && state != "failed")
+            Thread.Sleep(_pollEvery);
+            var (state, modifiedMs) = TailSnapshot(record.SessionId);
+            switch (state)
             {
-                return true;
+                case "dangling":
+                case "awaitingUser":
+                    // A turn queued or finished: the terminal is working again.
+                    return true;
+                case "failed" when modifiedMs > record.ModifiedMs:
+                    // Read, retried, and hit the wall again — time or another
+                    // account moves this session, not a third line of input.
+                    return false;
+                case "failed":
+                    // Unmoved: nobody has read the line yet. Once, and only
+                    // once, send it again.
+                    if (!resent && DateTime.UtcNow - start >= _resendAfter)
+                    {
+                        _send(pid, text);
+                        resent = true;
+                    }
+                    break;
+                // "unknown" or unreadable says nothing either way; keep waiting.
             }
         }
         return false;
@@ -278,34 +357,54 @@ internal sealed class StalledWatch
         return "Continue from where you left off. Do not repeat work that is already done.";
     }
 
-    /// <summary>The session's current tail state, or null when it cannot be read.</summary>
-    private string? TailState(string sessionId)
+    /// <summary>
+    /// The session's current tail state and transcript mtime, or nulls when it
+    /// cannot be read.
+    /// </summary>
+    private (string? State, long ModifiedMs) TailSnapshot(string sessionId)
     {
         try
         {
             var tail = _engine.Call("session_tail", new JsonObject { ["sessionId"] = sessionId });
-            return tail["found"]?.GetValue<bool>() == true
-                ? tail["state"]?.GetValue<string>()
-                : null;
+            if (tail["found"]?.GetValue<bool>() != true) return (null, 0);
+            return (tail["state"]?.GetValue<string>(), tail["modifiedMs"]?.GetValue<long>() ?? 0);
         }
         catch (Exception ex) when (ex is EngineException or ObjectDisposedException)
         {
-            return null;
+            return (null, 0);
         }
     }
 
     public bool TryResume(StalledRecord record)
     {
-        // First choice: wake the terminal it is already in. Falls through to a
-        // takeover when there is no live process, the keystrokes do not land,
-        // or nothing happens after they do.
-        if (TryNudge(record))
+        // First choice: wake the terminal it is already in — unless it was
+        // woken once already and stalled again; then the wall is known to be
+        // real and only a takeover moves the work. The nudge also falls
+        // through to a takeover when there is no live process, the keystrokes
+        // do not land, or the transcript shows they achieved nothing.
+        bool wokenBefore;
+        lock (_gate) wokenBefore = _nudged.Contains(record.SessionId);
+        if (!wokenBefore && TryNudge(record))
         {
+            lock (_gate)
+            {
+                _nudged.Add(record.SessionId);
+                // Eligible for another sweep: if the wall had not lifted and
+                // the session stalls again, that sweep takes it over.
+                _attempted.Remove(record.SessionId);
+            }
             NudgeSucceeded?.Invoke(record);
             Changed?.Invoke();
             return true;
         }
+        return _takeover(record);
+    }
 
+    /// <summary>
+    /// Resume the session in an agent this app owns, and verify what it did.
+    /// </summary>
+    private bool StartTakeover(StalledRecord record)
+    {
         if (!Directory.Exists(record.Cwd))
         {
             // The conversation is fine, but an agent has to be rooted somewhere.

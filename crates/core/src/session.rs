@@ -226,10 +226,94 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
+/// When the process holding `pid` was created, as epoch milliseconds.
+///
+/// Half of the pid-reuse check: a live pid proves nothing on its own, because
+/// Windows hands a dead process's id to a new process quickly, and Claude Code
+/// does not remove its `sessions/<pid>.json` on a crash. Comparing the pid
+/// file's claim against the real creation time is what tells "still Claude"
+/// apart from "some stranger's console".
+#[cfg(windows)]
+fn process_started_ms(pid: u32) -> Option<i64> {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+        fn CloseHandle(handle: isize) -> i32;
+        fn GetProcessTimes(
+            handle: isize,
+            creation: *mut u64,
+            exit: *mut u64,
+            kernel: *mut u64,
+            user: *mut u64,
+        ) -> i32;
+    }
+    // FILETIME ticks are 100ns since 1601; this is the gap to the unix epoch.
+    const FILETIME_EPOCH_OFFSET_MS: i64 = 11_644_473_600_000;
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            return None;
+        }
+        let mut creation = 0u64;
+        let mut scratch = 0u64;
+        let ok = GetProcessTimes(handle, &mut creation, &mut scratch, &mut scratch, &mut scratch);
+        CloseHandle(handle);
+        if ok == 0 || creation == 0 {
+            return None;
+        }
+        Some(i64::try_from(creation / 10_000).unwrap_or(i64::MAX) - FILETIME_EPOCH_OFFSET_MS)
+    }
+}
+
+/// Without a way to read creation times there is nothing to compare against.
+#[cfg(not(windows))]
+fn process_started_ms(_pid: u32) -> Option<i64> {
+    None
+}
+
+/// How closely `procStart` must match the real creation time. Claude Code
+/// records its own creation FILETIME, so the two are the same clock reading;
+/// the slack is only for the ms truncation on both sides.
+const PROC_START_TOLERANCE_MS: i64 = 2_000;
+
+/// How long after `startedAt` a process may have started and still be the one
+/// the pid file describes. The file is written by the process itself within
+/// seconds of boot; a process that started *later* than that is holding a
+/// recycled pid, whatever is alive now.
+const STARTED_AT_SLACK_MS: i64 = 60_000;
+
+/// Whether the live process holding `pid` is the Claude Code the pid file
+/// describes, using the file's own evidence, strongest first.
+///
+/// `procStart` (the process's creation FILETIME, as a decimal string) pins the
+/// process exactly. `startedAt` (epoch ms) only bounds it one-sidedly: the
+/// writer is always alive at `startedAt`, so a process created *after* that
+/// plus slack cannot be the writer. A file with neither is taken on trust —
+/// an unverifiable claim is the behaviour this check predates, not a pass.
+fn pid_file_matches_process(pid: u32, proc_start: Option<u64>, started_at_ms: i64) -> bool {
+    let Some(actual_ms) = process_started_ms(pid) else {
+        return true;
+    };
+    if let Some(ticks) = proc_start {
+        let recorded_ms = i64::try_from(ticks / 10_000)
+            .map(|ms| ms - 11_644_473_600_000)
+            .unwrap_or(0);
+        return (actual_ms - recorded_ms).abs() <= PROC_START_TOLERANCE_MS;
+    }
+    if started_at_ms > 0 {
+        return actual_ms <= started_at_ms.saturating_add(STARTED_AT_SLACK_MS);
+    }
+    true
+}
+
 /// Claude Code instances currently running against a profile.
 ///
 /// Reads the same `sessions/<pid>.json` files Claude Code writes for itself,
-/// dropping any whose process has exited (they are not cleaned up on crash).
+/// dropping any whose process has exited (they are not cleaned up on crash) —
+/// and any whose pid has since been **recycled** to a different process
+/// ([`pid_file_matches_process`]). A caller uses these pids to type into the
+/// owning terminal; a recycled pid would aim those keystrokes at a console
+/// that has nothing to do with Claude.
 #[must_use]
 pub fn live_sessions_for(session_dir: &Path) -> Vec<LiveSession> {
     let mut out = Vec::new();
@@ -257,11 +341,18 @@ pub fn live_sessions_for(session_dir: &Path) -> Vec<LiveSession> {
         if !is_pid_alive(pid) {
             continue;
         }
+        let proc_start = v
+            .get("procStart")
+            .and_then(|p| p.as_str().and_then(|s| s.parse().ok()).or_else(|| p.as_u64()));
+        let started_at_ms = v.get("startedAt").and_then(Value::as_i64).unwrap_or(0);
+        if !pid_file_matches_process(pid, proc_start, started_at_ms) {
+            continue;
+        }
         out.push(LiveSession {
             pid,
             session_id: str_field(&v, "sessionId"),
             cwd: str_field(&v, "cwd"),
-            started_at_ms: v.get("startedAt").and_then(Value::as_i64).unwrap_or(0),
+            started_at_ms,
             entrypoint: str_field(&v, "entrypoint"),
         });
     }
@@ -1035,14 +1126,78 @@ mod tests {
         assert!(live_sessions_for(&profile).is_empty());
 
         let me = std::process::id();
+        let started = chrono::Utc::now().timestamp_millis();
         std::fs::write(
             profile.join("sessions").join(format!("{me}.json")),
-            json!({"pid":me,"sessionId":"mine","cwd":"D:/x","startedAt":7}).to_string(),
+            json!({"pid":me,"sessionId":"mine","cwd":"D:/x","startedAt":started}).to_string(),
         )
         .unwrap();
         let live = live_sessions_for(&profile);
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].session_id, "mine");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_recycled_pid_is_not_a_live_session() {
+        // The crash case that matters for the nudge path: Claude died, the pid
+        // file stayed, and the OS has since handed that pid to somebody else.
+        // Typing "continue" into that console is the failure this prevents.
+        let tmp = tempdir().unwrap();
+        let profile = tmp.path().join("profile");
+        std::fs::create_dir_all(profile.join("sessions")).unwrap();
+
+        let me = std::process::id();
+        let actual = process_started_ms(me).expect("own process start time");
+
+        // The file claims the process booted an hour before it really did —
+        // exactly what a stale file under a recycled pid looks like.
+        let stale = actual - 3_600_000;
+        std::fs::write(
+            profile.join("sessions").join(format!("{me}.json")),
+            json!({"pid":me,"sessionId":"ghost","startedAt":stale}).to_string(),
+        )
+        .unwrap();
+        assert!(live_sessions_for(&profile).is_empty());
+
+        // `procStart` pins the same check exactly: one minute off the real
+        // creation time is a different process.
+        let wrong_ticks = ((actual + 60_000 + 11_644_473_600_000) * 10_000).to_string();
+        std::fs::write(
+            profile.join("sessions").join(format!("{me}.json")),
+            json!({"pid":me,"sessionId":"ghost","procStart":wrong_ticks}).to_string(),
+        )
+        .unwrap();
+        assert!(live_sessions_for(&profile).is_empty());
+
+        // And the honest file — the real creation time, which is what Claude
+        // Code writes for itself — still counts.
+        let right_ticks = ((actual + 11_644_473_600_000) * 10_000).to_string();
+        std::fs::write(
+            profile.join("sessions").join(format!("{me}.json")),
+            json!({"pid":me,"sessionId":"mine","procStart":right_ticks}).to_string(),
+        )
+        .unwrap();
+        let live = live_sessions_for(&profile);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].session_id, "mine");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_pid_file_without_timing_evidence_is_taken_on_trust() {
+        // Older Claude Code wrote neither field; the alive check is all there
+        // is, and dropping those would hide every session they own.
+        let tmp = tempdir().unwrap();
+        let profile = tmp.path().join("profile");
+        std::fs::create_dir_all(profile.join("sessions")).unwrap();
+        let me = std::process::id();
+        std::fs::write(
+            profile.join("sessions").join(format!("{me}.json")),
+            json!({"pid":me,"sessionId":"legacy"}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(live_sessions_for(&profile).len(), 1);
     }
 
     #[test]
