@@ -556,14 +556,20 @@ internal sealed class AcpLaunch
     /// <summary>Proxy URL to inject, or null for a direct connection.</summary>
     public string? Proxy { get; init; }
 
+    /// <summary>The node executable; null finds it on PATH.</summary>
+    public string? NodePath { get; init; }
+
+    /// <summary>The adapter's <c>dist/index.js</c>; null searches for an install.</summary>
+    public string? AdapterPath { get; init; }
+
     public ProcessStartInfo BuildStartInfo()
     {
         if (!Directory.Exists(WorkingDirectory))
             throw new DirectoryNotFoundException(Loc.T("acp.err.workDir", WorkingDirectory));
 
-        string node = ClaudeCli.Find("node")
+        string node = NodePath ?? ClaudeCli.Find("node")
             ?? throw new FileNotFoundException(Loc.T("acp.err.node"));
-        string adapter = FindAdapter()
+        string adapter = AdapterPath ?? FindAdapter()
             ?? throw new FileNotFoundException(Loc.T("acp.err.adapter", AdapterPackage));
 
         var psi = new ProcessStartInfo(node)

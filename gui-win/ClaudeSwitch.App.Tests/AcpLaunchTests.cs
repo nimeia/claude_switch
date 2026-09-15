@@ -21,6 +21,12 @@ public class AcpLaunchTests
         return dir;
     }
 
+    // Node and the npm adapter are named rather than looked up: these tests are
+    // about the environment the launch builds, and must not depend on either
+    // being installed (CI has no adapter).
+    private const string FakeNode = @"C:\node\node.exe";
+    private const string FakeAdapter = @"C:\adapter\dist\index.js";
+
     [Fact]
     public void BuildStartInfo_scrubs_auth_overrides()
     {
@@ -29,7 +35,13 @@ public class AcpLaunchTests
         string dir = MakeTempDir();
         try
         {
-            var launch = new AcpLaunch { WorkingDirectory = dir, ConfigDir = dir };
+            var launch = new AcpLaunch
+            {
+                WorkingDirectory = dir,
+                ConfigDir = dir,
+                NodePath = FakeNode,
+                AdapterPath = FakeAdapter,
+            };
             var psi = launch.BuildStartInfo();
 
             Assert.False(psi.Environment.ContainsKey("ANTHROPIC_API_KEY"));
@@ -48,7 +60,13 @@ public class AcpLaunchTests
         string dir = MakeTempDir();
         try
         {
-            var launch = new AcpLaunch { WorkingDirectory = dir, ConfigDir = dir };
+            var launch = new AcpLaunch
+            {
+                WorkingDirectory = dir,
+                ConfigDir = dir,
+                NodePath = FakeNode,
+                AdapterPath = FakeAdapter,
+            };
             var psi = launch.BuildStartInfo();
             Assert.Equal(dir, psi.Environment["CLAUDE_CONFIG_DIR"]);
         }
@@ -66,7 +84,13 @@ public class AcpLaunchTests
         string dir = MakeTempDir();
         try
         {
-            var launch = new AcpLaunch { WorkingDirectory = dir, ConfigDir = null };
+            var launch = new AcpLaunch
+            {
+                WorkingDirectory = dir,
+                ConfigDir = null,
+                NodePath = FakeNode,
+                AdapterPath = FakeAdapter,
+            };
             var psi = launch.BuildStartInfo();
             Assert.False(psi.Environment.ContainsKey("CLAUDE_CONFIG_DIR"));
         }
@@ -89,6 +113,8 @@ public class AcpLaunchTests
             {
                 WorkingDirectory = dir,
                 Proxy = "http://127.0.0.1:7890",
+                NodePath = FakeNode,
+                AdapterPath = FakeAdapter,
             };
             var psi = launch.BuildStartInfo();
 
@@ -113,7 +139,13 @@ public class AcpLaunchTests
         string dir = MakeTempDir();
         try
         {
-            var launch = new AcpLaunch { WorkingDirectory = dir, Proxy = null };
+            var launch = new AcpLaunch
+            {
+                WorkingDirectory = dir,
+                Proxy = null,
+                NodePath = FakeNode,
+                AdapterPath = FakeAdapter,
+            };
             var psi = launch.BuildStartInfo();
 
             string? inherited = Environment.GetEnvironmentVariable("HTTPS_PROXY");
