@@ -751,7 +751,7 @@ fn transcripts_in(folder: &Path) -> Vec<Transcript> {
             Some((modified, Transcript { id, path }))
         })
         .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
     files.into_iter().map(|(_, t)| t).collect()
 }
 

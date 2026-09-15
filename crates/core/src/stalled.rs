@@ -287,7 +287,7 @@ pub fn read_tail_lines(file: &Path) -> Vec<String> {
     let Ok(mut f) = std::fs::File::open(file) else {
         return Vec::new();
     };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let len = f.metadata().map_or(0, |m| m.len());
     let from_start = len <= TAIL_BYTES;
     let back = i64::try_from(TAIL_BYTES).unwrap_or(i64::MAX);
     if !from_start && f.seek(SeekFrom::End(-back)).is_err() {

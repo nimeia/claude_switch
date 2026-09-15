@@ -301,9 +301,7 @@ fn pid_file_matches_process(pid: u32, proc_start: Option<u64>, started_at_ms: i6
         return true;
     };
     if let Some(ticks) = proc_start {
-        let recorded_ms = i64::try_from(ticks / 10_000)
-            .map(|ms| ms - 11_644_473_600_000)
-            .unwrap_or(0);
+        let recorded_ms = i64::try_from(ticks / 10_000).map_or(0, |ms| ms - 11_644_473_600_000);
         return (actual_ms - recorded_ms).abs() <= PROC_START_TOLERANCE_MS;
     }
     if started_at_ms > 0 {

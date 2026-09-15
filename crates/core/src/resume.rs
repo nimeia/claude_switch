@@ -95,7 +95,7 @@ fn newest_resumable(
         .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
         .map(|e| (e.metadata().map_or(0, |m| projects::mtime_ms(&m)), e.path()))
         .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
 
     files.into_iter().find_map(|(modified_ms, file)| {
         let head = projects::read_head(&file);
@@ -176,7 +176,7 @@ pub fn recent_sessions(
             }
         }
     }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.0));
 
     let mut out = Vec::new();
     for (modified_ms, file, directory, root) in candidates {

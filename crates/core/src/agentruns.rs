@@ -212,7 +212,7 @@ impl RunJournal {
         } else {
             self.runs.push(run);
         }
-        self.runs.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
+        self.runs.sort_by_key(|r| std::cmp::Reverse(r.updated_ms));
     }
 
     pub fn remove(&mut self, id: &str) -> bool {
