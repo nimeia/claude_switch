@@ -362,7 +362,9 @@ impl ContinuePolicy {
     pub fn clamp(mut self) -> Self {
         self.max_attempts = self.max_attempts.min(100);
         self.base_delay_seconds = self.base_delay_seconds.clamp(1, 3600);
-        self.max_delay_seconds = self.max_delay_seconds.clamp(self.base_delay_seconds, 86_400);
+        self.max_delay_seconds = self
+            .max_delay_seconds
+            .clamp(self.base_delay_seconds, 86_400);
         self.rate_limit_delay_seconds = self.rate_limit_delay_seconds.clamp(60, 86_400);
         self.max_wait_hours = self.max_wait_hours.clamp(1, 24);
         self.max_rate_limit_waits = self.max_rate_limit_waits.min(48);
@@ -408,7 +410,11 @@ impl StopCause {
 // `rename_all` only renames the variants; the struct-variant *fields* need
 // `rename_all_fields`, or the GUI receives `delay_seconds`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "action")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "action"
+)]
 pub enum ContinueDecision {
     Continue {
         delay_seconds: u64,
@@ -651,7 +657,10 @@ mod tests {
             classify_failure(None, "API Error: Unable to connect to API (ECONNRESET)"),
             InterruptKind::Network
         );
-        assert_eq!(classify_failure(None, "fetch failed"), InterruptKind::Network);
+        assert_eq!(
+            classify_failure(None, "fetch failed"),
+            InterruptKind::Network
+        );
         assert_eq!(
             classify_failure(None, "API Error: Connection closed mid-response."),
             InterruptKind::Network
@@ -703,7 +712,10 @@ mod tests {
 
     #[test]
     fn overloaded_is_a_network_blip() {
-        assert_eq!(classify_failure(Some("overloaded"), "Service busy"), InterruptKind::Network);
+        assert_eq!(
+            classify_failure(Some("overloaded"), "Service busy"),
+            InterruptKind::Network
+        );
     }
 
     #[test]
@@ -722,7 +734,13 @@ mod tests {
     fn end_turn_never_continues() {
         let p = ContinuePolicy::default();
         assert_eq!(
-            decide(TurnOutcome::Completed(StopReason::EndTurn), 0, 0, &p, &QuotaContext::default()),
+            decide(
+                TurnOutcome::Completed(StopReason::EndTurn),
+                0,
+                0,
+                &p,
+                &QuotaContext::default()
+            ),
             ContinueDecision::Stop {
                 cause: StopCause::Completed
             }
@@ -733,13 +751,25 @@ mod tests {
     fn refusal_and_cancel_never_continue() {
         let p = ContinuePolicy::default();
         assert_eq!(
-            decide(TurnOutcome::Completed(StopReason::Refusal), 0, 0, &p, &QuotaContext::default()),
+            decide(
+                TurnOutcome::Completed(StopReason::Refusal),
+                0,
+                0,
+                &p,
+                &QuotaContext::default()
+            ),
             ContinueDecision::Stop {
                 cause: StopCause::Refused
             }
         );
         assert_eq!(
-            decide(TurnOutcome::Completed(StopReason::Cancelled), 0, 0, &p, &QuotaContext::default()),
+            decide(
+                TurnOutcome::Completed(StopReason::Cancelled),
+                0,
+                0,
+                &p,
+                &QuotaContext::default()
+            ),
             ContinueDecision::Stop {
                 cause: StopCause::Cancelled
             }
@@ -753,7 +783,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide(TurnOutcome::Interrupted(InterruptKind::Auth), 0, 0, &p, &QuotaContext::default()),
+            decide(
+                TurnOutcome::Interrupted(InterruptKind::Auth),
+                0,
+                0,
+                &p,
+                &QuotaContext::default()
+            ),
             ContinueDecision::Stop {
                 cause: StopCause::NeedsAuth
             }
@@ -764,7 +800,13 @@ mod tests {
     fn truncation_continues_immediately() {
         let p = ContinuePolicy::default();
         assert_eq!(
-            decide(TurnOutcome::Completed(StopReason::MaxTokens), 0, 0, &p, &QuotaContext::default()),
+            decide(
+                TurnOutcome::Completed(StopReason::MaxTokens),
+                0,
+                0,
+                &p,
+                &QuotaContext::default()
+            ),
             ContinueDecision::Continue {
                 delay_seconds: 0,
                 needs_fresh_process: false,
@@ -780,7 +822,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide(TurnOutcome::Completed(StopReason::MaxTokens), 0, 0, &p, &QuotaContext::default()),
+            decide(
+                TurnOutcome::Completed(StopReason::MaxTokens),
+                0,
+                0,
+                &p,
+                &QuotaContext::default()
+            ),
             ContinueDecision::Stop {
                 cause: StopCause::Truncated
             }
@@ -866,8 +914,18 @@ mod tests {
         let n = TurnOutcome::Interrupted(InterruptKind::Network);
 
         // Tier one: the ladder.
-        assert_eq!(decide(n, 0, 0, &p, &QuotaContext::default()).delay().as_secs(), 10);
-        assert_eq!(decide(n, 1, 0, &p, &QuotaContext::default()).delay().as_secs(), 20);
+        assert_eq!(
+            decide(n, 0, 0, &p, &QuotaContext::default())
+                .delay()
+                .as_secs(),
+            10
+        );
+        assert_eq!(
+            decide(n, 1, 0, &p, &QuotaContext::default())
+                .delay()
+                .as_secs(),
+            20
+        );
 
         // Tier two: flat, slow, and still continuing.
         for attempt in [2, 3] {
@@ -970,7 +1028,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide(TurnOutcome::Interrupted(InterruptKind::RateLimit), 0, 0, &p, &q),
+            decide(
+                TurnOutcome::Interrupted(InterruptKind::RateLimit),
+                0,
+                0,
+                &p,
+                &q
+            ),
             ContinueDecision::Continue {
                 delay_seconds: 1800 + RESET_MARGIN_SECONDS,
                 needs_fresh_process: false,
@@ -1008,7 +1072,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide(TurnOutcome::Interrupted(InterruptKind::RateLimit), 0, 0, &p, &q),
+            decide(
+                TurnOutcome::Interrupted(InterruptKind::RateLimit),
+                0,
+                0,
+                &p,
+                &q
+            ),
             ContinueDecision::Stop {
                 cause: StopCause::WaitTooLong
             }
@@ -1027,7 +1097,13 @@ mod tests {
             exhausted: true,
         };
         assert_eq!(
-            decide(TurnOutcome::Interrupted(InterruptKind::RateLimit), 0, 0, &p, &q),
+            decide(
+                TurnOutcome::Interrupted(InterruptKind::RateLimit),
+                0,
+                0,
+                &p,
+                &q
+            ),
             ContinueDecision::Stop {
                 cause: StopCause::RateLimited
             }
@@ -1046,7 +1122,13 @@ mod tests {
             exhausted: true,
         };
         assert_eq!(
-            decide(TurnOutcome::Interrupted(InterruptKind::RateLimit), 0, 0, &p, &q),
+            decide(
+                TurnOutcome::Interrupted(InterruptKind::RateLimit),
+                0,
+                0,
+                &p,
+                &q
+            ),
             ContinueDecision::Continue {
                 delay_seconds: 0,
                 // The new account is a different login: the agent must be
@@ -1069,7 +1151,13 @@ mod tests {
             exhausted: true,
         };
         assert_eq!(
-            decide(TurnOutcome::Interrupted(InterruptKind::RateLimit), 0, 0, &p, &q),
+            decide(
+                TurnOutcome::Interrupted(InterruptKind::RateLimit),
+                0,
+                0,
+                &p,
+                &q
+            ),
             ContinueDecision::Continue {
                 delay_seconds: 600 + RESET_MARGIN_SECONDS,
                 needs_fresh_process: false,
@@ -1089,7 +1177,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide(TurnOutcome::Interrupted(InterruptKind::Network), 0, 0, &p, &q),
+            decide(
+                TurnOutcome::Interrupted(InterruptKind::Network),
+                0,
+                0,
+                &p,
+                &q
+            ),
             ContinueDecision::Continue {
                 delay_seconds: 300 + RESET_MARGIN_SECONDS,
                 needs_fresh_process: false,
@@ -1220,7 +1314,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide(TurnOutcome::Interrupted(InterruptKind::Network), 0, 0, &p, &q),
+            decide(
+                TurnOutcome::Interrupted(InterruptKind::Network),
+                0,
+                0,
+                &p,
+                &q
+            ),
             ContinueDecision::Continue {
                 delay_seconds: 10,
                 needs_fresh_process: false,
@@ -1238,7 +1338,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            decide(TurnOutcome::Interrupted(InterruptKind::RateLimit), 9, 0, &p, &QuotaContext::default()),
+            decide(
+                TurnOutcome::Interrupted(InterruptKind::RateLimit),
+                9,
+                0,
+                &p,
+                &QuotaContext::default()
+            ),
             ContinueDecision::Continue {
                 delay_seconds: 900,
                 needs_fresh_process: false,
@@ -1246,7 +1352,13 @@ mod tests {
             }
         );
         assert_eq!(
-            decide(TurnOutcome::Interrupted(InterruptKind::RateLimit), 0, 2, &p, &QuotaContext::default()),
+            decide(
+                TurnOutcome::Interrupted(InterruptKind::RateLimit),
+                0,
+                2,
+                &p,
+                &QuotaContext::default()
+            ),
             ContinueDecision::Stop {
                 cause: StopCause::RateLimitWaitsExhausted
             }
@@ -1264,7 +1376,8 @@ mod tests {
             &QuotaContext::default(),
         ) {
             ContinueDecision::Continue {
-                needs_fresh_process, ..
+                needs_fresh_process,
+                ..
             } => assert!(needs_fresh_process, "a dead agent must be respawned"),
             other @ ContinueDecision::Stop { .. } => panic!("expected Continue, got {other:?}"),
         }
@@ -1276,9 +1389,16 @@ mod tests {
             max_rate_limit_waits: 1,
             ..Default::default()
         };
-        match decide(TurnOutcome::Interrupted(InterruptKind::RateLimit), 0, 0, &p, &QuotaContext::default()) {
+        match decide(
+            TurnOutcome::Interrupted(InterruptKind::RateLimit),
+            0,
+            0,
+            &p,
+            &QuotaContext::default(),
+        ) {
             ContinueDecision::Continue {
-                needs_fresh_process, ..
+                needs_fresh_process,
+                ..
             } => assert!(!needs_fresh_process),
             other @ ContinueDecision::Stop { .. } => panic!("expected Continue, got {other:?}"),
         }

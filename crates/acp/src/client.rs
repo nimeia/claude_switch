@@ -152,9 +152,19 @@ pub struct SessionInfo {
 
 /// Frames arriving from the agent.
 enum Incoming {
-    Response { id: u64, result: Result<Value, RpcError> },
-    Request { id: Value, method: String, params: Value },
-    Notification { method: String, params: Value },
+    Response {
+        id: u64,
+        result: Result<Value, RpcError>,
+    },
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
+    Notification {
+        method: String,
+        params: Value,
+    },
     /// Reader thread ended: stdout closed.
     Eof,
 }
@@ -216,7 +226,10 @@ impl AcpClient {
             &mut DenyAll,
             timeout,
         )?;
-        client.agent_capabilities = init.get("agentCapabilities").cloned().unwrap_or(Value::Null);
+        client.agent_capabilities = init
+            .get("agentCapabilities")
+            .cloned()
+            .unwrap_or(Value::Null);
         client.agent_info = init.get("agentInfo").cloned().unwrap_or(Value::Null);
         Ok(client)
     }
@@ -377,12 +390,19 @@ impl AcpClient {
                     }
                     self.stash.push((got, result));
                 }
-                Ok(Incoming::Request { id: req_id, method, params }) => {
+                Ok(Incoming::Request {
+                    id: req_id,
+                    method,
+                    params,
+                }) => {
                     self.serve(&req_id, &method, &params, handler)?;
                 }
                 Ok(Incoming::Notification { method, params }) => {
                     if method == "session/update" {
-                        let sid = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
+                        let sid = params
+                            .get("sessionId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
                         if let Some(update) = params.get("update") {
                             handler.on_update(sid, update);
                         }
@@ -410,12 +430,17 @@ impl AcpClient {
     ) -> Result<(), AcpError> {
         let reply = match method {
             "session/request_permission" => {
-                let sid = params.get("sessionId").and_then(Value::as_str).unwrap_or("");
+                let sid = params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 let outcome = match handler.on_permission(sid, params) {
                     PermissionOutcome::Selected(opt) => {
                         json!({ "outcome": { "outcome": "selected", "optionId": opt } })
                     }
-                    PermissionOutcome::Cancelled => json!({ "outcome": { "outcome": "cancelled" } }),
+                    PermissionOutcome::Cancelled => {
+                        json!({ "outcome": { "outcome": "cancelled" } })
+                    }
                 };
                 Ok(outcome)
             }
@@ -428,7 +453,9 @@ impl AcpClient {
             "fs/write_text_file" => {
                 let path = params.get("path").and_then(Value::as_str).unwrap_or("");
                 let content = params.get("content").and_then(Value::as_str).unwrap_or("");
-                handler.on_write_text_file(path, content).map(|()| json!({}))
+                handler
+                    .on_write_text_file(path, content)
+                    .map(|()| json!({}))
             }
             other => Err(format!("method not supported by this client: {other}")),
         };
@@ -489,11 +516,13 @@ fn read_frames(stdout: std::process::ChildStdout, tx: &Sender<Incoming>) {
             (Some(id), false) => {
                 let Some(id) = id.as_u64() else { continue };
                 let result = if let Some(err) = msg.get("error") {
-                    Err(serde_json::from_value::<RpcError>(err.clone()).unwrap_or(RpcError {
-                        code: -1,
-                        message: err.to_string(),
-                        data: None,
-                    }))
+                    Err(
+                        serde_json::from_value::<RpcError>(err.clone()).unwrap_or(RpcError {
+                            code: -1,
+                            message: err.to_string(),
+                            data: None,
+                        }),
+                    )
                 } else {
                     Ok(msg.get("result").cloned().unwrap_or(Value::Null))
                 };
@@ -537,7 +566,11 @@ mod tests {
 
     #[test]
     fn rpc_error_without_data_has_no_kind() {
-        let e = RpcError { code: -1, message: "boom".into(), data: None };
+        let e = RpcError {
+            code: -1,
+            message: "boom".into(),
+            data: None,
+        };
         assert_eq!(e.error_kind(), None);
     }
 

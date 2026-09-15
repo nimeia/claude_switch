@@ -485,9 +485,15 @@ mod tests {
 
         assert_eq!(dropped, 10);
         assert!(j.get("live").is_some(), "a live run must never be pruned");
-        assert!(j.get("stuck").is_some(), "a resumable run must never be pruned");
+        assert!(
+            j.get("stuck").is_some(),
+            "a resumable run must never be pruned"
+        );
         assert_eq!(
-            j.runs.iter().filter(|r| r.status == RunStatus::Completed).count(),
+            j.runs
+                .iter()
+                .filter(|r| r.status == RunStatus::Completed)
+                .count(),
             MAX_FINISHED_RECORDS
         );
     }

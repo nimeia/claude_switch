@@ -289,7 +289,8 @@ pub fn read_tail_lines(file: &Path) -> Vec<String> {
     };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let from_start = len <= TAIL_BYTES;
-    if !from_start && f.seek(SeekFrom::End(-(TAIL_BYTES as i64))).is_err() {
+    let back = i64::try_from(TAIL_BYTES).unwrap_or(i64::MAX);
+    if !from_start && f.seek(SeekFrom::End(-back)).is_err() {
         return Vec::new();
     }
 
@@ -669,6 +670,8 @@ mod tests {
     use crate::rules;
     use serde_json::json;
 
+    // By value so call sites can pass `json!(..)` straight in.
+    #[allow(clippy::needless_pass_by_value)]
     fn line(v: Value) -> String {
         v.to_string()
     }
@@ -1189,7 +1192,7 @@ mod tests {
             "message": { "role": "user", "content": [{ "type": "text", "text": "x".repeat(4096) }] }
         }));
         let mut text = String::new();
-        while text.len() < (TAIL_BYTES as usize) + 8192 {
+        while text.len() < usize::try_from(TAIL_BYTES).unwrap() + 8192 {
             text.push_str(&filler);
             text.push('\n');
         }

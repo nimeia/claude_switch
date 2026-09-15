@@ -130,6 +130,7 @@ pub fn parse_hhmm(s: &str) -> Option<NaiveTime> {
 
 /// Work-window length in hours (`end` after `start`; overnight not supported).
 #[must_use]
+#[allow(clippy::cast_precision_loss)] // under a day of seconds: exact in f64
 pub fn work_hours(start: NaiveTime, end: NaiveTime) -> Option<f64> {
     let secs = (end - start).num_seconds();
     if secs <= 0 {
@@ -159,6 +160,7 @@ pub fn compute_base_anchor(work_start: NaiveTime, work_end: NaiveTime) -> Option
 ///
 /// Offset = `index * (5 / count)` hours from the base anchor.
 #[must_use]
+#[allow(clippy::cast_precision_loss)] // account counts: exact in f64
 pub fn stagger_anchor(base: NaiveTime, index: usize, count: usize) -> NaiveTime {
     if count <= 1 || index == 0 {
         return base;
@@ -167,6 +169,7 @@ pub fn stagger_anchor(base: NaiveTime, index: usize, count: usize) -> NaiveTime 
     shift_time(base, hours).unwrap_or(base)
 }
 
+#[allow(clippy::cast_possible_truncation)] // hour offsets within a few days
 fn shift_time(t: NaiveTime, hours: f64) -> Option<NaiveTime> {
     let base_secs = i64::from(t.num_seconds_from_midnight());
     let delta = (hours * 3600.0).round() as i64;
@@ -183,9 +186,9 @@ fn shift_time(t: NaiveTime, hours: f64) -> Option<NaiveTime> {
     if secs >= 86_400 {
         secs = 86_399;
     }
-    let h = (secs / 3600) as u32;
-    let m = ((secs % 3600) / 60) as u32;
-    let s = (secs % 60) as u32;
+    let h = u32::try_from(secs / 3600).ok()?;
+    let m = u32::try_from((secs % 3600) / 60).ok()?;
+    let s = u32::try_from(secs % 60).ok()?;
     NaiveTime::from_hms_opt(h, m, s)
 }
 
@@ -233,6 +236,7 @@ pub enum WarmupMode {
 
 /// Decide whether to fire a warmup for one account at `now_local`.
 #[must_use]
+#[allow(clippy::too_many_arguments)] // a pure decision: every input is explicit
 pub fn decide(
     settings: &WarmupSettings,
     now_local: DateTime<Local>,
@@ -375,18 +379,17 @@ fn find_on_path(command: &str) -> Option<PathBuf> {
             .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
             .split(';')
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
+            .map(ToString::to_string)
             .collect()
     } else {
         vec![String::new()]
     };
     for dir in std::env::split_paths(&path) {
         for ext in &exts {
-            let name = if ext.is_empty() {
-                command.to_string()
-            } else if command
-                .to_ascii_lowercase()
-                .ends_with(&ext.to_ascii_lowercase())
+            let name = if ext.is_empty()
+                || command
+                    .to_ascii_lowercase()
+                    .ends_with(&ext.to_ascii_lowercase())
             {
                 command.to_string()
             } else {
@@ -764,6 +767,9 @@ mod tests {
             .unwrap();
         let next = next_planned_fire(&settings, now, 0, 1, None).unwrap();
         assert_eq!(next.time(), t(6, 0));
-        assert_eq!(next.date_naive(), now.date_naive() + ChronoDuration::days(1));
+        assert_eq!(
+            next.date_naive(),
+            now.date_naive() + ChronoDuration::days(1)
+        );
     }
 }

@@ -4,6 +4,8 @@
 # .NET
 bin/
 obj/
+# ...but a Cargo crate's src/bin/ holds binary sources, not build output.
+!/crates/*/src/bin/
 dist/
 
 # Local release packaging output

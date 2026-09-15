@@ -9,6 +9,10 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::json;
 
+use crate::agentruns;
+use crate::autocontinue::{
+    self, ContinuePolicy, InterruptKind, StopReason, TransportFailure, TurnOutcome,
+};
 use crate::autoswitch::AutoSwitchEngine;
 use crate::credentials::{identity_from_config, AccountIdentity};
 use crate::errors::{Error, Result};
@@ -17,10 +21,6 @@ use crate::paths::{PathEnv, Paths};
 use crate::plan::{plan_for_slot, PlanInfo};
 use crate::sequence::SequenceData;
 use crate::session;
-use crate::agentruns;
-use crate::autocontinue::{
-    self, ContinuePolicy, InterruptKind, StopReason, TransportFailure, TurnOutcome,
-};
 use crate::settings::{AutoSwitchSettings, Settings, WarmupSettings};
 use crate::stalled;
 use crate::switcher::{AccountRef, SwitchResult, Switcher};
@@ -302,7 +302,7 @@ pub struct Engine {
     next_poll: Mutex<Duration>,
     /// In-process cooldown ledger for 5h window warmup fires.
     warmup_state: Mutex<WarmupState>,
-    /// Most recent guardian / force result (for autoswitch_tick payloads and UI).
+    /// Most recent guardian / force result (for `autoswitch_tick` payloads and UI).
     last_warmup: Mutex<Option<WarmupTickResult>>,
 }
 
@@ -1618,12 +1618,17 @@ impl Engine {
             None => ContinuePolicy::default(),
         };
 
-        let attempt = u32::try_from(params.get("attempt").and_then(|v| v.as_u64()).unwrap_or(0))
-            .unwrap_or(u32::MAX);
+        let attempt = u32::try_from(
+            params
+                .get("attempt")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        )
+        .unwrap_or(u32::MAX);
         let waits = u32::try_from(
             params
                 .get("rateLimitWaits")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0),
         )
         .unwrap_or(u32::MAX);
@@ -1640,8 +1645,7 @@ impl Engine {
         // payload: the GUI increments `rateLimitWaits` off `outcome.value`.
         let outcome = autocontinue::effective_outcome(outcome, &quota);
         let decision = autocontinue::decide(outcome, attempt, waits, &policy, &quota);
-        let mut out = serde_json::to_value(decision)
-            .map_err(|e| Error::Internal(e.to_string()))?;
+        let mut out = serde_json::to_value(decision).map_err(|e| Error::Internal(e.to_string()))?;
         // Surface the classification too: the GUI labels the interruption for
         // the user ("network blip", "needs re-login") and should not have to
         // re-derive it from the decision.
@@ -1836,7 +1840,9 @@ impl Engine {
             if Some(num) == except {
                 continue;
             }
-            let Some(rec) = seq.account(num) else { continue };
+            let Some(rec) = seq.account(num) else {
+                continue;
+            };
             if rec.disabled || self.usage.status(num) != UsageStatus::Ok {
                 continue;
             }
@@ -1850,7 +1856,8 @@ impl Engine {
             if pct >= 90.0 {
                 continue;
             }
-            if best.is_none_or(|(_, b)| pct < b) {
+            // `map_or(true, ..)` rather than `is_none_or`: the MSRV is 1.80.
+            if best.map_or(true, |(_, b)| pct < b) {
                 best = Some((num, pct));
             }
         }
@@ -1888,7 +1895,7 @@ impl Engine {
     /// work swallowed. The transcript can: a real reply carries a real model id.
     fn session_tail(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
         let session_id = str_param(params, "sessionId")?;
-        let Some(path) = self.find_session_transcript(&session_id) else {
+        let Some(path) = self.find_session_transcript(session_id) else {
             return Ok(json!({
                 "found": false,
                 "state": stalled::TailState::Unknown.label(),
@@ -1938,8 +1945,7 @@ impl Engine {
             base.claude_config_dir = None;
             base.claude_config_home()
         };
-        let stale =
-            journal.drop_unresumable(&|run| crate::resume::run_blocker(run, &default_home));
+        let stale = journal.drop_unresumable(&|run| crate::resume::run_blocker(run, &default_home));
         if !demoted.is_empty() || !stale.is_empty() {
             journal.save(path)?;
         }
@@ -2165,10 +2171,8 @@ impl Engine {
             // caller paint immediately and refresh behind itself, instead of
             // showing a loading state for the minute the full scan takes.
             "overview_peek" => {
-                let peek = crate::projects::peek_overview_in(
-                    &self.scan_envs(),
-                    &self.paths.cache_dir,
-                );
+                let peek =
+                    crate::projects::peek_overview_in(&self.scan_envs(), &self.paths.cache_dir);
                 Ok(match peek {
                     Some(p) => json!({
                         "found": true,
@@ -2995,7 +2999,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
 
-        let projects = eng.paths.claude_config_home.join("projects").join("D--work");
+        let projects = eng
+            .paths
+            .claude_config_home
+            .join("projects")
+            .join("D--work");
         std::fs::create_dir_all(&projects).unwrap();
 
         let user = json!({"type":"user","cwd":"D:\\work",
@@ -3008,14 +3016,24 @@ mod tests {
 
         // Three sessions, one of each shape the scanner must tell apart.
         let cases = [
-            ("11111111-1111-1111-1111-111111111111",
-             assistant("claude-opus-5", "Claude AI usage limit reached", true)),
+            (
+                "11111111-1111-1111-1111-111111111111",
+                assistant("claude-opus-5", "Claude AI usage limit reached", true),
+            ),
             // Finished normally: the model handed control back to a human.
-            ("22222222-2222-2222-2222-222222222222",
-             assistant("claude-opus-5", "all done", false)),
+            (
+                "22222222-2222-2222-2222-222222222222",
+                assistant("claude-opus-5", "all done", false),
+            ),
             // Synthetic close-out of an orphaned turn — not an answer.
-            ("33333333-3333-3333-3333-333333333333",
-             assistant(crate::stalled::SYNTHETIC_MODEL, "No response requested.", false)),
+            (
+                "33333333-3333-3333-3333-333333333333",
+                assistant(
+                    crate::stalled::SYNTHETIC_MODEL,
+                    "No response requested.",
+                    false,
+                ),
+            ),
         ];
         for (id, last) in &cases {
             std::fs::write(
@@ -3041,12 +3059,18 @@ mod tests {
         assert_eq!(found[0]["sessionId"], cases[0].0);
         assert_eq!(found[0]["reason"], "rateLimit");
         assert_eq!(found[0]["cwd"], "D:\\work");
-        assert!(found[0]["lastError"].as_str().unwrap().contains("usage limit"));
+        assert!(found[0]["lastError"]
+            .as_str()
+            .unwrap()
+            .contains("usage limit"));
 
         // A stricter idle window rules it out; the criteria are echoed back
         // clamped, so a UI can show what was actually applied.
         let v = eng
-            .call_json("stalled_scan", &json!({ "criteria": { "windowHours": 5, "idleMinutes": 60 } }))
+            .call_json(
+                "stalled_scan",
+                &json!({ "criteria": { "windowHours": 5, "idleMinutes": 60 } }),
+            )
             .unwrap();
         assert_eq!(v["sessions"].as_array().unwrap().len(), 0);
         assert_eq!(v["criteria"]["idleMinutes"], 60);
@@ -3054,14 +3078,20 @@ mod tests {
         // Nonsense is clamped rather than obeyed: a zero idle window would call
         // a turn that is mid-flight stalled.
         let v = eng
-            .call_json("stalled_scan", &json!({ "criteria": { "windowHours": 0, "idleMinutes": 0 } }))
+            .call_json(
+                "stalled_scan",
+                &json!({ "criteria": { "windowHours": 0, "idleMinutes": 0 } }),
+            )
             .unwrap();
         assert_eq!(v["criteria"]["idleMinutes"], 1);
         assert_eq!(v["criteria"]["windowHours"], 1);
 
         // A malformed criteria object is refused rather than silently defaulted.
         assert!(eng
-            .call_json("stalled_scan", &json!({ "criteria": { "idleMinutes": "soon" } }))
+            .call_json(
+                "stalled_scan",
+                &json!({ "criteria": { "idleMinutes": "soon" } })
+            )
             .is_err());
     }
 
@@ -3073,7 +3103,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
 
-        let projects = eng.paths.claude_config_home.join("projects").join("D--work");
+        let projects = eng
+            .paths
+            .claude_config_home
+            .join("projects")
+            .join("D--work");
         std::fs::create_dir_all(&projects).unwrap();
         let line = json!({
             "type": "user", "cwd": "D:\\work",
@@ -3093,7 +3127,10 @@ mod tests {
         let v = eng.call_json("overview_peek", &json!({})).unwrap();
         assert_eq!(v["found"], true);
         assert_eq!(v["stale"], false);
-        assert!(v["stats"].is_object(), "the figures come back, not just a flag");
+        assert!(
+            v["stats"].is_object(),
+            "the figures come back, not just a flag"
+        );
 
         // Growing a transcript is what a running Claude Code does every turn.
         std::fs::write(projects.join("s2.jsonl"), format!("{line}\n")).unwrap();
@@ -3166,7 +3203,11 @@ mod tests {
         assert_eq!(r["status"], "interrupted");
         assert!(r["lastError"].as_str().unwrap().contains("no real output"));
         assert_eq!(r["accountNumber"], 2, "the account must survive");
-        assert_eq!(r["configDir"], profile_dir.as_str(), "the profile must survive");
+        assert_eq!(
+            r["configDir"],
+            profile_dir.as_str(),
+            "the profile must survive"
+        );
         assert_eq!(r["mode"], "acceptEdits");
         assert_eq!(r["prompt"], "refactor the parser");
         assert_eq!(r["turns"], 2);
@@ -3176,13 +3217,19 @@ mod tests {
         // Patching a record that is not there is not an error: the run may have
         // been forgotten while its verification was still in flight.
         let v = eng
-            .call_json("agent_run_patch", &json!({ "id": "nope", "status": "failed" }))
+            .call_json(
+                "agent_run_patch",
+                &json!({ "id": "nope", "status": "failed" }),
+            )
             .unwrap();
         assert_eq!(v["patched"], false);
 
         // A status the journal does not know is refused rather than stored.
         assert!(eng
-            .call_json("agent_run_patch", &json!({ "id": "run-1", "status": "banana" }))
+            .call_json(
+                "agent_run_patch",
+                &json!({ "id": "run-1", "status": "banana" })
+            )
             .is_err());
     }
 
@@ -3192,13 +3239,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
 
-        let projects = eng.paths.claude_config_home.join("projects").join("D--work");
+        let projects = eng
+            .paths
+            .claude_config_home
+            .join("projects")
+            .join("D--work");
         std::fs::create_dir_all(&projects).unwrap();
         let user = json!({"type":"user","cwd":"D:\\work",
                           "message":{"role":"user","content":[{"type":"text","text":"go"}]}});
 
         let write = |id: &str, last: serde_json::Value| {
-            std::fs::write(projects.join(format!("{id}.jsonl")), format!("{user}\n{last}\n")).unwrap();
+            std::fs::write(
+                projects.join(format!("{id}.jsonl")),
+                format!("{user}\n{last}\n"),
+            )
+            .unwrap();
         };
 
         write(
@@ -3213,7 +3268,9 @@ mod tests {
                    "content":[{"type":"text","text":"No response requested."}]}}),
         );
 
-        let v = eng.call_json("session_tail", &json!({ "sessionId": "real" })).unwrap();
+        let v = eng
+            .call_json("session_tail", &json!({ "sessionId": "real" }))
+            .unwrap();
         assert_eq!(v["found"], true);
         assert_eq!(v["state"], "awaitingUser");
         assert_eq!(v["producedRealReply"], true);
@@ -3221,12 +3278,16 @@ mod tests {
         assert!(v["modifiedMs"].as_i64().unwrap_or(0) > 0);
 
         // The case the protocol reports as `end_turn` regardless.
-        let v = eng.call_json("session_tail", &json!({ "sessionId": "swallowed" })).unwrap();
+        let v = eng
+            .call_json("session_tail", &json!({ "sessionId": "swallowed" }))
+            .unwrap();
         assert_eq!(v["state"], "dangling");
         assert_eq!(v["producedRealReply"], false);
 
         // A session with no transcript is not a success either.
-        let v = eng.call_json("session_tail", &json!({ "sessionId": "nope" })).unwrap();
+        let v = eng
+            .call_json("session_tail", &json!({ "sessionId": "nope" }))
+            .unwrap();
         assert_eq!(v["found"], false);
         assert_eq!(v["producedRealReply"], false);
     }
@@ -3323,7 +3384,11 @@ mod tests {
         // It must land under the *same* encoded project folder — that name is
         // lossy and cannot be recomputed, so it is reused rather than derived.
         assert_eq!(
-            dest.parent().unwrap().file_name().unwrap().to_string_lossy(),
+            dest.parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
             folder
         );
         assert!(
@@ -3413,8 +3478,7 @@ mod tests {
         // only for window/cooldown — not for the other account.
         let one = eng.warmup_now(Some(1)).unwrap();
         assert!(
-            one.fired.iter().all(|f| f.number == 1)
-                && one.skipped.iter().all(|s| s.number == 1),
+            one.fired.iter().all(|f| f.number == 1) && one.skipped.iter().all(|s| s.number == 1),
             "single-target result must only mention slot 1: {one:?}"
         );
     }

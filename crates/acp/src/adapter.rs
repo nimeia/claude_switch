@@ -44,7 +44,9 @@ pub enum AdapterError {
 impl std::fmt::Display for AdapterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NodeNotFound => write!(f, "node executable not found on PATH (node >= 22 required)"),
+            Self::NodeNotFound => {
+                write!(f, "node executable not found on PATH (node >= 22 required)")
+            }
             Self::AdapterNotFound { searched } => {
                 write!(f, "{ADAPTER_PACKAGE} not found; searched:")?;
                 for p in searched {
@@ -52,7 +54,9 @@ impl std::fmt::Display for AdapterError {
                 }
                 Ok(())
             }
-            Self::WorkDirMissing(p) => write!(f, "working directory does not exist: {}", p.display()),
+            Self::WorkDirMissing(p) => {
+                write!(f, "working directory does not exist: {}", p.display())
+            }
             Self::Spawn(e) => write!(f, "spawning adapter: {e}"),
         }
     }
@@ -210,7 +214,12 @@ fn candidate_module_roots() -> Vec<PathBuf> {
 
     // Global npm prefix.
     if let Some(home) = home_dir() {
-        roots.push(home.join("AppData").join("Roaming").join("npm").join("node_modules"));
+        roots.push(
+            home.join("AppData")
+                .join("Roaming")
+                .join("npm")
+                .join("node_modules"),
+        );
         roots.push(home.join(".npm-global").join("lib").join("node_modules"));
         roots.push(home.join(".local").join("lib").join("node_modules"));
     }
@@ -284,7 +293,9 @@ mod tests {
         let roots = candidate_module_roots();
         assert!(
             roots.iter().any(|r| r.ends_with("tools/acp/node_modules")
-                || r.to_string_lossy().replace('\\', "/").ends_with("tools/acp/node_modules")),
+                || r.to_string_lossy()
+                    .replace('\\', "/")
+                    .ends_with("tools/acp/node_modules")),
             "repo-local adapter root missing from search list"
         );
     }

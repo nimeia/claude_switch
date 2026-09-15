@@ -256,7 +256,13 @@ fn process_started_ms(pid: u32) -> Option<i64> {
         }
         let mut creation = 0u64;
         let mut scratch = 0u64;
-        let ok = GetProcessTimes(handle, &mut creation, &mut scratch, &mut scratch, &mut scratch);
+        let ok = GetProcessTimes(
+            handle,
+            &mut creation,
+            &mut scratch,
+            &mut scratch,
+            &mut scratch,
+        );
         CloseHandle(handle);
         if ok == 0 || creation == 0 {
             return None;
@@ -341,9 +347,11 @@ pub fn live_sessions_for(session_dir: &Path) -> Vec<LiveSession> {
         if !is_pid_alive(pid) {
             continue;
         }
-        let proc_start = v
-            .get("procStart")
-            .and_then(|p| p.as_str().and_then(|s| s.parse().ok()).or_else(|| p.as_u64()));
+        let proc_start = v.get("procStart").and_then(|p| {
+            p.as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| p.as_u64())
+        });
         let started_at_ms = v.get("startedAt").and_then(Value::as_i64).unwrap_or(0);
         if !pid_file_matches_process(pid, proc_start, started_at_ms) {
             continue;
