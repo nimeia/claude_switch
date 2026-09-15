@@ -33,9 +33,23 @@ public class TaskBoardTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private void Save(string id, string status) =>
-        _store.Save(id, sessionId: id, cwd: "D:/work/proj", accountNumber: 1,
+    /// <summary>
+    /// Journal a run with a real directory and conversation behind it.
+    /// </summary>
+    /// <remarks>
+    /// The journal keeps a resumable record only while both exist — a made-up
+    /// path is exactly what it now drops — so the fixture has to be real.
+    /// </remarks>
+    private void Save(string id, string status)
+    {
+        var work = Path.Combine(_root, "work", "proj");
+        var transcripts = Path.Combine(_root, ".claude", "projects", "proj");
+        Directory.CreateDirectory(work);
+        Directory.CreateDirectory(transcripts);
+        File.WriteAllText(Path.Combine(transcripts, id + ".jsonl"), "{}\n");
+        _store.Save(id, sessionId: id, cwd: work, accountNumber: 1,
             configDir: null, mode: null, prompt: "do the thing", status: status);
+    }
 
     [Fact]
     public void Ignoring_a_run_removes_only_that_record()
@@ -267,6 +281,63 @@ public class TaskBoardTests : IDisposable
         shuffled.Sort((a, b) => a.State.CompareTo(b.State));
 
         Assert.Equal(states, shuffled.Select(e => e.State).ToArray());
+    }
+
+    [Fact]
+    public void A_second_band_has_its_own_heading_and_preference()
+    {
+        // The recent-conversations band reuses this control. Its heading is not
+        // a task tally, and it must neither start from nor rewrite the task
+        // band's stored expanded state.
+        bool saved = false;
+        using var board = new TaskBoard(
+            entries => $"recent {entries.Count}", () => false, _ => saved = true);
+        board.Show(Many(TaskBoard.PageSize + 2));
+
+        Assert.False(board.IsExpandedForTest);
+        Assert.Equal(TaskBoard.MaxRows, board.RowCount);
+        Assert.Equal($"recent {TaskBoard.PageSize + 2}", board.SummaryForTest);
+        Assert.False(saved);
+    }
+
+    [Fact]
+    public void A_recent_conversation_sorts_below_every_task_state()
+    {
+        // The enum order is the priority order the task band sorts by; a
+        // conversation that is merely resumable must never rank above work.
+        Assert.All(
+            Enum.GetValues<TaskState>().Where(s => s != TaskState.Updated),
+            s => Assert.True(s < TaskState.Updated, s.ToString()));
+    }
+    [Fact]
+    public void A_band_with_a_window_opens_it_instead_of_expanding()
+    {
+        // The recent-conversations band sends "see all" to its own window: a
+        // list meant for searching and clearing out does not belong between the
+        // account cards, paging.
+        int opened = 0;
+        using var board = new TaskBoard(_ => "recent", () => false, _ => { }, () => opened++, "all");
+        board.Show(Many(TaskBoard.PageSize + 2));
+        Assert.True(board.SeeAllShownForTest);
+
+        board.ClickSeeAllForTest();
+
+        Assert.Equal(1, opened);
+        Assert.False(board.IsExpandedForTest);
+        Assert.Equal(TaskBoard.MaxRows, board.RowCount);
+    }
+
+    [Fact]
+    public void The_window_link_shows_even_when_every_loaded_row_fits()
+    {
+        // The window holds more than the band loaded, so the link is not only
+        // for when rows are hidden here — but a band with nothing hides it.
+        using var board = new TaskBoard(_ => "recent", () => false, _ => { }, () => { }, "all");
+        board.Show([Entry(TaskState.Updated, "one")]);
+        Assert.True(board.SeeAllShownForTest);
+
+        board.Show([]);
+        Assert.False(board.SeeAllShownForTest);
     }
 
     [Theory]

@@ -89,6 +89,19 @@ pub struct Snapshot {
     pub next_poll_seconds: f64,
 }
 
+/// What adding the live login did.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddedAccount {
+    pub number: u32,
+    /// The login was already listed, so its own slot was refreshed instead of
+    /// a second one being added.
+    pub existing: bool,
+    pub email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+}
+
 /// Required string parameter, named in the error so a typo is obvious.
 fn str_param<'a>(params: &'a serde_json::Value, key: &str) -> Result<&'a str> {
     params
@@ -114,6 +127,13 @@ fn transcript_dirs_param(params: &serde_json::Value) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(vec![PathBuf::from(str_param(params, "transcriptDir")?)])
+}
+
+/// A history cleanup request (see [`crate::cleanup::CleanupRequest`]); an empty
+/// object selects nothing.
+fn cleanup_request(params: &serde_json::Value) -> Result<crate::cleanup::CleanupRequest> {
+    serde_json::from_value(params.clone())
+        .map_err(|e| Error::Validation(format!("invalid cleanup request: {e}")))
 }
 
 /// Everything the shell needs to launch one session terminal.
@@ -1117,10 +1137,32 @@ impl Engine {
         Ok(result)
     }
 
-    pub fn add_current(&self, slot: Option<u32>, alias: Option<String>) -> Result<u32> {
-        let n = self.switcher.add_current_account(slot, alias)?;
+    /// Capture the live Claude Code login into a slot.
+    ///
+    /// Without an explicit `slot`, a login that is already listed refreshes its
+    /// own slot. It used to take the next free number every time, so adding
+    /// twice — or "sign in again" on a card, which adds — listed one account
+    /// twice. "Already listed" is decided the way the current-account badge is
+    /// ([`Engine::resolve_active`]), and only on a verified answer: a guess must
+    /// not overwrite another account's slot.
+    pub fn add_current(&self, slot: Option<u32>, alias: Option<String>) -> Result<AddedAccount> {
+        let existing = if slot.is_none() {
+            let live = self.resolve_active(&self.switcher.load_sequence()?);
+            live.number.filter(|_| live.verified)
+        } else {
+            None
+        };
+        let number = self
+            .switcher
+            .add_current_account(slot.or(existing), alias)?;
         self.emit(CoreEvent::SnapshotUpdated);
-        Ok(n)
+        let rec = self.switcher.load_sequence()?.account(number).cloned();
+        Ok(AddedAccount {
+            number,
+            existing: existing.is_some(),
+            email: rec.as_ref().map(|r| r.email.clone()).unwrap_or_default(),
+            alias: rec.and_then(|r| r.alias),
+        })
     }
 
     /// Test/import helper.
@@ -1558,7 +1600,14 @@ impl Engine {
             if message.is_empty() && kind.is_none() {
                 TurnOutcome::Interrupted(InterruptKind::Unknown)
             } else {
-                TurnOutcome::Interrupted(autocontinue::classify_failure(kind, message))
+                // Read on every decision, so an installed rules update applies
+                // to the next interruption without a restart.
+                let rules = crate::rules::load(&self.paths.detection_rules_file);
+                TurnOutcome::Interrupted(autocontinue::classify_failure_with(
+                    &rules.rules.classification,
+                    kind,
+                    message,
+                ))
             }
         };
 
@@ -1587,6 +1636,9 @@ impl Engine {
             .and_then(|n| u32::try_from(n).ok());
         let quota = self.quota_context(account);
 
+        // Exhausted-quota transients must look like a rate-limit in this
+        // payload: the GUI increments `rateLimitWaits` off `outcome.value`.
+        let outcome = autocontinue::effective_outcome(outcome, &quota);
         let decision = autocontinue::decide(outcome, attempt, waits, &policy, &quota);
         let mut out = serde_json::to_value(decision)
             .map_err(|e| Error::Internal(e.to_string()))?;
@@ -1821,7 +1873,9 @@ impl Engine {
             .clamp();
 
         let roots = stalled::scan_roots(&self.paths.env, &self.paths.backup_root);
-        let sessions = stalled::scan_all(&roots, agentruns::now_ms(), criteria);
+        // Read per sweep, so an installed rules update applies to the next one.
+        let rules = crate::rules::load(&self.paths.detection_rules_file);
+        let sessions = stalled::scan_all(&roots, agentruns::now_ms(), criteria, &rules.rules);
         Ok(json!({ "sessions": sessions, "criteria": criteria }))
     }
 
@@ -1844,7 +1898,7 @@ impl Engine {
 
         let tail = stalled::classify_tail(&stalled::read_tail_lines(&path));
         let message = match &tail {
-            stalled::TailState::Failed { message } => Some(message.clone()),
+            stalled::TailState::Failed { message, .. } => Some(message.clone()),
             _ => None,
         };
         // The mtime is the only reliable "something was appended" signal: a
@@ -1874,13 +1928,29 @@ impl Engine {
         let path = &self.paths.agent_runs_file;
         let mut journal = agentruns::RunJournal::load(path);
         let demoted = journal.reap(agentruns::now_ms(), &agentruns::process_is_alive);
-        if !demoted.is_empty() {
+        // After reaping, so a run whose app just died is judged like any other
+        // interrupted run: kept exactly when its conversation can still be
+        // loaded. Resuming never starts afresh — it always loads the recorded
+        // session — so a record whose transcript or directory is gone can only
+        // fail, and interrupted records are otherwise never pruned.
+        let default_home = {
+            let mut base = self.paths.env.clone();
+            base.claude_config_dir = None;
+            base.claude_config_home()
+        };
+        let stale =
+            journal.drop_unresumable(&|run| crate::resume::run_blocker(run, &default_home));
+        if !demoted.is_empty() || !stale.is_empty() {
             journal.save(path)?;
         }
         Ok(json!({
             "schemaVersion": agentruns::JOURNAL_SCHEMA_VERSION,
             "runs": journal.runs,
             "demoted": demoted,
+            "removedStale": stale
+                .iter()
+                .map(|(id, why)| json!({ "id": id, "reason": why }))
+                .collect::<Vec<_>>(),
             "tally": journal.tally(),
         }))
     }
@@ -1944,6 +2014,98 @@ impl Engine {
         Ok(json!({ "removed": removed }))
     }
 
+    /// Config homes holding history, and which profiles lost their account.
+    fn history_roots(&self) -> Vec<crate::cleanup::HistoryRoot> {
+        // An unreadable account list must not make every profile look
+        // abandoned — that would offer a live account's history for deletion.
+        let managed: Option<Vec<PathBuf>> = self.switcher.load_sequence().ok().map(|seq| {
+            seq.sequence
+                .iter()
+                .filter_map(|&n| seq.account(n).map(|rec| self.session_dir(n, &rec.email)))
+                .collect()
+        });
+        crate::cleanup::history_roots(&self.paths.env, &self.paths.backup_root, managed.as_deref())
+    }
+
+    /// The run journal with dead owners demoted, without writing it back.
+    fn reaped_runs(&self) -> Vec<agentruns::AgentRun> {
+        let mut journal = agentruns::RunJournal::load(&self.paths.agent_runs_file);
+        journal.reap(agentruns::now_ms(), &agentruns::process_is_alive);
+        journal.runs
+    }
+
+    /// Delete what a cleanup request selects, then drop run records that
+    /// pointed at the deleted sessions — a resume offer for a conversation that
+    /// no longer exists would only fail when clicked.
+    fn history_cleanup_apply(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        let req = cleanup_request(params)?;
+        let roots = self.history_roots();
+        let runs = self.reaped_runs();
+        let ctx = crate::cleanup::PlanContext {
+            roots: &roots,
+            runs: &runs,
+            now_ms: agentruns::now_ms(),
+        };
+        let mut outcome = crate::cleanup::apply(&ctx, &req)?;
+
+        if !outcome.removed_run_ids.is_empty() {
+            let path = &self.paths.agent_runs_file;
+            let mut journal = agentruns::RunJournal::load(path);
+            let removed = outcome
+                .removed_run_ids
+                .iter()
+                .filter(|id| journal.remove(id.as_str()))
+                .count();
+            if removed > 0 {
+                journal.save(path)?;
+            }
+            outcome.removed_runs = u32::try_from(removed).unwrap_or(u32::MAX);
+        }
+        serde_json::to_value(outcome).map_err(|e| Error::Internal(e.to_string()))
+    }
+
+    /// The default home's `settings.json`, where `cleanupPeriodDays` lives.
+    ///
+    /// Session profiles pick the value up through settings sharing on their
+    /// next launch; writing each profile's copy here would only be overwritten
+    /// by that same sync.
+    fn default_settings_file(&self) -> PathBuf {
+        let mut base = self.paths.env.clone();
+        base.claude_config_dir = None;
+        base.claude_config_home().join("settings.json")
+    }
+
+    /// Current retention. An unreadable settings file is reported, not raised:
+    /// the cleanup dialog still works without it.
+    fn history_retention_get(&self) -> serde_json::Value {
+        let path = self.default_settings_file();
+        let mut out = json!({
+            "defaultDays": crate::cleanup::DEFAULT_RETENTION_DAYS,
+            "maxDays": crate::cleanup::MAX_RETENTION_DAYS,
+            "path": path.to_string_lossy(),
+            "days": serde_json::Value::Null,
+        });
+        match crate::cleanup::read_retention(&path) {
+            Ok(days) => out["days"] = json!(days),
+            Err(e) => out["error"] = json!(e.to_string()),
+        }
+        out
+    }
+
+    /// Set retention in days, or `null` to return to Claude Code's default.
+    fn history_retention_set(&self, params: &serde_json::Value) -> Result<serde_json::Value> {
+        let days = match params.get("days") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => Some(
+                v.as_u64()
+                    .and_then(|d| u32::try_from(d).ok())
+                    .ok_or_else(|| Error::Validation("days must be a whole number".into()))?,
+            ),
+        };
+        crate::cleanup::write_retention(&self.default_settings_file(), days)?;
+        Ok(self.history_retention_get())
+    }
+
     /// JSON-RPC style call for C ABI method catalog.
     /// The FFI surface: one arm per method.
     ///
@@ -1964,14 +2126,33 @@ impl Engine {
             // Directory views. Listing is cheap (registry + transcript heads);
             // `project_stats` reads every transcript byte, so it is only ever
             // run when the user asks for it.
+            // Both annotated with what can actually be resumed, and where — see
+            // `crate::resume`. The shell offers only what the engine marks.
             "list_projects" => {
-                let list = crate::projects::list_projects_in(&self.scan_envs())?;
+                let mut list = crate::projects::list_projects_in(&self.scan_envs())?;
+                crate::resume::annotate_projects(&mut list, &self.history_roots());
                 Ok(json!({ "projects": list }))
             }
             "list_sessions" => {
                 let dirs = transcript_dirs_param(params)?;
-                let list = crate::projects::list_sessions_in(&dirs)?;
+                let mut list = crate::projects::list_sessions_in(&dirs)?;
+                crate::resume::annotate_sessions(&mut list, &self.history_roots());
                 Ok(json!({ "sessions": list }))
+            }
+            // The home page's resume menu: newest conversations, any directory.
+            "recent_sessions" => {
+                let limit = params
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .unwrap_or(8)
+                    // The home page asks for a few; the conversations window
+                    // lists hundreds.
+                    .clamp(1, 1000);
+                let directories = crate::projects::list_projects_in(&self.scan_envs())?;
+                let recent =
+                    crate::resume::recent_sessions(&directories, &self.history_roots(), limit);
+                Ok(json!({ "sessions": recent }))
             }
             "overview_stats" => {
                 let o = crate::projects::scan_overview_cached_in(
@@ -2002,6 +2183,68 @@ impl Engine {
                 let dirs = transcript_dirs_param(params)?;
                 let stats = crate::projects::scan_stats_in(&dirs)?;
                 Ok(serde_json::to_value(stats).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            // History cleanup. A plan is read-only and cheap enough to run on
+            // every change in the dialog; applying plans again rather than
+            // trusting the paths a caller was shown.
+            "history_cleanup_plan" => {
+                let req = cleanup_request(params)?;
+                let roots = self.history_roots();
+                let runs = self.reaped_runs();
+                let ctx = crate::cleanup::PlanContext {
+                    roots: &roots,
+                    runs: &runs,
+                    now_ms: agentruns::now_ms(),
+                };
+                let plan = crate::cleanup::plan(&ctx, &req)?;
+                Ok(serde_json::to_value(plan).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "history_cleanup_apply" => self.history_cleanup_apply(params),
+            "history_retention_get" => Ok(self.history_retention_get()),
+            "history_retention_set" => self.history_retention_set(params),
+            "history_purge_preflight" => {
+                let path = str_param(params, "path")?;
+                let roots = self.history_roots();
+                let runs = self.reaped_runs();
+                let pre = crate::cleanup::purge_preflight(&roots, &runs, path);
+                Ok(serde_json::to_value(pre).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            // Directories only registered with Claude Code — the rows with no
+            // sessions. Backups sit beside the account backups, which already
+            // hold copies of this same file.
+            "history_registry_plan" => {
+                let only: Option<Vec<String>> = params
+                    .get("paths")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    });
+                let plan = crate::cleanup::registry_plan(
+                    &self.history_roots(),
+                    only.as_deref(),
+                    &self.paths.backup_root.join("claude-json-backups"),
+                );
+                Ok(serde_json::to_value(plan).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "history_registry_remove" => {
+                let paths: Vec<String> = params
+                    .get("paths")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .ok_or_else(|| Error::Validation("missing paths".into()))?;
+                let outcome = crate::cleanup::registry_remove(
+                    &self.history_roots(),
+                    &paths,
+                    &self.paths.backup_root.join("claude-json-backups"),
+                    Duration::from_secs_f64(crate::locks::DEFAULT_LOCK_TIMEOUT_S),
+                );
+                Ok(serde_json::to_value(outcome).map_err(|e| Error::Internal(e.to_string()))?)
             }
             // Session mode: one account per terminal, in parallel.
             "session_prepare" => {
@@ -2053,8 +2296,8 @@ impl Engine {
                     .get("alias")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
-                let n = self.add_current(slot, alias)?;
-                Ok(json!({"number": n}))
+                let added = self.add_current(slot, alias)?;
+                Ok(serde_json::to_value(added).map_err(|e| Error::Internal(e.to_string()))?)
             }
             "add_raw" => {
                 let num = params
@@ -2209,6 +2452,26 @@ impl Engine {
             // the fields the caller no longer has.
             "agent_run_patch" => self.agent_run_patch(params),
             "agent_run_handoff" => self.agent_run_handoff(params),
+            // The judgements that depend on wording we do not control — error
+            // kinds and text, Claude Code's transcript notices — as installable
+            // data (see `crate::rules`), so an update can follow a new wording
+            // without a new build.
+            "detection_rules_get" => Ok(crate::rules::describe(&self.paths.detection_rules_file)),
+            "detection_rules_set" => {
+                let doc = params
+                    .get("rules")
+                    .ok_or_else(|| Error::Validation("rules is required".into()))?;
+                let allow_downgrade = params
+                    .get("allowDowngrade")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                crate::rules::install(&self.paths.detection_rules_file, doc, allow_downgrade)?;
+                Ok(crate::rules::describe(&self.paths.detection_rules_file))
+            }
+            "detection_rules_reset" => {
+                crate::rules::reset(&self.paths.detection_rules_file)?;
+                Ok(crate::rules::describe(&self.paths.detection_rules_file))
+            }
             // The GUI launches the ACP agent itself and must hand it the same
             // proxy Claude Code would use. Resolving it here rather than in C#
             // keeps one implementation of the registry/env precedence rules.
@@ -2466,9 +2729,114 @@ mod tests {
     }
 
     #[test]
+    fn acp_decide_exhausted_network_error_is_a_rate_limit_for_the_gui() {
+        // The GUI keys rateLimitWaits vs attempt off outcome.value. A network
+        // error on an empty window must arrive as rateLimit, or the wait budget
+        // never binds and the run sleeps in a loop.
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+        eng.add_raw(
+            1,
+            "a@x.com",
+            &oauth_cred("a@x.com", "tok-a"),
+            &oauth_cfg("a@x.com"),
+            None,
+        )
+        .unwrap();
+        let reset = (chrono::Utc::now() + chrono::TimeDelta::seconds(1800)).to_rfc3339();
+        eng.usage.put(
+            1,
+            crate::usage::Usage {
+                five_hour: Some(crate::usage::UsageWindow {
+                    pct: 99.5,
+                    resets_at: Some(reset),
+                }),
+                seven_day: None,
+            },
+            UsageStatus::Ok,
+        );
+
+        let v = eng
+            .call_json(
+                "acp_decide",
+                &json!({
+                    "errorKind": "server_error",
+                    "message": "API Error: 529 Overloaded",
+                    "attempt": 0,
+                    "rateLimitWaits": 0,
+                    "accountNumber": 1,
+                }),
+            )
+            .unwrap();
+        assert_eq!(v["outcome"]["value"], "rateLimit", "{v}");
+        assert_eq!(v["action"], "continue");
+        assert_eq!(v["quota"]["exhausted"], true);
+        let delay = v["delaySeconds"].as_u64().expect("delaySeconds");
+        // Quota-scale (reset ~30 min + margin), not the 10s network backoff.
+        assert!(delay > 15 * 60, "delay {delay} is not a quota wait");
+        assert!(delay <= 1800 + 90, "delay {delay} overshot the reset");
+
+        let v = eng
+            .call_json(
+                "acp_decide",
+                &json!({
+                    "errorKind": "server_error",
+                    "message": "API Error: 529 Overloaded",
+                    "attempt": 0,
+                    "rateLimitWaits": 3,
+                    "accountNumber": 1,
+                    "policy": { "maxRateLimitWaits": 3 }
+                }),
+            )
+            .unwrap();
+        assert_eq!(v["action"], "stop");
+        assert_eq!(v["cause"], "rateLimitWaitsExhausted");
+        assert_eq!(v["outcome"]["value"], "rateLimit");
+    }
+
+    #[test]
+    fn acp_decide_one_shot_policy_stops_on_a_network_blip() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+        let v = eng
+            .call_json(
+                "acp_decide",
+                &json!({
+                    "errorKind": "server_error",
+                    "message": "API Error: 529 Overloaded",
+                    "policy": {
+                        "maxAttempts": 0,
+                        "continueOnTruncation": false,
+                        "maxLongRetries": 0,
+                        "maxRateLimitWaits": 0
+                    }
+                }),
+            )
+            .unwrap();
+        assert_eq!(v["action"], "stop", "{v}");
+        assert_eq!(v["cause"], "attemptsExhausted");
+    }
+
+    #[test]
     fn agent_run_journal_over_the_ffi_surface() {
         let dir = tempfile::tempdir().unwrap();
         let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+
+        // A real directory and real transcripts: a resumable record is kept
+        // only while its conversation can still be loaded.
+        let work = dir.path().join("work");
+        let transcripts = eng
+            .paths
+            .env
+            .claude_config_home()
+            .join("projects")
+            .join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&transcripts).unwrap();
+        for id in ["sess-live", "sess-orphan"] {
+            std::fs::write(transcripts.join(format!("{id}.jsonl")), "{}\n").unwrap();
+        }
+        let cwd = work.to_string_lossy().to_string();
 
         // Empty to start.
         let v = eng.call_json("agent_run_list", &json!({})).unwrap();
@@ -2478,7 +2846,7 @@ mod tests {
         let mine = json!({
             "id": "run-live",
             "sessionId": "sess-live",
-            "cwd": "D:/work",
+            "cwd": cwd,
             "prompt": "refactor the parser",
             "status": "running",
             "ownerPid": std::process::id(),
@@ -2491,7 +2859,7 @@ mod tests {
         let orphan = json!({
             "id": "run-orphan",
             "sessionId": "sess-orphan",
-            "cwd": "D:/work",
+            "cwd": cwd,
             "prompt": "run the migration",
             "status": "running",
             // Pid 0 is never a live process, so this is deterministic.
@@ -2550,6 +2918,76 @@ mod tests {
         assert!(eng
             .call_json("agent_run_upsert", &json!({ "id": "  " }))
             .is_err());
+    }
+
+    #[test]
+    fn detection_rules_over_the_ffi_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+        let quota_paused = json!({ "message": "Quota paused until 3pm", "attempt": 0 });
+
+        // Built in until something is installed.
+        let v = eng.call_json("detection_rules_get", &json!({})).unwrap();
+        assert_eq!(v["source"], "builtin");
+        assert_eq!(v["revision"], 0);
+        let v = eng.call_json("acp_decide", &quota_paused).unwrap();
+        assert_eq!(v["outcome"]["value"], "unknown");
+
+        // An update teaches it a new wording, and applies to the very next decision.
+        let v = eng
+            .call_json(
+                "detection_rules_set",
+                &json!({
+                    "rules": { "revision": 2, "classification": { "rateLimitText": [["quota paused"]] } }
+                }),
+            )
+            .unwrap();
+        assert_eq!(v["source"], "file");
+        assert_eq!(v["revision"], 2);
+        let v = eng.call_json("acp_decide", &quota_paused).unwrap();
+        assert_eq!(v["outcome"]["value"], "rateLimit", "{v}");
+
+        // A given list replaces the built-in one, and the kind still recognises the wall.
+        let v = eng
+            .call_json(
+                "acp_decide",
+                &json!({ "message": "Claude AI usage limit reached" }),
+            )
+            .unwrap();
+        assert_eq!(v["outcome"]["value"], "unknown");
+        let v = eng
+            .call_json(
+                "acp_decide",
+                &json!({ "errorKind": "rate_limit", "message": "Claude AI usage limit reached" }),
+            )
+            .unwrap();
+        assert_eq!(v["outcome"]["value"], "rateLimit");
+
+        // A replayed older update, rules that would match everything, and a
+        // request without rules are all refused.
+        assert!(eng
+            .call_json(
+                "detection_rules_set",
+                &json!({ "rules": { "revision": 1 } })
+            )
+            .is_err());
+        assert!(eng
+            .call_json(
+                "detection_rules_set",
+                &json!({ "rules": { "revision": 3, "classification": { "networkText": [[""]] } } })
+            )
+            .is_err());
+        assert!(eng.call_json("detection_rules_set", &json!({})).is_err());
+
+        // A file broken on disk falls back to the built-in rules and says why.
+        std::fs::write(&eng.paths.detection_rules_file, "{ not json").unwrap();
+        let v = eng.call_json("detection_rules_get", &json!({})).unwrap();
+        assert_eq!(v["source"], "builtin");
+        assert!(v["rejected"].as_str().is_some_and(|s| !s.is_empty()));
+
+        let v = eng.call_json("detection_rules_reset", &json!({})).unwrap();
+        assert_eq!(v["source"], "builtin");
+        assert!(v["rejected"].is_null());
     }
 
     #[test]
@@ -2671,14 +3109,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
 
+        // A real directory and a real profile holding the conversation: the
+        // patched record becomes resumable, and is only kept while it can be.
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let profile = dir.path().join("backup").join("sessions").join("2-a_x.com");
+        let transcripts = profile.join("projects").join("work");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        std::fs::write(transcripts.join("sess-1.jsonl"), "{}\n").unwrap();
+        let profile_dir = profile.to_string_lossy().to_string();
+
         eng.call_json(
             "agent_run_upsert",
             &json!({
                 "id": "run-1",
                 "sessionId": "sess-1",
-                "cwd": "D:/work",
+                "cwd": work.to_string_lossy(),
                 "accountNumber": 2,
-                "configDir": "D:/backup/sessions/2-a_x.com",
+                "configDir": profile_dir,
                 "mode": "acceptEdits",
                 "prompt": "refactor the parser",
                 "status": "completed",
@@ -2718,7 +3166,7 @@ mod tests {
         assert_eq!(r["status"], "interrupted");
         assert!(r["lastError"].as_str().unwrap().contains("no real output"));
         assert_eq!(r["accountNumber"], 2, "the account must survive");
-        assert_eq!(r["configDir"], "D:/backup/sessions/2-a_x.com", "the profile must survive");
+        assert_eq!(r["configDir"], profile_dir.as_str(), "the profile must survive");
         assert_eq!(r["mode"], "acceptEdits");
         assert_eq!(r["prompt"], "refactor the parser");
         assert_eq!(r["turns"], 2);
@@ -3124,12 +3572,12 @@ mod tests {
         let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
 
         login_as(&eng, "a@x.com", "tok-a");
-        assert_eq!(eng.add_current(None, None).unwrap(), 1);
+        assert_eq!(eng.add_current(None, None).unwrap().number, 1);
 
         // Log in as someone else, then capture that too: slot 2 is now live —
         // previously `activeAccountNumber` stayed pinned to the first add.
         login_as(&eng, "b@x.com", "tok-b");
-        assert_eq!(eng.add_current(None, None).unwrap(), 2);
+        assert_eq!(eng.add_current(None, None).unwrap().number, 2);
         assert_eq!(
             eng.switcher.load_sequence().unwrap().active_account_number,
             Some(2)
@@ -3140,6 +3588,44 @@ mod tests {
         let seq = eng.switcher.load_sequence().unwrap();
         assert_eq!(seq.account(2).unwrap().uuid, "uuid-b@x.com");
         assert_eq!(seq.account(2).unwrap().org_uuid, "org-b@x.com");
+    }
+
+    #[test]
+    fn adding_a_login_that_is_already_listed_refreshes_its_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+
+        login_as(&eng, "a@x.com", "tok-a");
+        let first = eng.add_current(None, None).unwrap();
+        assert_eq!((first.number, first.existing), (1, false));
+        login_as(&eng, "b@x.com", "tok-b");
+        assert_eq!(eng.add_current(None, None).unwrap().number, 2);
+
+        // Named and parked by the user in the meantime.
+        let mut seq = eng.switcher.load_sequence().unwrap();
+        let rec = seq.account_mut(1).unwrap();
+        rec.alias = Some("work".into());
+        rec.disabled = true;
+        let added = rec.added.clone();
+        seq.save(&eng.paths.sequence_file).unwrap();
+
+        // Signing in as a again — say its token went stale — and adding it must
+        // not list it a second time, nor forget what the user set on it.
+        login_as(&eng, "a@x.com", "tok-a2");
+        let again = eng.add_current(None, None).unwrap();
+        assert_eq!((again.number, again.existing), (1, true));
+        assert_eq!(again.email, "a@x.com");
+        assert_eq!(again.alias.as_deref(), Some("work"));
+
+        let seq = eng.switcher.load_sequence().unwrap();
+        assert_eq!(seq.sequence, vec![1, 2]);
+        let rec = seq.account(1).unwrap();
+        assert!(rec.disabled);
+        assert_eq!(rec.added, added);
+        assert_eq!(seq.active_account_number, Some(1));
+        // The slot now holds the fresh login, not the stale one.
+        let stored = eng.switcher.store.read_slot(1, "a@x.com").unwrap().unwrap();
+        assert!(stored.contains("tok-a2"), "{stored}");
     }
 
     /// Credential shape Claude Code leaves behind on logout: metadata intact,
@@ -3809,6 +4295,117 @@ mod tests {
         let sessions = crate::projects::list_sessions_in(&dirs).unwrap();
         let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
         assert!(ids.contains(&"s-default") && ids.contains(&"s-session"));
+    }
+
+    #[test]
+    fn history_cleanup_runs_through_the_method_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = test_engine_with_mock(tmp.path().to_path_buf()).unwrap();
+        let folder = eng
+            .paths
+            .env
+            .claude_config_home()
+            .join("projects")
+            .join("D--old");
+        std::fs::create_dir_all(&folder).unwrap();
+        let transcript = folder.join("11111111-1111-4111-8111-111111111111.jsonl");
+        std::fs::write(
+            &transcript,
+            format!("{}\n", json!({"type": "user", "cwd": "D:\\old"})),
+        )
+        .unwrap();
+        // Old enough that the recent-write guard does not hold it back.
+        let old = std::time::SystemTime::now() - Duration::from_secs(3 * 24 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&transcript)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        let listed = eng.call_json("list_projects", &json!({})).unwrap();
+        assert!(listed["projects"][0]["totalBytes"].as_u64().unwrap() > 0);
+
+        let req = json!({ "transcriptDirs": [folder.to_string_lossy()] });
+        let plan = eng.call_json("history_cleanup_plan", &req).unwrap();
+        assert_eq!(plan["deletable"]["count"], json!(1));
+        let done = eng.call_json("history_cleanup_apply", &req).unwrap();
+        assert_eq!(done["deletedCount"], json!(1));
+        assert!(!transcript.exists());
+
+        let set = eng
+            .call_json("history_retention_set", &json!({ "days": 14 }))
+            .unwrap();
+        assert_eq!(set["days"], json!(14));
+        let cleared = eng
+            .call_json("history_retention_set", &json!({ "days": null }))
+            .unwrap();
+        assert_eq!(cleared["days"], serde_json::Value::Null);
+        assert_eq!(cleared["defaultDays"], json!(30));
+    }
+
+    #[test]
+    fn run_journal_drops_runs_that_can_no_longer_resume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = test_engine_with_mock(tmp.path().to_path_buf()).unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let folder = eng
+            .paths
+            .env
+            .claude_config_home()
+            .join("projects")
+            .join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("kept-session.jsonl"), "{}\n").unwrap();
+
+        let me = std::process::id();
+        let gone = tmp.path().join("deleted");
+        let record = |id: &str, session: &str, cwd: &std::path::Path, status: &str, pid: u32| {
+            json!({
+                "id": id, "sessionId": session, "cwd": cwd.to_string_lossy(),
+                "prompt": "p", "status": status, "ownerPid": pid,
+                "createdMs": 1, "updatedMs": 1
+            })
+        };
+        for r in [
+            record("keep", "kept-session", &work, "interrupted", 1),
+            record("dir-gone", "kept-session", &gone, "interrupted", 1),
+            record("swept", "no-transcript", &work, "failed", 1),
+            // Neither is offered for resuming, so neither is judged.
+            record("done", "no-transcript", &gone, "completed", 1),
+            record("running", "no-transcript", &gone, "running", me),
+        ] {
+            eng.call_json("agent_run_upsert", &r).unwrap();
+        }
+
+        let listed = eng.call_json("agent_run_list", &json!({})).unwrap();
+        let ids: Vec<&str> = listed["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert!(
+            ids.contains(&"keep") && ids.contains(&"done") && ids.contains(&"running"),
+            "{ids:?}"
+        );
+        assert!(
+            !ids.contains(&"dir-gone") && !ids.contains(&"swept"),
+            "{ids:?}"
+        );
+        let reasons: Vec<&str> = listed["removedStale"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["reason"].as_str().unwrap())
+            .collect();
+        assert_eq!(reasons.len(), 2, "{reasons:?}");
+        assert!(reasons.contains(&"directoryGone") && reasons.contains(&"transcriptGone"));
+
+        // Written back: a second read has nothing left to drop.
+        let again = eng.call_json("agent_run_list", &json!({})).unwrap();
+        assert!(again["removedStale"].as_array().unwrap().is_empty());
     }
 
     #[test]

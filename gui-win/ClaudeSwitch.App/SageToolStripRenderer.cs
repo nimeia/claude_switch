@@ -4,7 +4,7 @@ namespace ClaudeSwitch.App;
 
 /// <summary>
 /// Toolstrip roles via <see cref="ToolStripItem.Tag"/> string:
-/// "primary" | "danger" | "secondary" (default).
+/// "primary" | "danger" | "secondary" (default). Menu rows read "danger" too.
 /// Disabled primary stays readable (dark text on neutral fill).
 /// </summary>
 /// <remarks>
@@ -147,7 +147,9 @@ internal sealed class SageToolStripRenderer : ToolStripProfessionalRenderer
     /// </remarks>
     protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
     {
-        e.ArrowColor = e.Item?.Enabled == false ? Theme.TextDisabled : e.Item?.ForeColor ?? Theme.TextPrimary;
+        e.ArrowColor = e.Item is { IsOnDropDown: true } row
+            ? MenuTextColor(row)
+            : e.Item?.Enabled == false ? Theme.TextDisabled : e.Item?.ForeColor ?? Theme.TextPrimary;
         base.OnRenderArrow(e);
     }
 
@@ -178,13 +180,102 @@ internal sealed class SageToolStripRenderer : ToolStripProfessionalRenderer
 
     protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
     {
-        using var b = new SolidBrush(Theme.BgApp);
+        using var b = new SolidBrush(e.ToolStrip is ToolStripDropDown ? Theme.BgSurface : Theme.BgApp);
         e.Graphics.FillRectangle(b, e.AffectedBounds);
     }
 
     protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
     {
-        // no border
+        // The toolbar has none; a menu does, or in dark mode it has no edge
+        // against the window behind it.
+        if (e.ToolStrip is not ToolStripDropDown) return;
+        using var p = new Pen(Theme.Border);
+        e.Graphics.DrawRectangle(p, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+    }
+
+    /// <summary>
+    /// Menu rows: a rounded slate highlight under the pointer, nothing otherwise.
+    /// </summary>
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+    {
+        if (!e.Item.IsOnDropDown)
+        {
+            base.OnRenderMenuItemBackground(e);
+            return;
+        }
+        if (!e.Item.Selected || !e.Item.Enabled) return;
+
+        var r = new Rectangle(Point.Empty, e.Item.Size);
+        r.Inflate(-3, -1);
+        var g = e.Graphics;
+        var previous = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        try
+        {
+            Fill(g, r, Theme.BgSelected, border: null);
+        }
+        finally
+        {
+            g.SmoothingMode = previous;
+        }
+    }
+
+    /// <summary>
+    /// Menu text in the theme's colours.
+    /// </summary>
+    /// <remarks>
+    /// Left to the base renderer, a menu row took the system's black
+    /// <c>ControlText</c> (and <c>GrayText</c> when disabled), which on the dark
+    /// menu surface was nearly the colour of the surface itself. Tag "danger"
+    /// marks a destructive row, the same role word the toolbar uses.
+    /// </remarks>
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+    {
+        if (e.Item.IsOnDropDown)
+            e.TextColor = MenuTextColor(e.Item);
+        base.OnRenderItemText(e);
+    }
+
+    private static Color MenuTextColor(ToolStripItem item) =>
+        !item.Enabled ? Theme.TextMuted
+        : item.Tag as string == "danger" ? Theme.Danger
+        : Theme.TextPrimary;
+
+    /// <summary>
+    /// The check mark, drawn rather than taken from the base renderer's black glyph.
+    /// </summary>
+    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
+    {
+        if (!e.Item.IsOnDropDown)
+        {
+            base.OnRenderItemCheck(e);
+            return;
+        }
+        var r = e.ImageRectangle;
+        if (r.Width < 4 || r.Height < 4) return;
+
+        var g = e.Graphics;
+        var previous = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        try
+        {
+            using var p = new Pen(MenuTextColor(e.Item), Math.Max(1.5f, r.Height / 9f))
+            {
+                StartCap = LineCap.Round,
+                EndCap = LineCap.Round,
+                LineJoin = LineJoin.Round,
+            };
+            g.DrawLines(p, new[]
+            {
+                new PointF(r.Left + r.Width * 0.22f, r.Top + r.Height * 0.52f),
+                new PointF(r.Left + r.Width * 0.42f, r.Top + r.Height * 0.72f),
+                new PointF(r.Left + r.Width * 0.78f, r.Top + r.Height * 0.30f),
+            });
+        }
+        finally
+        {
+            g.SmoothingMode = previous;
+        }
     }
 
     protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
@@ -200,9 +291,12 @@ internal sealed class SageToolStripRenderer : ToolStripProfessionalRenderer
         public override Color ToolStripGradientBegin => Theme.BgApp;
         public override Color ToolStripGradientMiddle => Theme.BgApp;
         public override Color ToolStripGradientEnd => Theme.BgApp;
-        public override Color ImageMarginGradientBegin => Theme.BgApp;
-        public override Color ImageMarginGradientMiddle => Theme.BgApp;
-        public override Color ImageMarginGradientEnd => Theme.BgApp;
+        // The image margin only exists inside menus, so it matches the menu surface.
+        public override Color ImageMarginGradientBegin => Theme.BgSurface;
+        public override Color ImageMarginGradientMiddle => Theme.BgSurface;
+        public override Color ImageMarginGradientEnd => Theme.BgSurface;
+        public override Color ToolStripDropDownBackground => Theme.BgSurface;
+        public override Color MenuBorder => Theme.Border;
         public override Color SeparatorDark => Theme.BorderSoft;
         public override Color SeparatorLight => Theme.BorderSoft;
     }

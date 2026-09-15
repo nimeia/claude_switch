@@ -440,6 +440,11 @@ internal enum TaskState
     Interrupted,
     /// <summary>Stopped by the user.</summary>
     Cancelled,
+    /// <summary>
+    /// A conversation that can be picked up again. Used by the recent-conversations
+    /// band, never by the task band; last, so it can never sort ahead of work.
+    /// </summary>
+    Updated,
 }
 
 /// <summary>One task on the board.</summary>
@@ -568,7 +573,21 @@ internal sealed class TaskBoard : Panel
     /// band would fold itself the moment a run finished and unfold again when
     /// the next one started.
     /// </remarks>
-    private bool _expanded = UiPrefs.TasksExpanded;
+    private bool _expanded;
+
+    /// <summary>Builds the heading line; the task tally for the task band.</summary>
+    private readonly Func<IReadOnlyList<TaskEntry>, string> _summaryText;
+
+    /// <summary>Where a change to the expanded preference is kept.</summary>
+    private readonly Action<bool> _saveExpanded;
+
+    /// <summary>
+    /// Opens the whole list in its own window; null when the band expands in place.
+    /// </summary>
+    private readonly Action? _openAll;
+
+    /// <summary>What the link reads when it opens a window.</summary>
+    private readonly string? _openAllText;
 
     private int _page;
 
@@ -626,8 +645,38 @@ internal sealed class TaskBoard : Panel
           + (_pager.Visible ? PagerHeight : 0)
           + Theme.Space2;
 
+    /// <summary>The supervised-task band.</summary>
     public TaskBoard()
+        : this(null, () => UiPrefs.TasksExpanded, expanded => UiPrefs.TasksExpanded = expanded)
     {
+    }
+
+    /// <summary>
+    /// A band of the same shape that lists something else.
+    /// </summary>
+    /// <remarks>
+    /// The rows, paging and sizing are what let a list sit beside the account
+    /// cards without crowding them. A second list gets all of that and only says
+    /// what its heading reads and where its expanded state is kept.
+    /// </remarks>
+    /// <param name="openAll">
+    /// Where "see all" goes instead of expanding. A list someone means to
+    /// search, sort and clear out does not fit between the account cards, so a
+    /// band given one never expands or pages.
+    /// </param>
+    /// <param name="openAllText">The link's wording when it opens a window.</param>
+    internal TaskBoard(
+        Func<IReadOnlyList<TaskEntry>, string>? summary,
+        Func<bool> loadExpanded,
+        Action<bool> saveExpanded,
+        Action? openAll = null,
+        string? openAllText = null)
+    {
+        _summaryText = summary ?? SummaryText;
+        _saveExpanded = saveExpanded;
+        _openAll = openAll;
+        _openAllText = openAllText;
+        _expanded = loadExpanded();
         Dock = DockStyle.Fill;
         Margin = new Padding(0);
         Padding = new Padding(Theme.Space4, 0, Theme.Space4, Theme.Space1);
@@ -650,15 +699,9 @@ internal sealed class TaskBoard : Panel
         };
         // Expanding happens here rather than in a dropdown: sending someone to
         // another surface to see the rest of a list they are already looking at
-        // is a detour, not a disclosure.
-        _seeAll.LinkClicked += (_, _) =>
-        {
-            _expanded = !_expanded;
-            UiPrefs.TasksExpanded = _expanded;
-            _page = 0;
-            Render();
-            LayoutChanged?.Invoke();
-        };
+        // is a detour, not a disclosure — unless the band was given a window for
+        // the whole list, because that is where managing it happens.
+        _seeAll.LinkClicked += (_, _) => OnSeeAll();
 
         _headingRow = new Panel { Dock = DockStyle.Top, Height = HeadingHeight };
         _headingRow.Controls.Add(_summary);
@@ -707,6 +750,20 @@ internal sealed class TaskBoard : Panel
         LayoutChanged?.Invoke();
     }
 
+    private void OnSeeAll()
+    {
+        if (_openAll is not null)
+        {
+            _openAll();
+            return;
+        }
+        _expanded = !_expanded;
+        _saveExpanded(_expanded);
+        _page = 0;
+        Render();
+        LayoutChanged?.Invoke();
+    }
+
     private int PageCount =>
         _entries.Count == 0 ? 1 : (int)Math.Ceiling(_entries.Count / (double)EffectivePageSize);
 
@@ -715,6 +772,8 @@ internal sealed class TaskBoard : Panel
     // through a click would test WinForms, not the paging rules.
 
     internal bool IsExpandedForTest => _expanded;
+
+    internal string SummaryForTest => _summary.Text;
 
     /// <summary>
     /// Put the band in a known state, without touching the stored preference.
@@ -739,6 +798,11 @@ internal sealed class TaskBoard : Panel
     }
 
     internal void TurnPageForTest(int delta) => TurnPage(delta);
+
+    internal void ClickSeeAllForTest() => OnSeeAll();
+
+    /// <summary>Whether the link was put on the band; a control off screen always reads invisible.</summary>
+    internal bool SeeAllShownForTest { get; private set; }
 
     /// <summary>
     /// Cap the rows shown, so the band always fits the room it is given.
@@ -790,7 +854,7 @@ internal sealed class TaskBoard : Panel
         // Collapsing only means something when it would hide something. Below
         // the cap both views show the same rows, so the link goes away rather
         // than offering a choice with no effect.
-        bool canCollapse = entries.Count > MaxRows;
+        bool canCollapse = _openAll is null && entries.Count > MaxRows;
         bool showAll = _expanded && canCollapse;
 
         var shown = showAll
@@ -820,11 +884,18 @@ internal sealed class TaskBoard : Panel
             _rows.Controls.Add(holder);
         }
 
-        _summary.Text = SummaryText(entries);
-        _seeAll.Visible = canCollapse;
-        _seeAll.Text = showAll
-            ? Loc.T("board.seeAll.collapse")
-            : Loc.T("board.seeAll.count", entries.Count);
+        _summary.Text = _summaryText(entries);
+        bool linkShown = _openAll is not null ? entries.Count > 0 : canCollapse;
+        _seeAll.Visible = linkShown;
+        SeeAllShownForTest = linkShown;
+        _seeAll.Text = _openAll is not null
+            // The window holds every conversation, not just the rows loaded
+            // here: the link shows whenever there is anything, and carries no
+            // count that would undersell it.
+            ? _openAllText ?? Loc.T("board.seeAll")
+            : showAll
+                ? Loc.T("board.seeAll.collapse")
+                : Loc.T("board.seeAll.count", entries.Count);
         _headingRow.Height = (int)Scaled(HeadingHeight);
 
         int pages = PageCount;
@@ -1022,6 +1093,7 @@ internal sealed class TaskBoard : Panel
         TaskState.NeedsAttention => "needsAttention",
         TaskState.Failed => "failed",
         TaskState.Interrupted => "interrupted",
+        TaskState.Updated => "updated",
         _ => "cancelled",
     }}");
 

@@ -24,6 +24,9 @@ internal sealed class ProjectsWindow : Form
     private readonly PrimaryButton _resume = new();
     private readonly SecondaryButton _openDir = new();
     private readonly SecondaryButton _stats = new();
+    private readonly SecondaryButton _deleteSessions = new();
+    private readonly SecondaryButton _emptyDirs = new();
+    private readonly SecondaryButton _cleanup = new();
     private readonly Label _statsText = new();
     private readonly Label _hint = new();
     private readonly Label _title = new();
@@ -35,6 +38,16 @@ internal sealed class ProjectsWindow : Form
     private readonly SplitContainer _split;
     private List<ProjectRow> _rows = [];
     private bool _loaded;
+
+    /// <summary>
+    /// Outcome of the last cleanup, shown in the hint band until the next one.
+    /// </summary>
+    /// <remarks>
+    /// The window re-lists itself whenever it is activated, and closing a
+    /// confirmation dialog activates it — so a message written straight into the
+    /// band was replaced by the account note before anyone could read it.
+    /// </remarks>
+    private string? _statusMessage;
 
     /// <summary>Keep the directory pane at ~58% — it carries the wider columns.</summary>
     private void ApplySplit()
@@ -62,9 +75,20 @@ internal sealed class ProjectsWindow : Form
         /// whole conversations from the list and undercount the totals.
         /// </summary>
         IReadOnlyList<string> TranscriptDirs,
-        long TranscriptBytes)
+        long TranscriptBytes,
+        /// <summary>
+        /// Transcripts plus subagent output and file snapshots — what cleaning
+        /// the directory frees. Auto memory is not in it.
+        /// </summary>
+        long TotalBytes)
     {
         public bool HasTranscripts => TranscriptDirs.Count > 0;
+
+        /// <summary>A row that exists only because Claude Code registered the directory.</summary>
+        public bool IsEmpty => SessionCount == 0 && Registered;
+
+        /// <summary>The figure the size column shows; an older engine reports only transcripts.</summary>
+        public long SizeBytes => Math.Max(TotalBytes, TranscriptBytes);
     }
 
     private sealed record SessionRow(
@@ -72,7 +96,18 @@ internal sealed class ProjectsWindow : Form
         string? Title,
         long ModifiedMs,
         long? StartedMs,
-        long Bytes);
+        long Bytes,
+        /// <summary>Folder the transcript sits in — how a deletion names the session.</summary>
+        string TranscriptDir,
+        /// <summary>
+        /// The engine's verdict: a real conversation, nothing running it, and a
+        /// config home that can still be launched.
+        /// </summary>
+        bool Resumable = true,
+        bool HasConversation = true,
+        bool Live = false,
+        /// <summary>Session-mode profile holding the transcript; resuming must use it.</summary>
+        int? ProfileNumber = null);
 
     public ProjectsWindow(Engine engine)
     {
@@ -106,29 +141,60 @@ internal sealed class ProjectsWindow : Form
             (Loc.T("proj.col.lastActive"), 104), (Loc.T("proj.col.size"), 74));
         ConfigureList(
             _sessions,
-            (Loc.T("proj.col.session"), -1), (Loc.T("proj.col.started"), 104),
+            (Loc.T("proj.col.session"), -1), (Loc.T("proj.col.updated"), 104),
             (Loc.T("proj.col.size"), 74));
         // Counts and sizes are numbers; left-aligned they read as ragged text.
         _dirs.RightAlignedColumns.UnionWith([2, 4]);
         _sessions.RightAlignedColumns.Add(2);
+
+        // Finding what takes the space is the first step of freeing it, and a
+        // size column that cannot be sorted leaves that to the reader's eye.
+        _dirs.Sortable = true;
+        _sessions.Sortable = true;
+        _sessions.MultiSelect = true;
 
         _dirs.ShowItemToolTips = true;
         _sessions.ShowItemToolTips = true;
         _dirs.SelectedIndexChanged += (_, _) => OnProjectSelected();
         _sessions.SelectedIndexChanged += (_, _) => UpdateButtons();
         _sessions.DoubleClick += (_, _) => ResumeSelected();
+        _sessions.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode != Keys.Delete) return;
+            e.Handled = true;
+            DeleteSelectedSessions();
+        };
 
-        var sessionMenu = new ContextMenuStrip();
-        sessionMenu.Items.Add(Loc.T("proj.menu.resume"), null, (_, _) => ResumeSelected());
-        sessionMenu.Items.Add(Loc.T("proj.menu.copyId"), null, (_, _) =>
+        var sessionMenu = new ContextMenuStrip { Renderer = new SageToolStripRenderer() };
+        var resumeItem = new ToolStripMenuItem(Loc.T("proj.menu.resume"), null, (_, _) => ResumeSelected());
+        var copyItem = new ToolStripMenuItem(Loc.T("proj.menu.copyId"), null, (_, _) =>
         {
             if (SelectedSession is { } s) Clipboard.SetText(s.Id);
         });
+        var deleteItem = new ToolStripMenuItem(
+            Loc.T("history.menu.deleteSessions"), null, (_, _) => DeleteSelectedSessions())
+        {
+            Tag = "danger",
+        };
+        sessionMenu.Items.AddRange([resumeItem, copyItem, new ToolStripSeparator(), deleteItem]);
+        sessionMenu.Opening += (_, e) =>
+        {
+            int picked = _sessions.SelectedItems.Count;
+            if (picked == 0)
+            {
+                e.Cancel = true;
+                return;
+            }
+            // Resuming and copying an id are about one conversation; deleting
+            // works on the whole selection.
+            resumeItem.Enabled = picked == 1;
+            copyItem.Enabled = picked == 1;
+        };
         _sessions.ContextMenuStrip = sessionMenu;
 
         // Binding lives on the directory, because "which account does this work
         // belong to" is a property of the project, not of one conversation.
-        var dirMenu = new ContextMenuStrip();
+        var dirMenu = new ContextMenuStrip { Renderer = new SageToolStripRenderer() };
         dirMenu.Opening += (_, e) =>
         {
             if (SelectedProject is null) { e.Cancel = true; return; }
@@ -160,6 +226,10 @@ internal sealed class ProjectsWindow : Form
         _stats.Click += (_, _) => ComputeStats();
         _tip.SetToolTip(_stats, Loc.T("proj.stats.tip"));
 
+        _deleteSessions.Text = Loc.T("history.button.delete");
+        _deleteSessions.Click += (_, _) => DeleteSelectedSessions();
+        _tip.SetToolTip(_deleteSessions, Loc.T("history.button.delete.tip"));
+
         // Stats text gets its own band: inside the button flow it competed with
         // them for width and pushed them off the panel.
         _statsText.Dock = DockStyle.Bottom;
@@ -168,17 +238,20 @@ internal sealed class ProjectsWindow : Form
         _statsText.Font = Theme.FontCaption;
         _statsText.Padding = new Padding(2, Theme.Space1, 2, 0);
 
+        // Sized by its buttons: a fixed 46px was a 96-DPI figure, and at 150%
+        // the buttons alone are about that tall, so their bottom edges were cut.
         var actions = new FlowLayoutPanel
         {
             Dock = DockStyle.Bottom,
-            Height = 46,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
             Padding = new Padding(0, Theme.Space2, 0, 0),
         };
-        foreach (var b in new Control[] { _resume, _openDir, _stats })
+        foreach (var b in new Control[] { _resume, _openDir, _stats, _deleteSessions })
             b.Margin = new Padding(0, 0, Theme.Space2, 0);
-        actions.Controls.AddRange([_resume, _openDir, _stats]);
+        actions.Controls.AddRange([_resume, _openDir, _stats, _deleteSessions]);
 
         _sessionsTitle.Dock = DockStyle.Top;
         _sessionsTitle.Height = Theme.FontHeading.Height + Theme.Space2;
@@ -213,10 +286,18 @@ internal sealed class ProjectsWindow : Form
         _countChip.Padding = new Padding(Theme.Space2, Theme.Space1, Theme.Space2, Theme.Space1);
         _countChip.Location = new Point(Theme.Space4, Theme.Space3 + Theme.FontBrand.Height + 4);
 
+        _emptyDirs.Text = Loc.T("history.emptyDirs.button");
+        _emptyDirs.Click += (_, _) => RemoveEmptyDirectories(null);
+
+        _cleanup.Text = Loc.T("history.button.cleanup");
+        _cleanup.Click += (_, _) => OpenCleanupDialog();
+        _tip.SetToolTip(_cleanup, Loc.T("history.button.cleanup.tip"));
+
         _header.Dock = DockStyle.Top;
         // Measured from its own fonts: a fixed band clips at >100% scaling.
         _header.Height = Theme.FontBrand.Height + Theme.FontSmall.Height + Theme.Space6;
-        _header.Controls.AddRange([_title, _countChip]);
+        _header.Controls.AddRange([_title, _countChip, _emptyDirs, _cleanup]);
+        _header.Resize += (_, _) => PlaceHeaderButtons();
 
         _hint.Dock = DockStyle.Bottom;
         _hint.Height = Theme.FontCaption.Height + Theme.Space4;
@@ -238,6 +319,7 @@ internal sealed class ProjectsWindow : Form
             MinimumSize = new Size(Theme.Scale(this, 860), Theme.Scale(this, 500));
             Size = new Size(Theme.Scale(this, 1120), Theme.Scale(this, 660));
             ApplySplit();
+            PlaceHeaderButtons();
             Reload();
         };
         Resize += (_, _) => ApplySplit();
@@ -249,6 +331,21 @@ internal sealed class ProjectsWindow : Form
         };
     }
 
+    /// <summary>Right-align the header's buttons, centred on the band.</summary>
+    private void PlaceHeaderButtons()
+    {
+        int right = _header.ClientSize.Width - Theme.Space4;
+        foreach (var button in new ThemedButton[] { _cleanup, _emptyDirs })
+        {
+            button.Width = button.GetPreferredSize(Size.Empty).Width;
+            right -= button.Width;
+            button.Location = new Point(
+                right,
+                Math.Max(0, (_header.ClientSize.Height - button.Height) / 2));
+            right -= Theme.Space2;
+        }
+    }
+
     /// <summary>
     /// Lay out a details list. A positive width is fixed; a negative one is a
     /// share of the leftover space (weight = |width|).
@@ -257,7 +354,7 @@ internal sealed class ProjectsWindow : Form
     /// All-fixed widths overflowed the pane and cut the right-hand columns off
     /// entirely, and giving the leftover to a single column starved the others.
     /// </remarks>
-    private static void ConfigureList(ThemedListView list, params (string Header, int Width)[] columns)
+    internal static void ConfigureList(ThemedListView list, params (string Header, int Width)[] columns)
     {
         list.Dock = DockStyle.Fill;
         foreach (var (header, width) in columns)
@@ -340,6 +437,10 @@ internal sealed class ProjectsWindow : Form
         _split.Panel2.BackColor = Theme.BgApp;
     }
 
+    /// <summary>A list cell that sorts by <paramref name="key"/> rather than by its text.</summary>
+    private static ListViewItem.ListViewSubItem Cell(ListViewItem item, string text, long key) =>
+        new(item, text) { Tag = key };
+
     private void Reload()
     {
         try
@@ -369,21 +470,34 @@ internal sealed class ProjectsWindow : Form
                     : r.Name,
             };
             item.SubItems.Add(_bindings.Label(r.Path));
-            item.SubItems.Add(r.SessionCount.ToString());
-            item.SubItems.Add(Theme.FormatCompactEpoch(r.LastActiveMs) ?? Loc.T("common.dash"));
-            item.SubItems.Add(r.TranscriptBytes > 0 ? FormatBytes(r.TranscriptBytes) : Loc.T("common.dash"));
+            item.SubItems.Add(Cell(item, r.SessionCount.ToString(), r.SessionCount));
+            item.SubItems.Add(Cell(
+                item,
+                Theme.FormatCompactEpoch(r.LastActiveMs) ?? Loc.T("common.dash"),
+                r.LastActiveMs ?? 0));
+            item.SubItems.Add(Cell(
+                item,
+                r.SizeBytes > 0 ? FormatBytes(r.SizeBytes) : Loc.T("common.dash"),
+                r.SizeBytes));
             if (r.SessionCount == 0)
                 item.ForeColor = Theme.TextMuted;
             _dirs.Items.Add(item);
         }
         _dirs.EndUpdate();
+        _dirs.Sort();
 
         int used = _rows.Count(r => r.SessionCount > 0);
         int sessions = _rows.Sum(r => r.SessionCount);
+        long total = _rows.Sum(r => r.SizeBytes);
         // "Registered" and "actually worked in" are different questions, so the
         // count says which is which instead of picking one and looking wrong.
-        _countChip.Text = Loc.T("proj.count", used, sessions, _rows.Count - used);
-        _hint.Text = Loc.T("proj.accountNote");
+        _countChip.Text = Loc.T("proj.count", used, sessions, _rows.Count - used)
+            + (total > 0 ? Loc.T("history.totalSize", FormatBytes(total)) : "");
+        _hint.Text = _statusMessage ?? Loc.T("proj.accountNote");
+
+        int empty = _rows.Count(r => r.IsEmpty);
+        _emptyDirs.Enabled = empty > 0;
+        _tip.SetToolTip(_emptyDirs, Loc.T("history.emptyDirs.button.tip", empty));
 
         var restore = keep is null
             ? null
@@ -420,7 +534,8 @@ internal sealed class ProjectsWindow : Form
                     .Where(d => !string.IsNullOrEmpty(d))
                     .Select(d => d!)
                     .ToList(),
-                p["transcriptBytes"]?.GetValue<long>() ?? 0));
+                p["transcriptBytes"]?.GetValue<long>() ?? 0,
+                p["totalBytes"]?.GetValue<long>() ?? 0));
         }
         return list;
     }
@@ -439,6 +554,7 @@ internal sealed class ProjectsWindow : Form
     private void OnProjectSelected()
     {
         _statsText.Text = "";
+        _sessionsTitle.Text = Loc.T("proj.sessions");
         _sessions.BeginUpdate();
         _sessions.Items.Clear();
 
@@ -449,31 +565,67 @@ internal sealed class ProjectsWindow : Form
             {
                 var node = _engine.Call(
                     "list_sessions", new { transcriptDirs = project.TranscriptDirs });
+                int hidden = 0;
                 if (node["sessions"] is JsonArray arr)
                 {
                     foreach (var s in arr)
                     {
                         if (s is null) continue;
+                        // A session opened and left without a single exchange is
+                        // not a conversation anyone comes looking for, and listing
+                        // it — even greyed out — buried the real ones. It is
+                        // counted in the heading instead; cleaning the directory
+                        // still removes it.
+                        if (s["hasConversation"]?.GetValue<bool>() == false)
+                        {
+                            hidden++;
+                            continue;
+                        }
+                        string file = s["file"]?.GetValue<string>() ?? "";
+                        long bytes = s["bytes"]?.GetValue<long>() ?? 0;
+                        long total = s["totalBytes"]?.GetValue<long>() ?? 0;
                         var row = new SessionRow(
                             s["id"]?.GetValue<string>() ?? "",
-                            s["firstPrompt"]?.GetValue<string>(),
+                            s["title"]?.GetValue<string>() ?? s["firstPrompt"]?.GetValue<string>(),
                             s["modifiedMs"]?.GetValue<long>() ?? 0,
                             s["startedMs"]?.GetValue<long>(),
-                            s["bytes"]?.GetValue<long>() ?? 0);
-                        var item = new ListViewItem(row.Title ?? Loc.T("proj.untitled"))
+                            Math.Max(total, bytes),
+                            Path.GetDirectoryName(file) ?? "",
+                            Resumable: s["resumable"]?.GetValue<bool>() ?? true,
+                            HasConversation: s["hasConversation"]?.GetValue<bool>() ?? true,
+                            Live: s["live"]?.GetValue<bool>() ?? false,
+                            ProfileNumber: s["profileNumber"]?.GetValue<int>());
+
+                        // A running session says so ahead of its title: a long
+                        // title is clipped at the end, and a marker after it went
+                        // with it. The id has no column of its own — it is what
+                        // the resume button uses, not something to read.
+                        string title = row.Title ?? Loc.T("proj.untitled");
+                        string tip = Loc.T("proj.sessionId", row.Id);
+                        if (row.Live)
+                        {
+                            title = $"{Loc.T("proj.session.live")}{title}";
+                            tip = Loc.T("proj.session.live.tip", row.Id);
+                        }
+                        var item = new ListViewItem(title)
                         {
                             Tag = row,
-                            // The id has no column of its own — it is what the
-                            // resume button uses, not something to read.
-                            ToolTipText = Loc.T("proj.sessionId", row.Id),
+                            ToolTipText = tip,
                         };
-                        item.SubItems.Add(
-                            Theme.FormatCompactEpoch(row.StartedMs ?? row.ModifiedMs)
-                            ?? Loc.T("common.dash"));
-                        item.SubItems.Add(FormatBytes(row.Bytes));
+                        if (!row.Resumable)
+                            item.ForeColor = Theme.TextMuted;
+                        // When it was last written to, not when it began — the
+                        // same order the engine lists them in.
+                        item.SubItems.Add(Cell(
+                            item,
+                            Theme.FormatCompactEpoch(row.ModifiedMs) ?? Loc.T("common.dash"),
+                            row.ModifiedMs));
+                        item.SubItems.Add(Cell(item, FormatBytes(row.Bytes), row.Bytes));
                         _sessions.Items.Add(item);
                     }
                 }
+                if (hidden > 0)
+                    _sessionsTitle.Text = Loc.T("proj.sessions.hidden", hidden);
             }
             catch (Exception ex)
             {
@@ -482,6 +634,7 @@ internal sealed class ProjectsWindow : Form
         }
 
         _sessions.EndUpdate();
+        _sessions.Sort();
         if (_sessions.Items.Count > 0)
             _sessions.Items[0].Selected = true;
         UpdateButtons();
@@ -490,20 +643,27 @@ internal sealed class ProjectsWindow : Form
     private void UpdateButtons()
     {
         var project = SelectedProject;
-        _resume.Enabled = SelectedSession is not null && project is not null;
+        int picked = _sessions.SelectedItems.Count;
+        _resume.Enabled = picked == 1
+            && project is not null
+            && Directory.Exists(project.Path)
+            && SelectedSession is { Resumable: true };
         _openDir.Enabled = project is not null && Directory.Exists(project.Path);
         _stats.Enabled = project is { HasTranscripts: true };
+        _deleteSessions.Enabled = picked > 0;
     }
 
     /// <summary>Resume the selected conversation in the user's own terminal.</summary>
     private void ResumeSelected()
     {
-        if (SelectedProject is not { } project || SelectedSession is not { } session) return;
+        if (_sessions.SelectedItems.Count != 1) return;
+        if (SelectedProject is not { } project || SelectedSession is not { Resumable: true } session) return;
         string shortId = session.Id[..Math.Min(8, session.Id.Length)];
 
-        // A bound directory resumes under its own account; anything else keeps
-        // the original behaviour of plain `claude --resume`.
-        if (_bindings.Resolve(project.Path).Binding?.Number is { } number)
+        // Resume in the config home that holds the transcript: Claude Code only
+        // looks in its own config directory. The directory's binding decides
+        // where a new conversation starts, not where an existing one is found.
+        if (session.ProfileNumber is { } number)
         {
             var result = SessionMode.Launch(_engine, number.ToString(), project.Path, session.Id);
             if (!result.Launched)
@@ -525,7 +685,7 @@ internal sealed class ProjectsWindow : Form
         _hint.Text = Loc.T("proj.resumed", project.Name, shortId);
     }
 
-    /// <summary>Per-directory actions: open a terminal, and manage the binding.</summary>
+    /// <summary>Per-directory actions: open a terminal, manage the binding, and clear history.</summary>
     private void BuildDirectoryMenu(ContextMenuStrip menu)
     {
         menu.Items.Clear();
@@ -572,6 +732,30 @@ internal sealed class ProjectsWindow : Form
         };
         unbind.Click += (_, _) => ClearBinding(project.Path);
         menu.Items.Add(unbind);
+        menu.Items.Add(new ToolStripSeparator());
+
+        // Two different depths of forgetting. Clearing keeps what the directory
+        // has learned (auto memory) and how it is configured (trust, MCP); the
+        // purge takes those too, and says so before it runs.
+        var clean = new ToolStripMenuItem(Loc.T("history.menu.cleanDirectory"))
+        {
+            Enabled = project.HasTranscripts,
+        };
+        clean.Click += (_, _) => CleanDirectory(project);
+        menu.Items.Add(clean);
+
+        // A row with no conversations is there only because Claude Code
+        // registered the directory; taking it off the list is all there is to do.
+        var unlist = new ToolStripMenuItem(Loc.T("history.emptyDirs.menu"))
+        {
+            Enabled = project.IsEmpty,
+        };
+        unlist.Click += (_, _) => RemoveEmptyDirectories([project.Path]);
+        menu.Items.Add(unlist);
+
+        var purge = new ToolStripMenuItem(Loc.T("history.menu.purge")) { Tag = "danger" };
+        purge.Click += (_, _) => PurgeDirectory(project);
+        menu.Items.Add(purge);
     }
 
     /// <summary>Slots available to bind, newest snapshot order.</summary>
@@ -623,6 +807,198 @@ internal sealed class ProjectsWindow : Form
             MessageBox.Show(this, ex.Message, Loc.T("proj.bindFailed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
+
+    /// <summary>Delete the selected sessions, after saying what that frees.</summary>
+    private void DeleteSelectedSessions()
+    {
+        var picked = _sessions.SelectedItems
+            .Cast<ListViewItem>()
+            .Select(i => i.Tag)
+            .OfType<SessionRow>()
+            .Where(s => s.TranscriptDir.Length > 0)
+            .Select(s => (s.TranscriptDir, s.Id))
+            .ToList();
+        if (picked.Count == 0) return;
+        RunCleanup(HistoryCleanup.ForSessions(picked));
+    }
+
+    /// <summary>Every session of a directory, in every config home. Memory and settings stay.</summary>
+    private void CleanDirectory(ProjectRow project)
+    {
+        if (!project.HasTranscripts) return;
+        RunCleanup(HistoryCleanup.ForDirectories(project.TranscriptDirs));
+    }
+
+    /// <summary>Plan, confirm, apply, report — the one path every targeted deletion takes.</summary>
+    private void RunCleanup(JsonObject request)
+    {
+        try
+        {
+            var plan = HistoryCleanup.Plan(_engine, request);
+            if (!HistoryDeleteDialog.Confirm(this, plan)) return;
+
+            var outcome = HistoryCleanup.Apply(_engine, request, plan.DeletableIds);
+            _statusMessage = Loc.T(
+                "history.delete.done",
+                outcome.DeletedCount,
+                FormatBytes(outcome.FreedBytes));
+            Reload();
+            HistoryDeleteDialog.ReportFailures(this, outcome);
+        }
+        catch (Exception ex) when (ex is EngineException or ObjectDisposedException)
+        {
+            MessageBox.Show(
+                this,
+                Loc.T("history.delete.failed", ex.Message),
+                Loc.T("history.delete.title"),
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+    }
+
+    /// <summary>
+    /// Take directories with no conversations off the list — every one, or those named.
+    /// </summary>
+    /// <remarks>
+    /// Such a row exists only because Claude Code registered the directory in its
+    /// config, so that entry is what goes. The engine checks each directory for
+    /// history and running sessions again under Claude Code's config lock, and
+    /// backs the file up before changing it.
+    /// </remarks>
+    private void RemoveEmptyDirectories(IReadOnlyList<string>? paths)
+    {
+        try
+        {
+            var plan = HistoryCleanup.PlanEmptyDirectories(_engine, paths);
+            if (!HistoryDeleteDialog.ConfirmEmptyDirectories(this, plan)) return;
+
+            var outcome = HistoryCleanup.RemoveEmptyDirectories(_engine, plan.Paths);
+            _statusMessage = Loc.T("history.emptyDirs.done", outcome.RemovedDirectories);
+            Reload();
+            if (outcome.Failures.Count > 0)
+            {
+                MessageBox.Show(
+                    this,
+                    Loc.T("history.emptyDirs.partial", string.Join("\n", outcome.Failures.Take(8))),
+                    Loc.T("history.emptyDirs.title"),
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+        }
+        catch (Exception ex) when (ex is EngineException or ObjectDisposedException)
+        {
+            MessageBox.Show(
+                this,
+                Loc.T("history.emptyDirs.failed", ex.Message),
+                Loc.T("history.emptyDirs.title"),
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+    }
+
+    private void OpenCleanupDialog()
+    {
+        using var dlg = new HistoryCleanupDialog(_engine);
+        dlg.ShowDialog(this);
+        if (dlg.Changed) Reload();
+    }
+
+    /// <summary>
+    /// Remove everything Claude Code keeps for a directory, via its own purge command.
+    /// </summary>
+    /// <remarks>
+    /// Refused while anything runs there: the command itself does not check, and
+    /// a live session would keep writing into the state it just lost. Runs one
+    /// purge per config home that holds state, because each profile keeps its
+    /// own transcripts, prompt history and <c>.claude.json</c>.
+    /// </remarks>
+    private async void PurgeDirectory(ProjectRow project)
+    {
+        PurgePreflightView pre;
+        try
+        {
+            pre = HistoryCleanup.Preflight(_engine, project.Path);
+        }
+        catch (Exception ex) when (ex is EngineException or ObjectDisposedException)
+        {
+            MessageBox.Show(this, ex.Message, Loc.T("history.purge.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        int running = pre.LiveSessions + pre.RunningRuns
+            + BackgroundRuns.Active.Count(r => SamePath(r.Cwd, project.Path));
+        if (running > 0)
+        {
+            MessageBox.Show(
+                this, Loc.T("history.purge.live", running), Loc.T("history.purge.title"),
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (pre.Roots.Count == 0)
+        {
+            MessageBox.Show(
+                this, Loc.T("history.purge.nothing"), Loc.T("history.purge.title"),
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (ClaudeCli.FindExecutable() is not { } claude)
+        {
+            MessageBox.Show(
+                this, ClaudeCli.NotFoundMessage, Loc.T("history.purge.title"),
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        if (!HistoryDeleteDialog.ConfirmPurge(this, project.Name, pre)) return;
+
+        _statusMessage = Loc.T("history.purge.running", project.Name);
+        _hint.Text = _statusMessage;
+        UseWaitCursor = true;
+        _split.Enabled = false;
+        _cleanup.Enabled = false;
+        _emptyDirs.Enabled = false;
+
+        var failures = new List<string>();
+        try
+        {
+            foreach (var root in pre.Roots)
+            {
+                if (await HistoryCleanup.RunPurgeAsync(claude, project.Path, root.ConfigDir) is { } problem)
+                    failures.Add(root.ProfileNumber is { } n ? $"#{n}: {problem}" : problem);
+            }
+            // Finished run records for the directory would now offer to resume
+            // conversations that no longer exist.
+            if (failures.Count == 0)
+            {
+                var store = new AgentRunStore(_engine);
+                foreach (var id in pre.RunIds) store.Remove(id);
+            }
+        }
+        finally
+        {
+            if (!IsDisposed)
+            {
+                UseWaitCursor = false;
+                _split.Enabled = true;
+                _cleanup.Enabled = true;
+            }
+        }
+        if (IsDisposed) return;
+
+        _statusMessage = failures.Count == 0 ? Loc.T("history.purge.done", project.Name) : null;
+        Reload();
+        if (failures.Count > 0)
+        {
+            MessageBox.Show(
+                this, string.Join("\n\n", failures), Loc.T("history.purge.failedTitle"),
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private static bool SamePath(string a, string b) =>
+        string.Equals(
+            a.Replace('\\', '/').TrimEnd('/'),
+            b.Replace('\\', '/').TrimEnd('/'),
+            StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Open a terminal in this directory — as its bound account, or the default login.
@@ -743,6 +1119,17 @@ internal sealed class ProjectsWindow : Form
         return _statsWindow;
     }
 
+    /// <summary>
+    /// Layout-probe hook: the cleanup dialog, shown modelessly so the probe can
+    /// capture it. Nothing is deleted — the probe never presses a button.
+    /// </summary>
+    internal Form ProbeCleanupDialog()
+    {
+        var dialog = new HistoryCleanupDialog(_engine);
+        dialog.Show(this);
+        return dialog;
+    }
+
     private void ShowStatsWindow(string projectPath, JsonNode stats, long scanMs)
     {
         if (_statsWindow is { IsDisposed: false })
@@ -752,10 +1139,7 @@ internal sealed class ProjectsWindow : Form
         _statsWindow.Show(this);
     }
 
-    private static string FormatBytes(long bytes) =>
-        bytes >= 1024 * 1024 ? $"{bytes / 1024.0 / 1024.0:0.#} MB"
-        : bytes >= 1024 ? $"{bytes / 1024.0:0} KB"
-        : $"{bytes} B";
+    private static string FormatBytes(long bytes) => HistoryCleanup.FormatBytes(bytes);
 
     private static string FormatTokens(long n) =>
         n >= 1_000_000 ? $"{n / 1_000_000.0:0.#}M"

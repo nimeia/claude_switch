@@ -35,7 +35,7 @@ internal sealed class AgentWindow : Form
     private readonly string _accountLabel;
     private readonly Func<JsonNode, Task<string?>> _permission;
 
-    private readonly RichTextBox _transcript = new();
+    private readonly TranscriptHost _transcript;
     private readonly TextBox _prompt = new();
     private readonly PrimaryButton _run = new();
     private readonly SecondaryButton _stop = new();
@@ -65,6 +65,7 @@ internal sealed class AgentWindow : Form
         _accountNumber = accountNumber;
         _accountLabel = accountLabel;
         _permission = permission;
+        _transcript = new TranscriptHost(workDir);
 
         Text = Loc.T("acp.window.title", Path.GetFileName(workDir.TrimEnd('\\', '/')));
         StartPosition = FormStartPosition.CenterParent;
@@ -80,13 +81,16 @@ internal sealed class AgentWindow : Form
         UpdateBusy(false);
     }
 
+    /// <summary>Whether the transcript shows everything it was given. For the layout probe.</summary>
+    internal bool IsTranscriptSettled => _transcript.IsSettled;
+
     /// <summary>Show the window already watching a run that is in flight.</summary>
     public void Attach(LiveRun live)
     {
         _live = live;
         _resumeSessionId = live.Runner.SessionId;
 
-        foreach (var line in live.Backlog) Render(line);
+        foreach (var line in live.Backlog) _transcript.Append(line);
         UpdateStatus(live.Status, Theme.TextSecondary);
         UpdateBusy(!live.Finished);
 
@@ -105,35 +109,30 @@ internal sealed class AgentWindow : Form
     {
         _resumeSessionId = record.SessionId;
         _prompt.Text = Loc.T("acp.resume.prompt");
-        AppendLine(Loc.T("acp.resume.banner", record.Title, record.UpdatedLocal), Theme.TextSecondary);
+        _transcript.Append(new RunLine(RunLineKind.Notice, Loc.T("acp.resume.banner", record.Title, record.UpdatedLocal)));
         if (record.LastError is { Length: > 0 } why)
         {
-            AppendLine($"  {why}", Theme.TextMuted);
+            _transcript.Append(new RunLine(RunLineKind.Notice, $"  {why}"));
         }
+    }
+
+    /// <summary>
+    /// Fill the transcript with a representative run, for the layout probe.
+    /// </summary>
+    /// <remarks>
+    /// An empty transcript says nothing about how a run reads. The sample goes
+    /// through the same mapping a live run does; see <see cref="AgentSampleRun"/>.
+    /// </remarks>
+    internal void ShowSampleRun()
+    {
+        foreach (var line in AgentSampleRun.Lines(_workDir)) _transcript.Append(line);
+        UpdateStatus(Loc.T("acp.status.running"), Theme.TextSecondary);
+        UpdateBusy(true);
     }
 
     private void BuildLayout()
     {
         int pad = Theme.Scale(this, 12);
-
-        _transcript.Dock = DockStyle.Fill;
-        _transcript.ReadOnly = true;
-        _transcript.BorderStyle = BorderStyle.None;
-        _transcript.BackColor = Theme.BgSurface;
-        _transcript.ForeColor = Theme.TextPrimary;
-        _transcript.Font = new Font(FontFamily.GenericMonospace, Theme.FontBody.SizeInPoints);
-        _transcript.DetectUrls = false;
-        // The transcript is a log, not an editor: keep the newest line in view
-        // without stealing focus from the prompt box.
-        _transcript.HideSelection = true;
-
-        var transcriptHost = new Panel
-        {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(pad),
-            BackColor = Theme.BgSurface,
-        };
-        transcriptHost.Controls.Add(_transcript);
 
         // ── status strip ────────────────────────────────────────────────
         _status.AutoSize = false;
@@ -238,7 +237,7 @@ internal sealed class AgentWindow : Form
             BackColor = Theme.BgHeader,
         };
 
-        Controls.Add(transcriptHost);
+        Controls.Add(_transcript);
         Controls.Add(promptRow);
         Controls.Add(_statusBar);
         Controls.Add(header);
@@ -284,19 +283,29 @@ internal sealed class AgentWindow : Form
     /// Returns null when nothing is overridden, so the engine's defaults stay
     /// the single definition of normal behaviour.
     /// </remarks>
-    private JsonObject? BuildPolicy()
+    private JsonObject? BuildPolicy() => BuildPolicy(_autoContinue.Checked, _onQuota.SelectedIndex);
+
+    /// <summary>
+    /// Policy JSON the window sends for the given control values.
+    /// </summary>
+    /// <remarks>
+    /// Auto-continue off is a one-shot: the blip ladder, the long-retry
+    /// follow-on, and quota waits all have to be zeroed. <c>maxAttempts: 0</c>
+    /// alone still climbs the long-retry ladder (three 10-minute waits).
+    /// </remarks>
+    internal static JsonObject? BuildPolicy(bool autoContinue, int onQuotaIndex)
     {
         var policy = new JsonObject();
 
-        // Auto-continue off means "run one turn": zero retries, and truncation
-        // is reported rather than silently resumed.
-        if (!_autoContinue.Checked)
+        if (!autoContinue)
         {
             policy["maxAttempts"] = 0;
             policy["continueOnTruncation"] = false;
+            policy["maxLongRetries"] = 0;
+            policy["maxRateLimitWaits"] = 0;
         }
 
-        string onQuota = _onQuota.SelectedIndex switch
+        string onQuota = onQuotaIndex switch
         {
             1 => "switch",
             2 => "stop",
@@ -332,7 +341,7 @@ internal sealed class AgentWindow : Form
         live.Cancel();
     }
 
-    private void OnLine(RunLine line) => RunOnUi(() => Render(line));
+    private void OnLine(RunLine line) => RunOnUi(() => _transcript.Append(line));
 
     private void OnStatus(string text) =>
         RunOnUi(() => UpdateStatus(text, Theme.TextSecondary));
@@ -347,33 +356,6 @@ internal sealed class AgentWindow : Form
             report.Succeeded ? Theme.Success : Theme.Warning);
     });
 
-    private void Render(RunLine line)
-    {
-        switch (line.Kind)
-        {
-            case RunLineKind.Assistant:
-                // Chunks arrive mid-sentence; they must not each start a line.
-                Append(line.Text, Theme.TextPrimary);
-                return;
-            case RunLineKind.Prompt:
-                AppendLine("", Theme.TextPrimary);
-                AppendLine(line.Text, Theme.Primary);
-                return;
-            case RunLineKind.Tool:
-                AppendLine(line.Text, Theme.TextSecondary);
-                return;
-            case RunLineKind.Warning:
-                AppendLine(line.Text, Theme.Warning);
-                return;
-            case RunLineKind.Error:
-                AppendLine(line.Text, Theme.Danger);
-                return;
-            default:
-                AppendLine(line.Text, Theme.TextMuted);
-                return;
-        }
-    }
-
     private void UpdateBusy(bool busy)
     {
         _run.Enabled = !busy;
@@ -387,6 +369,9 @@ internal sealed class AgentWindow : Form
         // leaves the label at full contrast and the button still looks clickable.
         _run.ForeColor = busy ? Theme.TextDisabled : Theme.TextOnPrimary;
         _stop.ForeColor = busy ? Theme.TextPrimary : Theme.TextDisabled;
+
+        // Spinners on unfinished tool calls turn into "not finished" once the run ends.
+        _transcript.SetBusy(busy);
     }
 
     private void UpdateStatus(string text, Color color)
@@ -394,17 +379,6 @@ internal sealed class AgentWindow : Form
         _status.Text = text;
         _status.ForeColor = color;
     }
-
-    private void Append(string text, Color color)
-    {
-        _transcript.SelectionStart = _transcript.TextLength;
-        _transcript.SelectionLength = 0;
-        _transcript.SelectionColor = color;
-        _transcript.AppendText(text);
-        _transcript.ScrollToCaret();
-    }
-
-    private void AppendLine(string text, Color color) => Append(text + Environment.NewLine, color);
 
     /// <summary>
     /// Marshal onto the UI thread. Run events arrive on background tasks, and a

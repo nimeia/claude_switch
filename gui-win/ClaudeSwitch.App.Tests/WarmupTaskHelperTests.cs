@@ -21,6 +21,36 @@ public class WarmupTaskHelperTests
     }
 
     [Fact]
+    public void ResetTimes_nine_to_eighteen_are_eleven_and_sixteen()
+    {
+        Assert.Equal(new[] { "11:00", "16:00" }, WarmupTaskHelper.ResetTimes(9, 18));
+    }
+
+    [Fact]
+    public void ResetTimes_follow_a_half_hour_anchor()
+    {
+        Assert.Equal(new[] { "11:30", "16:30" }, WarmupTaskHelper.ResetTimes(9, 19));
+    }
+
+    [Fact]
+    public void ResetTimes_leave_out_a_reset_on_work_end()
+    {
+        // 9–14: anchor 4:00, resets 9:00 and 14:00 — the second begins nothing.
+        Assert.Equal(new[] { "9:00" }, WarmupTaskHelper.ResetTimes(9, 14));
+    }
+
+    [Fact]
+    public void PlanText_names_the_start_and_every_reset()
+    {
+        // Language-neutral on purpose: the active language is process-wide and
+        // test classes run in parallel, so switching it here races other tests.
+        string plan = WarmupTaskHelper.PlanText(9, 18);
+        Assert.Contains("6:00", plan, StringComparison.Ordinal);
+        Assert.Contains("11:00", plan, StringComparison.Ordinal);
+        Assert.Contains("16:00", plan, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FormatWarmupAnchor_now_within_two_minutes()
     {
         string iso = DateTimeOffset.Now.ToString("o");

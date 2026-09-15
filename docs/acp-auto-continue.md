@@ -100,13 +100,18 @@ the model handing control back to a human.
 | `max_tokens`, `max_turn_requests` | `stopReason` | continue immediately (work was cut off) |
 | `refusal`, `cancelled` | `stopReason` | stop — deliberate halt |
 | 5xx / ECONNRESET / connection closed | `errorKind: server_error` | continue, exponential backoff |
-| usage limit reached | message text | wait for the window, then continue |
+| usage limit reached | `errorKind: rate_limit`, else message text | wait for the window, then continue |
 | 403 / expired OAuth | `errorKind: authentication_failed` | stop — needs a human |
 | adapter died / turn timeout | transport | respawn, `session/load`, continue |
 
-Rate-limit detection reads the message text **before** `errorKind`, because the
-adapter tags quota exhaustion as `server_error`; without that, a quota hit would
-be hammered on a 10-second backoff.
+Rate-limit detection trusts `errorKind: rate_limit` first, then reads the message
+text **before** any other `errorKind`: older adapters tag quota exhaustion as
+`server_error`, and without the text check a quota hit would be hammered on a
+10-second backoff. Text alone is not enough either. Claude Code's wording changed
+from `Claude AI usage limit reached` to `You've hit your session limit · resets
+2:50pm (Asia/Shanghai)`, and a text-only rule silently stopped recognising the
+wall — the stalled-terminal scan, which read transcripts without the class Claude
+Code records beside the text, stopped offering such sessions at all.
 
 Transient retries and quota waits use **separate budgets**, so a long quota wait
 does not consume the allowance for network blips.
@@ -156,8 +161,9 @@ reuses the folder it already sits in.
 
 - Permission requests are **denied** by the default `Handler`. Unattended
   approval is an explicit opt-in (`--allow-tools`).
-- Quota waiting is **off** by default (`max_rate_limit_waits: 0`) — a quota wait
-  can idle for hours.
+- Quota waiting is **on** by default (`on_rate_limit: wait`,
+  `max_rate_limit_waits: 3`) — a quota wait can idle for hours. The GUI quota
+  dropdown is how a run opts out (`stop` / `switch`).
 - Auth failures never retry, no matter the attempt budget.
 - Every retry sends "continue from where you left off" rather than repeating the
   original instruction, so completed work is not redone.
@@ -197,14 +203,44 @@ picker with the terminal path — the choice is the same one, only the thing
 launched differs — and takes the account profile from `session_prepare`, so the
 run authenticates as the named account exactly as a session-mode terminal would.
 
-The window streams assistant text and tool calls, and its status strip names what
-interrupted a run and what is being done about it. That strip is the point: a
-silent retry is indistinguishable from a hang, which is the failure mode this
-feature exists to remove.
+The window streams the run, and its status strip names what interrupted it and
+what is being done about it. That strip is the point: a silent retry is
+indistinguishable from a hang, which is the failure mode this feature exists to
+remove.
 
-**Auto-continue** is a checkbox. Unticking it sets `maxAttempts: 0` and
-`continueOnTruncation: false`, so the run does exactly one turn and reports
-whatever happened.
+### The transcript
+
+The transcript is a local web page in WebView2 (`TranscriptView.cs`,
+`AgentView/`). A run's output is structured, and a text box could only flatten
+it: replies render as Markdown, each tool call is a card with its status, an
+edit shows its diff, a Bash call's output is drawn by **xterm.js** with its
+colours, the plan is a checklist, and the adapter's stderr folds into one
+collapsed group.
+
+- **Command output comes from an adapter extension, not from ACP terminals.**
+  The client still says `terminal: false` — it hosts no `terminal/*` sessions —
+  but sets `clientCapabilities._meta.terminal_output: true`. claude-agent-acp
+  then attaches a Bash call's raw output and exit code to the tool call as
+  `_meta.terminal_output` / `_meta.terminal_exit`. The output arrives when the
+  command finishes, not as a live stream. Nothing in auto-continue reads these;
+  stop reasons and errors are unchanged.
+- **Nothing is fetched and nothing is unpacked.** The page and xterm.js are
+  embedded resources, answered from memory for requests under a host that is
+  never resolved. Navigation elsewhere is cancelled; a link in a reply opens in
+  the browser only if it is http(s).
+- **The page holds no state of its own.** The window keeps every line it was
+  given and posts them in batches; a page that loads — first time, after a
+  reload, after its renderer crashed — asks and is sent everything again.
+  `RunEvents.cs` is the only mapping from ACP updates to lines, and it is pure.
+- **Without WebView2 the window falls back** to the previous coloured-text view
+  and replays the transcript into it. `CLAUDE_SWITCH_PLAIN_TRANSCRIPT=1` forces
+  that view.
+
+**Auto-continue** is a checkbox. Unticking it sets `maxAttempts: 0`,
+`maxLongRetries: 0`, `maxRateLimitWaits: 0`, and `continueOnTruncation: false`,
+so the run does exactly one turn and reports whatever happened. Zeroing only
+`maxAttempts` is not enough: the long-retry ladder would still wait ten minutes
+and try again.
 
 Permission requests open a modal built from the agent's own option list — the
 `optionId` values are echoed back, never invented. Closing the dialog with Esc
@@ -212,7 +248,14 @@ denies, so the escape hatch never grants anything.
 
 A screenshot of the window is captured by the layout probe
 (`CLAUDE_SWITCH_PROBE_AGENT=1` with `CLAUDE_SWITCH_LAYOUT_DIR`), which is the
-only visual test it has.
+only visual test it has. The probe fills the transcript with a sample run
+(`AgentSampleRun.cs`) — updates written in the adapter's own shapes and passed
+through `RunEvents` — and waits for the page to report it has drawn them, so
+the capture shows a representative run without spending quota.
+`CLAUDE_SWITCH_PROBE_AGENT=empty` opens the window without the sample instead:
+the state a new window starts in, and one a real run can be started from.
+`CLAUDE_SWITCH_PROBE_AGENT_HEIGHT` (pixels) makes the window tall enough to
+capture more than the tail of the transcript, which the page follows.
 
 ### GUI verification
 
@@ -292,6 +335,111 @@ stalled again the wall is known to be real: straight to a takeover (whose
 `onRateLimit` policy exists for exactly this) instead of burning another turn
 in the terminal.
 
+### When Claude Code continues by itself
+
+Claude Code now continues a session on its own when a usage limit resets
+(`autoContinueAtUsageLimit` in `/config`, on by default in the CLI; a checkbox on
+the limit card in Desktop). A terminal in that state is waiting, not stalled, and
+treating it as stalled does harm either way: a nudge sends a second "continue" on
+top of Claude Code's own, and a takeover puts a second writer on the transcript
+the moment the original fires.
+
+Nothing structured records the arm, but Claude Code writes notices into the
+transcript, verified against 2.1.272:
+
+| Moment | Record |
+|---|---|
+| limit hit | API error with `"error": "rate_limit"` and text `You've hit your session limit · resets 2:50pm (Asia/Shanghai)` |
+| armed | system notice `Usage limit reached · continuing automatically at 2:50pm · esc or type to cancel` |
+| fired | system notice `Usage limit reset · continuing automatically`, then a user record with `isMeta: true` and `origin.kind: "auto-continuation"` |
+| ended | system notice starting `Automatic continue …` — turned off, stopped because the reset is more than 24 hours out, stopped after repeated hits |
+
+`stalled::auto_continue_pending` reads the newest of these after the last
+conversation record, and `scan_root` leaves a quota stall alone while the arm is
+live **and** a process still owns the session — an arm dies with its process.
+The arm is trusted until the announced time plus 15 minutes, read as local wall
+time. Past that it is presumed dead: Claude Code does not fire if the machine
+slept through the reset (it waits for Enter instead), and that is exactly the
+case a nudge is for. An arm whose time cannot be read is trusted for the
+five-hour session window.
+
+What remains ours: switching to an account with headroom (Claude Code only
+waits), weekly limits past its 24-hour horizon, sessions whose process is gone,
+and the non-quota interruptions. The CLI bundled with the ACP adapter
+(claude-agent-sdk 0.3.220) has no automatic continue, so supervised runs keep
+their own quota waits.
+
+## Detection rules
+
+Every judgement above that depends on wording we do not control — which error
+kinds and message fragments mean a quota wall, a network blip or a sign-in
+problem; which transcript notices mean Claude Code armed or ended its own
+continue; how long an arm is trusted — is data, not code
+(`crates/core/src/rules.rs`). The wording has already changed under us once, and
+the engine kept compiling while silently no longer recognising the quota wall.
+An update has to be able to follow the next change without a new build.
+
+**Where.** The built-in rules ship in the engine. `detection-rules.json` beside
+the account backups overrides them. The engine reads it on every classification
+(`acp_decide`) and every stalled-session sweep (`stalled_scan`), so an installed
+update applies at once, without a restart.
+
+**Format.** A field left out keeps its built-in value; a list that is given
+replaces the built-in list. An update carries only what changed:
+
+```json
+{
+  "schemaVersion": 1,
+  "revision": 3,
+  "classification": {
+    "rateLimitText": [["usage limit reached"], ["rate limit"], ["429"], ["hit your", "limit"], ["quota paused"]]
+  },
+  "autoContinue": {
+    "armedPrefixes": ["Usage limit reached · continuing", "Session paused · resuming"],
+    "graceMinutes": 20
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `classification.rateLimitKinds` / `authKinds` / `networkKinds` | exact `errorKind` values |
+| `classification.rateLimitText` / `networkText` / `authText` | groups of fragments: a group matches when all of its fragments occur, ignoring case; the list matches when any group does |
+| `autoContinue.armedPrefixes` / `endedPrefixes` | case-sensitive prefixes of Claude Code's transcript notices |
+| `autoContinue.resetTimeMarker` | what precedes the announced time in an arm notice (` at `) |
+| `autoContinue.graceMinutes` | how long past the announced reset an arm is still expected |
+| `autoContinue.fallbackHours` | how long an arm with no readable time is trusted |
+
+The **order** the classes are tried in stays in code
+(`autocontinue::classify_failure_with`): a rate-limit kind, then rate-limit text
+before any other kind, then auth and network. That order is why a quota hit
+reported as `server_error` is not retried on a network backoff, and no data file
+should be able to undo it.
+
+**No patterns.** Substrings, exact kinds and prefixes only. The rules are meant
+to arrive from elsewhere, and a regular-expression language would let one bad
+update make every classification pathologically slow.
+
+**A bad file never breaks detection.** A file that does not parse, declares
+another `schemaVersion`, or fails validation — an empty fragment or prefix, which
+would match everything; no way left to recognise the quota wall; times out of
+range — is ignored in favour of the built-in rules, and `detection_rules_get`
+says why.
+
+**Engine surface, for an updater.**
+
+| Method | Does |
+|---|---|
+| `detection_rules_get` | the rules in force, `source` (`file` or `builtin`), `revision`, `rejected` (why a file is not in force), and the built-in rules for comparison |
+| `detection_rules_set` | `{ "rules": <document>, "allowDowngrade": false }` — validates and installs atomically, storing the document as given rather than merged, so what it leaves out keeps following later builds |
+| `detection_rules_reset` | removes the file, returning to the built-in rules |
+
+`revision` is monotonic. An older revision is refused unless `allowDowngrade` is
+set, so a delayed or replayed update cannot roll the rules back; resending the
+installed revision unchanged is a no-op, and resending it with different contents
+is refused. The headless `acp-run` has no engine to load a file through and
+classifies with the built-in rules.
+
 ### Verified
 
 `gui-win/ClaudeSwitch.App.Tests/TerminalNudgeLiveTests.cs` — opt-in, spawns
@@ -345,6 +493,19 @@ demotes running records whose owner is no longer alive to `interrupted`, on read
 Reaping on read rather than on write is the point: the process that would have
 marked the run interrupted is precisely the one that died. It is the same trick
 Claude Code uses for `~/.claude/sessions/<pid>.json`.
+
+**Liveness is asked of the process, never by running one.** The check used to
+read `tasklist` output, and that froze the GUI the moment a run started: the
+first journal read after `Start` reaps a record whose owner is alive, and it
+races the GUI launching the ACP adapter with inheritable handles. The adapter
+could inherit the write end of the pipe capturing `tasklist`'s output, so the
+read waited for an end of file only the adapter's exit could deliver — inside
+the engine lock, with the UI thread and the run's own journal writes queued
+behind it. Verified from a dump: the UI thread in `agent_run_list`, the ACP read
+loop in `agent_run_remove`, both in `cs_engine_call`, zero CPU. `OpenProcess`
+plus `GetExitCodeProcess` answers the same question without a child, and the
+exit code also catches a process that has exited while someone still holds its
+handle.
 
 A clean shutdown does mark its runs first (`BackgroundRuns.ShutdownAll`); the
 reaper is what covers a crash or a power cut.

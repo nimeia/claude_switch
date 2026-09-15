@@ -12,9 +12,22 @@ internal enum RunLineKind
     Notice,
     Warning,
     Error,
+    /// <summary>The model's thinking. Folded away in the web view; the text view leaves it out.</summary>
+    Thought,
+    /// <summary>A tool call's progress: its status, its result, or its command output.</summary>
+    ToolUpdate,
+    /// <summary>The agent's task list, sent whole each time it changes.</summary>
+    Plan,
 }
 
-internal readonly record struct RunLine(RunLineKind Kind, string Text);
+/// <summary>One transcript line.</summary>
+/// <param name="Text">What the plain-text view prints.</param>
+/// <param name="Data">
+/// Structure for the web view — a tool call's id, status, diff and output, the
+/// plan's entries. Built for the line and never modified afterwards, because the
+/// backlog holding it is read by every window that attaches.
+/// </param>
+internal readonly record struct RunLine(RunLineKind Kind, string Text, JsonObject? Data = null);
 
 /// <summary>
 /// A run that keeps going without a window attached.
@@ -34,7 +47,12 @@ internal readonly record struct RunLine(RunLineKind Kind, string Text);
 internal sealed class LiveRun
 {
     /// <summary>Transcript lines retained for a view that attaches later.</summary>
-    public const int BacklogLimit = 2000;
+    /// <remarks>
+    /// Sized for a run that reports each tool call's progress and its plan as
+    /// lines of their own, not only its replies: a reopened window should still
+    /// show how a long run got to where it is.
+    /// </remarks>
+    public const int BacklogLimit = 5000;
 
     private readonly List<RunLine> _backlog = [];
     private readonly object _gate = new();
@@ -148,9 +166,11 @@ internal sealed class LiveRun
         }
     }
 
-    internal void Emit(RunLineKind kind, string text)
+    internal void Emit(RunLineKind kind, string text, JsonObject? data = null) =>
+        Emit(new RunLine(kind, text, data));
+
+    internal void Emit(RunLine line)
     {
-        var line = new RunLine(kind, text);
         lock (_gate)
         {
             _backlog.Add(line);
@@ -299,7 +319,11 @@ internal static class BackgroundRuns
                 runner.SessionId,
                 launch.WorkingDirectory,
                 runner.AccountNumber ?? accountNumber,
-                launch.ConfigDir,
+                // A handover replaces the launch profile. Journalling the
+                // original would pair the new account with a directory that
+                // no longer holds the transcript — the same source ShutdownAll
+                // already uses.
+                runner.ConfigDir,
                 mode,
                 prompt,
                 status,
@@ -320,7 +344,10 @@ internal static class BackgroundRuns
             Rekey(live, runner.SessionId, store, status => Journal(status));
             OnUpdate(live, update);
         };
-        runner.Diagnostic += d => live.Emit(RunLineKind.Notice, $"[adapter] {d}");
+        // Tagged so the web view can fold the adapter's stderr into one quiet
+        // group instead of interleaving it with the work.
+        runner.Diagnostic += d =>
+            live.Emit(RunLineKind.Notice, $"[adapter] {d}", new JsonObject { ["source"] = "adapter" });
         runner.AccountSwitched += (from, to) =>
         {
             // Remember where it came from: a handover happens because an account
@@ -347,7 +374,7 @@ internal static class BackgroundRuns
             Changed?.Invoke();
         };
 
-        live.Emit(RunLineKind.Prompt, $"› {prompt}");
+        live.Emit(RunLineKind.Prompt, $"› {prompt}", new JsonObject { ["text"] = prompt });
         live.SetStatus(Loc.T("acp.status.running"));
 
         _ = Task.Run(async () =>
@@ -444,29 +471,10 @@ internal static class BackgroundRuns
 
     private static void OnUpdate(LiveRun live, JsonNode update)
     {
-        switch (update["sessionUpdate"]?.GetValue<string>())
-        {
-            case "agent_message_chunk":
-                if (update["content"]?["text"]?.GetValue<string>() is { } text)
-                {
-                    string? messageId = update["messageId"]?.GetValue<string>();
-                    if (messageId != live.StreamingMessageId)
-                    {
-                        live.StreamingMessageId = messageId;
-                        live.Emit(RunLineKind.Assistant, Environment.NewLine);
-                    }
-                    live.Emit(RunLineKind.Assistant, text);
-                }
-                break;
-            case "tool_call":
-                live.StreamingMessageId = null;
-                live.Emit(RunLineKind.Tool, $"  ⚙ {update["title"]?.GetValue<string>() ?? "tool"}");
-                break;
-            default:
-                // Thinking and command lists are deliberately not surfaced: the
-                // point of this view is outcomes and interruptions.
-                break;
-        }
+        string? streaming = live.StreamingMessageId;
+        var lines = RunEvents.FromUpdate(update, ref streaming);
+        live.StreamingMessageId = streaming;
+        foreach (var line in lines) live.Emit(line);
     }
 
     /// <summary>

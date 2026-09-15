@@ -140,6 +140,8 @@ pub struct Paths {
     pub autoswitch_state_file: PathBuf,
     /// Journal of supervised agent runs (see [`crate::agentruns`]).
     pub agent_runs_file: PathBuf,
+    /// Installed override of the detection rules (see [`crate::rules`]).
+    pub detection_rules_file: PathBuf,
 }
 
 impl Paths {
@@ -160,6 +162,7 @@ impl Paths {
             settings_file: backup_root.join("settings.json"),
             autoswitch_state_file: backup_root.join("autoswitch_state.json"),
             agent_runs_file: backup_root.join(crate::agentruns::JOURNAL_FILENAME),
+            detection_rules_file: backup_root.join(crate::rules::RULES_FILENAME),
             backup_root,
             env,
         }

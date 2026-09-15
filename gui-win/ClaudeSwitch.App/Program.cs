@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.Json.Nodes;
 using ClaudeSwitch.Core;
 
@@ -184,6 +184,8 @@ sealed class MainForm : Form
     private readonly NumericUpDown _workStartHour;
     private readonly Label _workHoursSep;
     private readonly NumericUpDown _workEndHour;
+    /// <summary>The work hours as clock times: when counting starts, when it resets.</summary>
+    private readonly Label _warmupPlan;
     private readonly ToolStripButton _btnSwitch;
     private readonly ToolStripMenuItem _btnTheme;
     private readonly ToolStripButton _btnRefresh;
@@ -201,6 +203,9 @@ sealed class MainForm : Form
     /// band the first thing a user hears about a task is that it already failed.
     /// </remarks>
     private readonly TaskBoard _taskBoard;
+
+    /// <summary>Recent conversations, under the account list.</summary>
+    private readonly TaskBoard _recentBoard;
     private readonly ToolStripMenuItem _btnLang;
     private bool _fittingSearch;
     private readonly ToolStripTextBox _search;
@@ -467,10 +472,12 @@ sealed class MainForm : Form
             Width = 280,
             // No native border: the OS draws it square and unthemed, which made
             // this the one hard-edged box on a window of rounded surfaces. The
-            // renderer paints a rounded one behind the hosted text box, and the
-            // padding is what leaves it room to show.
+            // strip paints a rounded one behind the hosted text box. Its height
+            // is set in FitSearchBox to match the buttons; the side padding insets
+            // the text the way a button insets its label — at 3 px the hint
+            // looked like it was touching the outline.
             BorderStyle = BorderStyle.None,
-            Padding = new Padding(3, 2, 3, 2),
+            Padding = new Padding(Theme.Space3, 0, Theme.Space1, 0),
             Font = Theme.FontBody,
             // Hint is a native watermark, never Text — see SearchBox.
             Text = "",
@@ -561,6 +568,15 @@ sealed class MainForm : Form
                 e.Graphics,
                 Rectangle.Inflate(_search.Bounds, -1, -1),
                 _search.TextBox?.Focused == true);
+        };
+
+        // The box is as tall as the buttons, but the edit control inside it is
+        // only as tall as its text. A click on the band above or below the text
+        // is still a click on the box.
+        _toolStrip.MouseDown += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left && _search.Visible && _search.Bounds.Contains(e.Location))
+                _search.Focus();
         };
 
         // Right cluster first, then left: primary switch + global actions only.
@@ -777,10 +793,14 @@ sealed class MainForm : Form
             Value = 18,
             Width = HourBoxW,
             Height = Theme.ControlHeight - 2,
-            Margin = new Padding(0, 4, Theme.Space4, 0),
+            Margin = new Padding(0, 4, Theme.Space3, 0),
             Font = Theme.FontBody,
             TextAlign = HorizontalAlignment.Center,
         };
+        // What the hours turn into. Without it "9 — 18" read as "runs from 9 to
+        // 18", when the first start is at 6:00 and the resets fall inside.
+        _warmupPlan = FieldLabel("");
+        _warmupPlan.Margin = new Padding(0, 7, Theme.Space4, 0);
         // The shell's own button, not a raw system one: same height, corner and
         // padding as everything else on the row.
         _warmupNowBtn = new SecondaryButton
@@ -885,6 +905,7 @@ sealed class MainForm : Form
         warmupFlow.Controls.Add(_workStartHour);
         warmupFlow.Controls.Add(_workHoursSep);
         warmupFlow.Controls.Add(_workEndHour);
+        warmupFlow.Controls.Add(_warmupPlan);
         warmupFlow.Controls.Add(_warmupNowBtn);
 
         // Everything that is configured once and then forgotten.
@@ -969,8 +990,27 @@ sealed class MainForm : Form
         _activityStrip = new ActivityStrip();
         _activityStrip.OpenRequested += (_, _) => ShowOverviewWindow();
 
+        // Recent conversations sit under the account list, in the room the list
+        // does not use: this app is an account list first, so the band is sized
+        // from what the list can spare and hides itself when there is nothing.
+        // It used to be a dropdown only, which meant the home page showed no
+        // conversation at all until someone thought to open it.
+        // "See all" opens the conversations window: the whole list is somewhere
+        // to search, sort and clear out, which does not fit between the cards.
+        _recentBoard = new TaskBoard(
+            RecentSummary, () => false, _ => { }, ShowSessionsWindow, Loc.T("recent.seeAll"))
+        {
+            Dock = DockStyle.Bottom,
+            Visible = false,
+        };
+        _recentBoard.LayoutChanged += ApplyBandHeights;
+        Activated += (_, _) => UpdateRecentSessions(promptly: true);
+
         var body = new Panel { Dock = DockStyle.Fill, Margin = new Padding(0) };
+        // Docking runs from the last control to the first: the strip claims the
+        // very bottom, the recent band sits on it, and the list fills the rest.
         body.Controls.Add(_listOuter);
+        body.Controls.Add(_recentBoard);
         body.Controls.Add(_activityStrip);
         _listOuter.BringToFront();
 
@@ -1157,20 +1197,42 @@ sealed class MainForm : Form
             }));
             LayoutProbe.ExtraWindows.Add(("gui-stats.png", () =>
                 _projectsWindow?.ProbeRunStats()));
+            // The cleanup dialog only exists after a click, and its rows and
+            // preview are laid out in code — nothing else would ever look at it.
+            LayoutProbe.ExtraWindows.Add(("gui-history-cleanup.png", () =>
+                _projectsWindow?.ProbeCleanupDialog()));
         }
         // The agent window is built entirely in code and has no other visual
         // test; a clipped status strip or an unreadable transcript would only
         // ever be found by a user mid-run.
-        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_AGENT") == "1")
+        // "empty" opens the window the way a new one starts — its empty-state
+        // hint, and a window a real run can be started from.
+        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_AGENT") is var probeAgent and ("1" or "empty"))
         {
             LayoutProbe.ExtraWindows.Add(("gui-agent.png", () =>
             {
-                Form w = NewAgentWindow(
+                var w = NewAgentWindow(
                     Environment.CurrentDirectory,
                     configDir: null,
                     accountNumber: 1,
                     accountLabel: "demo@example.com");
+                if (probeAgent == "1") w.ShowSampleRun();
+                // The page follows its newest line, so a window of the default
+                // height captures only the tail of the transcript.
+                if (int.TryParse(Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_AGENT_HEIGHT"), out var agentHeight)
+                    && agentHeight > 0)
+                {
+                    w.Height = agentHeight;
+                }
                 w.Show(this);
+                // The transcript is a web page that loads after the window
+                // appears; a capture taken before it settles is a blank frame.
+                var until = DateTime.UtcNow.AddSeconds(15);
+                while (!w.IsTranscriptSettled && DateTime.UtcNow < until)
+                {
+                    Application.DoEvents();
+                    Thread.Sleep(50);
+                }
                 return w;
             }));
         }
@@ -1282,6 +1344,22 @@ sealed class MainForm : Form
                 return _overviewWindow;
             }));
         }
+        if (Environment.GetEnvironmentVariable("CLAUDE_SWITCH_PROBE_SESSIONS") == "1")
+        {
+            LayoutProbe.ExtraWindows.Add(("gui-sessions.png", () =>
+            {
+                ShowSessionsWindow();
+                // The list is read off the UI thread; a picture of "reading…"
+                // shows nothing about the list.
+                var until = DateTime.UtcNow.AddSeconds(20);
+                while (_sessionsWindow is { IsLoadedForProbe: false } && DateTime.UtcNow < until)
+                {
+                    Application.DoEvents();
+                    Thread.Sleep(50);
+                }
+                return _sessionsWindow;
+            }));
+        }
         LayoutProbe.RunIfRequested(
             this,
             ("header", _header),
@@ -1292,6 +1370,7 @@ sealed class MainForm : Form
             ("cards", _cardHost),
             ("status", _status),
             ("strip", _activityStrip),
+            ("recent", _recentBoard),
             ("toolstrip", _toolStrip),
             ("search", _search.TextBox));
         // ToolStrip items are not Controls, so the probe cannot measure them
@@ -1310,6 +1389,18 @@ sealed class MainForm : Form
                     .Where(i => i.Text is { Length: > 0 })
                     .Select(i => $"  item \"{i.Text}\" placement={i.Placement} w={i.Width}")));
         LayoutProbe.ExtraChecks.Add(SearchClearReport);
+        LayoutProbe.ExtraChecks.Add(() =>
+        {
+            var box = _search.Bounds;
+            var button = _btnAdd.Bounds;
+            bool same = box.Height == button.Height && box.Top == button.Top;
+            // The outline is filled with the surface colour; an edit area on any
+            // other colour shows as a stripe through the middle of the box.
+            bool fill = _search.TextBox?.BackColor.ToArgb() == Theme.BgSurface.ToArgb();
+            return $"search_bounds={box} button_bounds={button} edit_back={_search.TextBox?.BackColor}\n"
+                + (same ? "OK search_matches_button_height" : "FAIL search_differs_from_buttons") + "\n"
+                + (fill ? "OK search_fill_matches_outline" : "FAIL search_fill_differs_from_outline");
+        });
     }
 
     /// <summary>
@@ -1376,13 +1467,35 @@ sealed class MainForm : Form
         }
         int free = _toolStrip.DisplayRectangle.Width - used;
         int want = Math.Clamp(free, MinSearch, MaxSearch);
-        if (want == _search.Width) return;
+        int height = StripButtonHeight();
+        if (want == _search.Width && height == _search.Height) return;
 
-        // Setting Width re-triggers Layout; the guard keeps that to one pass.
+        // Setting the size re-triggers Layout; the guard keeps that to one pass.
         _fittingSearch = true;
-        try { _search.Width = want; }
+        try { _search.Size = new Size(want, height); }
         finally { _fittingSearch = false; }
     }
+
+    /// <summary>
+    /// Height of the toolbar's buttons, which the search box matches.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The box used to take the edit control's own height, which left its
+    /// rounded outline visibly shorter than the buttons on the same row. Both
+    /// outlines are drawn from their item's bounds, so equal heights give equal
+    /// shapes.
+    /// </para>
+    /// <para>
+    /// A button's preferred height is not the height it gets: the strip stretches
+    /// auto-sized items to its full row, and only a fixed-size item like this one
+    /// keeps what it is given. Matching the preferred height left the box 11 px
+    /// short at 150%. The row is read from the strip itself, so it holds on any
+    /// display and whether or not a given button has fallen into the chevron.
+    /// </para>
+    /// </remarks>
+    private int StripButtonHeight() =>
+        Math.Max(_btnAdd.GetPreferredSize(Size.Empty).Height, _toolStrip.DisplayRectangle.Height);
 
     /// <summary>
     /// Compact language menu. The label is the language's own name (English,
@@ -1455,6 +1568,8 @@ sealed class MainForm : Form
         _workHoursLabel.Text = Loc.T("settings.warmup.hours");
         _warmupNowBtn.Text = Loc.T("settings.warmup.now");
         _warmupTask.Text = Loc.T("settings.warmup.task");
+        // Plan line and tooltips are composed from translated pieces.
+        SyncWarmupUiEnabled();
         ApplySettingsExpansion(UiPrefs.SettingsExpanded, save: false);
 
         // The status line is rebuilt from live state, so a stale sentence in the
@@ -1574,6 +1689,14 @@ sealed class MainForm : Form
         _root.RowStyles[3] = new RowStyle(SizeType.Absolute, TaskBoardHeight(S));
         _root.RowStyles[5] = new RowStyle(SizeType.Absolute, S(StatusBandH));
 
+        // Recent conversations take what the account list can spare, in whole
+        // rows, and nothing when there are none.
+        if (_recentBoard is not null)
+        {
+            _recentBoard.SetMaxVisibleRows(TaskBoard.RowsThatFit(ClientSize.Height * RecentShare / s));
+            _recentBoard.Height = _recentBoard.Visible ? (int)S(_recentBoard.DesiredHeight) : 0;
+        }
+
         for (int i = 0; i < _settingsBody.RowStyles.Count; i++)
             _settingsBody.RowStyles[i] = new RowStyle(SizeType.Absolute, S(SettingsRowH));
 
@@ -1690,7 +1813,8 @@ sealed class MainForm : Form
             ? Loc.T("settings.summary.autoOn", (int)_threshold.Value)
             : Loc.T("settings.summary.autoOff");
         string warm = _warmupEnabled.Checked
-            ? Loc.T("settings.summary.warmOn", (int)_workStartHour.Value, (int)_workEndHour.Value)
+            ? Loc.T("settings.summary.warmOn", (int)_workStartHour.Value, (int)_workEndHour.Value,
+                WarmupTaskHelper.FormatBaseAnchor((int)_workStartHour.Value, (int)_workEndHour.Value))
             : Loc.T("settings.summary.warmOff");
         _settingsSummary.Text = $"{auto}   ·   {warm}";
     }
@@ -1706,6 +1830,7 @@ sealed class MainForm : Form
         _cardHost.BackColor = Theme.BgApp;
         _emptyState.BackColor = Theme.BgApp;
         _taskBoard.ApplyTheme();
+        _recentBoard.ApplyTheme();
         // Scrollbars are drawn by the OS, so they need asking separately or a
         // dark window keeps a white stripe down its edge. Only reaches controls
         // that already have a handle, which is why it is also applied on Shown
@@ -1739,7 +1864,6 @@ sealed class MainForm : Form
         _toolStrip.BackColor = Theme.BgApp;
         _toolStrip.ForeColor = Theme.TextPrimary;
         _toolStrip.Renderer = new SageToolStripRenderer();
-        ApplySearchColors();
         foreach (Control c in _emptyState.Controls)
         {
             c.ForeColor = Theme.TextSecondary;
@@ -1756,6 +1880,11 @@ sealed class MainForm : Form
         Tint(_header, Theme.BgHeader);
         Tint(_actionBar, Theme.BgApp);
         Tint(_statusBand, Theme.BgHeader);
+        // After the tint, not before: a strip's hosted controls are its child
+        // controls, so the walk above reaches the search box's edit area and the
+        // ✕ inside it and leaves them on the toolbar colour — a grey stripe
+        // across a white box.
+        ApplySearchColors();
         Icon = AppIcon.Get();
         _tray.Icon = AppIcon.Get();
         Invalidate(true);
@@ -1807,12 +1936,23 @@ sealed class MainForm : Form
         _workStartHour.ForeColor = ValueColor(on);
         _workEndHour.ForeColor = ValueColor(on);
         _warmupTask.ForeColor = Theme.TextPrimary;
+        // Disabled with the rest of the row, not just recoloured: the system
+        // draws disabled text lighter than TextDisabled, so a recoloured label
+        // stood out darker than its greyed neighbours. The checkbox keeps the
+        // explanation tooltip, since a disabled control shows none.
+        _warmupPlan.Enabled = on;
+        _warmupPlan.ForeColor = CaptionColor(on);
         UpdateSettingsSummary();
-        var (ah, am) = WarmupTaskHelper.BaseAnchor((int)_workStartHour.Value, (int)_workEndHour.Value);
+        int startH = (int)_workStartHour.Value;
+        int endH = (int)_workEndHour.Value;
+        string start = WarmupTaskHelper.FormatBaseAnchor(startH, endH);
+        _warmupPlan.Text = WarmupTaskHelper.PlanText(startH, endH);
         _warmupTask.Text = Loc.T("settings.warmup.task");
-        _toolTipWarmup ??= new ToolTip();
-        _toolTipWarmup.SetToolTip(_warmupTask,
-            Loc.T("settings.warmup.task.tip", $"{ah}:{am:D2}"));
+        _toolTipWarmup ??= new ToolTip { AutoPopDelay = 20_000 };
+        string why = Loc.T("settings.warmup.tip", start, endH);
+        _toolTipWarmup.SetToolTip(_warmupEnabled, why);
+        _toolTipWarmup.SetToolTip(_warmupPlan, why);
+        _toolTipWarmup.SetToolTip(_warmupTask, Loc.T("settings.warmup.task.tip", start));
         _toolTipWarmup.SetToolTip(_warmupNowBtn, Loc.T("settings.warmup.now.tip"));
     }
 
@@ -1943,6 +2083,9 @@ sealed class MainForm : Form
         {
             _search.TextBox.BackColor = Theme.BgSurface;
             _search.TextBox.ForeColor = Theme.TextPrimary;
+            // The inline ✕ sits on the same surface.
+            foreach (Control child in _search.TextBox.Controls)
+                child.BackColor = Theme.BgSurface;
         }
     }
 
@@ -1986,9 +2129,16 @@ sealed class MainForm : Form
         {
             foreach (var session in recent)
             {
-                var item = new ToolStripMenuItem(RecentSessions.MenuLabel(session))
+                string label = RecentSessions.MenuLabel(session);
+                var item = new ToolStripMenuItem(session.Live ? Loc.T("resume.live", label) : label)
                 {
-                    ToolTipText = Loc.T("resume.tooltip", session.Path, session.SessionId),
+                    ToolTipText = session.Live
+                        ? Loc.T("resume.live.tip", session.Path)
+                        : Loc.T("resume.tooltip", session.Path, session.SessionId),
+                    // The newest work is usually the conversation still open in
+                    // a terminal. Leaving it out made the list look stale;
+                    // resuming it would put two terminals into one transcript.
+                    Enabled = !session.Live,
                 };
                 item.Click += (_, _) => ResumeSession(session);
                 items.Add(item);
@@ -1996,47 +2146,59 @@ sealed class MainForm : Form
         }
 
         items.Add(new ToolStripSeparator());
+        items.Add(new ToolStripMenuItem(Loc.T("resume.sessions"), null, (_, _) => ShowSessionsWindow()));
         items.Add(new ToolStripMenuItem(Loc.T("resume.all"), null, (_, _) => ShowProjectsWindow()));
     }
 
     /// <summary>
-    /// Reopen a conversation, under the directory's bound account when it has one.
+    /// Reopen a conversation in the config home that holds it.
     /// </summary>
     /// <remarks>
-    /// A binding is the answer to "which account does this directory belong to",
-    /// so resuming there without honouring it would use the wrong one. An
-    /// unbound directory keeps the original behaviour exactly: plain
-    /// <c>claude --resume</c> on the default login.
+    /// Claude Code only looks for a session in its own <c>CLAUDE_CONFIG_DIR</c>.
+    /// Resuming used to follow the directory's account binding instead, which
+    /// broke both ways: a conversation written under the default login could not
+    /// be found through the bound account's profile, and one written in a
+    /// session-mode terminal could not be found through the default login. The
+    /// binding still decides where a <em>new</em> conversation starts.
     /// </remarks>
-    private void ResumeSession(RecentSession session)
+    /// <param name="session">The conversation to reopen.</param>
+    /// <param name="owner">
+    /// Window a failure is reported over — the conversations window when it
+    /// asked, so the message does not surface behind it. The main window when null.
+    /// </param>
+    /// <returns>Whether a terminal was started.</returns>
+    private bool ResumeSession(RecentSession session, IWin32Window? owner = null)
     {
-        if (SessionMode.BoundAccount(_engine, session.Path) is { } bound)
+        owner ??= this;
+        if (session.ProfileNumber is { } number)
         {
             var result = SessionMode.Launch(
-                _engine, bound.Number.ToString(), session.Path, session.SessionId);
+                _engine, number.ToString(), session.Path, session.SessionId);
             if (!result.Launched)
             {
                 MessageBox.Show(
-                    this,
+                    owner,
                     result.Problem,
                     Loc.T("resume.failed.title"),
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
-                return;
+                return false;
             }
-            _baseStatus = Loc.T("status.resumedAs", session.Name, Pii.MaskEmail(bound.Email));
+            string email = _models.FirstOrDefault(m => m.Number == number)?.Email ?? "";
+            _baseStatus = Loc.T("status.resumedAs", session.Name, Pii.MaskEmail(email));
             ComposeStatusLine();
             Reload();
-            return;
+            return true;
         }
 
         if (ClaudeCli.Resume(session.Path, session.SessionId) is { } problem)
         {
-            MessageBox.Show(this, problem, Loc.T("resume.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
+            MessageBox.Show(owner, problem, Loc.T("resume.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
         }
         _baseStatus = Loc.T("status.resumed", session.Name);
         ComposeStatusLine();
+        return true;
     }
 
     /// <summary>
@@ -2051,7 +2213,7 @@ sealed class MainForm : Form
         string label = string.IsNullOrWhiteSpace(model.Alias)
             ? Pii.MaskEmail(model.Email)
             : $"{model.Alias} · {Pii.MaskEmail(model.Email)}";
-        if (SessionLaunchDialog.Pick(this, _engine, model.Number, label) is not { } pick)
+        if (SessionLaunchDialog.Pick(this, _engine, model.Number, label, model.Active) is not { } pick)
         {
             return;
         }
@@ -2107,7 +2269,7 @@ sealed class MainForm : Form
             ? Pii.MaskEmail(model.Email)
             : $"{model.Alias} · {Pii.MaskEmail(model.Email)}";
 
-        if (SessionLaunchDialog.Pick(this, _engine, model.Number, label) is not { } pick)
+        if (SessionLaunchDialog.Pick(this, _engine, model.Number, label, model.Active) is not { } pick)
         {
             return;
         }
@@ -2463,6 +2625,88 @@ sealed class MainForm : Form
         }
     }
 
+    /// <summary>How many recent conversations the home page lists.</summary>
+    /// <remarks>Only what the band shows; the rest belong to the conversations window.</remarks>
+    private static int RecentLimit => TaskBoard.MaxRows;
+
+    /// <summary>Share of the window the recent-conversations band may take.</summary>
+    private const float RecentShare = 0.3f;
+
+    private DateTime _recentLoadedUtc = DateTime.MinValue;
+    private bool _recentLoading;
+
+    /// <summary>
+    /// Refresh the recent-conversations band, off the UI thread.
+    /// </summary>
+    /// <remarks>
+    /// Conversations are written by terminals this app does not own, so nothing
+    /// announces a change: the list is re-read every half minute while the
+    /// window is on screen, and promptly when the user comes back to it. The read
+    /// touches every transcript folder, which is why it never runs on the UI
+    /// thread, nor while the window sits in the tray.
+    /// </remarks>
+    private void UpdateRecentSessions(bool promptly = false)
+    {
+        if (IsDisposed || Disposing || _recentLoading || !IsHandleCreated) return;
+        if (!Visible || WindowState == FormWindowState.Minimized) return;
+        var wait = promptly ? TimeSpan.FromSeconds(3) : TimeSpan.FromSeconds(30);
+        if (DateTime.UtcNow - _recentLoadedUtc < wait) return;
+
+        _recentLoading = true;
+        _ = Task.Run(() => RecentSessions.Load(_engine, RecentLimit)).ContinueWith(
+            loaded =>
+            {
+                try
+                {
+                    BeginInvoke(() =>
+                    {
+                        _recentLoading = false;
+                        _recentLoadedUtc = DateTime.UtcNow;
+                        if (!IsDisposed) ShowRecentSessions(loaded.Result);
+                    });
+                }
+                catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
+                {
+                    // The window closed while the list was being read.
+                }
+            },
+            TaskScheduler.Default);
+    }
+
+    /// <summary>Put the recent conversations on the home page.</summary>
+    private void ShowRecentSessions(IReadOnlyList<RecentSession> sessions)
+    {
+        var entries = new List<TaskEntry>();
+        foreach (var session in sessions)
+        {
+            var captured = session;
+            string title = string.IsNullOrWhiteSpace(session.Title) ? session.Name : session.Title!;
+            string when = session.LastActiveMs is { } ms ? Ago(ms) : "";
+            string? account = session.ProfileNumber is { } n ? LabelForAccount(n) : null;
+            entries.Add(session.Live
+                // Still open in a terminal. Listing it keeps the band honest
+                // about what was touched last; continuing it here would put two
+                // terminals into one transcript, so the action is the folder.
+                ? new TaskEntry(
+                    TaskState.Running, title, account, session.Path, when,
+                    () => OpenFolder(captured.Path), Loc.T("board.action.folder"))
+                : new TaskEntry(
+                    TaskState.Updated, title, account, session.Path, when,
+                    () => ResumeSession(captured), Loc.T("recent.action.resume"),
+                    OpenFolder: FolderAction(captured.Path)));
+        }
+        _recentBoard.Show(entries);
+        _recentBoard.Visible = entries.Count > 0;
+        ApplyBandHeights();
+    }
+
+    /// <summary>The recent band's heading: what it lists, and how much is still open.</summary>
+    private static string RecentSummary(IReadOnlyList<TaskEntry> entries)
+    {
+        int live = entries.Count(e => e.State == TaskState.Running);
+        return live > 0 ? Loc.T("recent.heading.live", live) : Loc.T("recent.heading");
+    }
+
     /// <summary>
     /// The account a run is spending, showing a handover when there was one.
     /// </summary>
@@ -2496,6 +2740,22 @@ sealed class MainForm : Form
 
     private static string Since(long epochMs) =>
         Elapsed(DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeMilliseconds(epochMs));
+
+    /// <summary>
+    /// A moment in the past: "5 分钟前", or "刚刚".
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Since"/> reads as a duration, which is right for a run still
+    /// going and wrong for a conversation last touched a while ago. A file time
+    /// slightly ahead of this clock is "just now", not blank.
+    /// </remarks>
+    private static string Ago(long epochMs)
+    {
+        var span = DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeMilliseconds(epochMs);
+        return span.TotalMinutes < 1
+            ? Loc.T("board.elapsed.justNow")
+            : Loc.T("recent.ago", Elapsed(span));
+    }
 
     /// <summary>
     /// An "open folder" action, or null when there is no folder to open.
@@ -2711,7 +2971,7 @@ sealed class MainForm : Form
 
     private ContextMenuStrip BuildTrayMenu()
     {
-        var menu = new ContextMenuStrip();
+        var menu = new ContextMenuStrip { Renderer = new SageToolStripRenderer() };
         menu.Items.Add(Loc.T("tray.show"), null, (_, _) => RestoreFromTray());
         menu.Items.Add(Loc.T("tray.refresh"), null, (_, _) => Reload());
         menu.Items.Add(new ToolStripSeparator());
@@ -2927,6 +3187,7 @@ sealed class MainForm : Form
 
     /// <summary>One shared instance: reopening should return to where you were.</summary>
     private ProjectsWindow? _projectsWindow;
+    private SessionsWindow? _sessionsWindow;
 
     private OverviewWindow? _overviewWindow;
 
@@ -3092,6 +3353,30 @@ sealed class MainForm : Form
         _projectsWindow = new ProjectsWindow(_engine);
         _projectsWindow.FormClosed += (_, _) => _projectsWindow = null;
         _projectsWindow.Show(this);
+    }
+
+    /// <summary>Open the conversations window, or bring it forward.</summary>
+    private void ShowSessionsWindow()
+    {
+        if (_sessionsWindow is { IsDisposed: false })
+        {
+            _sessionsWindow.Activate();
+            return;
+        }
+        _sessionsWindow = new SessionsWindow(
+            _engine,
+            (session, owner) => ResumeSession(session, owner),
+            LabelForAccount,
+            ShowProjectsWindow,
+            changed: () =>
+            {
+                // Deleted or continued over there: the home band should agree
+                // now, not at its next half-minute refresh.
+                _recentLoadedUtc = DateTime.MinValue;
+                UpdateRecentSessions();
+            });
+        _sessionsWindow.FormClosed += (_, _) => _sessionsWindow = null;
+        _sessionsWindow.Show(this);
     }
 
     private void OnCardReorder(CardDrop drop)
@@ -3461,7 +3746,8 @@ sealed class MainForm : Form
             ? Loc.T("settings.saved.on", _threshold.Value)
             : Loc.T("settings.saved.off");
         string warm = _warmupEnabled.Checked
-            ? Loc.T("settings.warmup.saved.on", (int)_workStartHour.Value, (int)_workEndHour.Value)
+            ? Loc.T("settings.warmup.saved.on", (int)_workStartHour.Value, (int)_workEndHour.Value,
+                WarmupTaskHelper.FormatBaseAnchor((int)_workStartHour.Value, (int)_workEndHour.Value))
             : Loc.T("settings.warmup.saved.off");
         return $"{auto} · {warm}";
     }
@@ -3474,6 +3760,7 @@ sealed class MainForm : Form
         if (IsDisposed) return;
         try
         {
+            UpdateRecentSessions();
             if (DateTime.UtcNow >= _nextPollUtc)
                 RunEnginePoll(force: false);
             else
@@ -3911,7 +4198,7 @@ sealed class MainForm : Form
         {
             Font = Theme.FontBody,
             ShowImageMargin = false,
-            Renderer = new ToolStripProfessionalRenderer(),
+            Renderer = new SageToolStripRenderer(),
         };
 
         // Defer actions so the menu can close cleanly first (avoids disposed-item races).
@@ -3984,7 +4271,7 @@ sealed class MainForm : Form
 
         var deleteItem = new ToolStripMenuItem(Loc.T("menu.delete"))
         {
-            ForeColor = Theme.Danger,
+            Tag = "danger",
         };
         deleteItem.Click += (_, _) => Run(DoDelete);
 
@@ -4089,20 +4376,73 @@ sealed class MainForm : Form
             Loc.T("card.relogin"),
             MessageBoxButtons.OKCancel,
             MessageBoxIcon.Information);
-        if (answer == DialogResult.OK) DoAdd();
+        if (answer == DialogResult.OK) AddCurrentLogin(repairing: m);
     }
 
-    private void DoAdd()
+    private void DoAdd() => AddCurrentLogin(repairing: null);
+
+    /// <summary>
+    /// Capture the live Claude Code login, or refresh the slot already holding it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The engine reuses the slot of a login that is already listed instead of
+    /// adding it a second time, and says so — which is reported here rather than
+    /// claiming an add. Adding used to take a new slot every time.
+    /// </para>
+    /// <para>
+    /// Repairing a card first checks that the live login is that card's account.
+    /// The dialog asked the user to sign in to it; if they have not, going ahead
+    /// would refresh or add some other account while the card stays broken.
+    /// </para>
+    /// </remarks>
+    private void AddCurrentLogin(AccountCardModel? repairing)
     {
         try
         {
             Cursor = Cursors.WaitCursor;
-            _engine.Call("add_current", new { });
-            _status.Text = Loc.T("add.done");
+            if (repairing is not null && LiveLoginMismatch(repairing) is { } mismatch)
+            {
+                Cursor = Cursors.Default;
+                MessageBox.Show(
+                    this, mismatch, Loc.T("card.relogin"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            // A repair names its slot: the check above established the live login
+            // is that account, and one account can sit in two slots.
+            var added = repairing is null
+                ? _engine.Call("add_current", new { })
+                : _engine.Call("add_current", new { slot = repairing.Number });
+            int number = added["number"]?.GetValue<int>() ?? 0;
+            bool existing = added["existing"]?.GetValue<bool>() ?? false;
+            string who = Pii.MaskAccountLabel(
+                added["alias"]?.GetValue<string>(), added["email"]?.GetValue<string>());
             Reload();
+            Cursor = Cursors.Default;
+
+            if (repairing is not null)
+            {
+                _status.Text = Loc.T("card.relogin.done", who);
+            }
+            else if (existing)
+            {
+                _status.Text = Loc.T("add.exists.status", who, number);
+                MessageBox.Show(
+                    this,
+                    Loc.T("add.exists", who, number),
+                    Loc.T("toolbar.add"),
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            else
+            {
+                _status.Text = Loc.T("add.done");
+            }
         }
         catch (Exception ex)
         {
+            Cursor = Cursors.Default;
             MessageBox.Show(
                 this,
                 Loc.T("add.failed", ex.Message + Loc.T("add.failed.hint")),
@@ -4114,6 +4454,46 @@ sealed class MainForm : Form
         {
             Cursor = Cursors.Default;
         }
+    }
+
+    /// <summary>
+    /// Why the live login cannot repair <paramref name="card"/>, or null when it can.
+    /// </summary>
+    /// <remarks>
+    /// Read from a fresh snapshot: the user signed in after the cards were drawn.
+    /// </remarks>
+    private string? LiveLoginMismatch(AccountCardModel card)
+    {
+        var snap = _engine.Snapshot();
+        // Unidentifiable live login: there is nothing to compare, and the add
+        // itself will report a login it cannot read.
+        if (snap["activeVerified"]?.GetValue<bool>() != true) return null;
+
+        string target = Pii.MaskAccountLabel(card.Alias, card.Email);
+        if (snap["accounts"] is JsonArray accounts)
+        {
+            foreach (var a in accounts)
+            {
+                if (a?["active"]?.GetValue<bool>() != true) continue;
+                if (a["number"]?.GetValue<int>() == card.Number) return null;
+                string email = a["email"]?.GetValue<string>() ?? "";
+                // This very bug could have listed the account twice, and only one
+                // copy is marked current. Same email and organization is the same
+                // account; one email under another organization is not.
+                if (email.Equals(card.Email, StringComparison.OrdinalIgnoreCase)
+                    && a["plan"]?["organizationName"]?.GetValue<string>() == card.OrganizationName)
+                {
+                    return null;
+                }
+                return Loc.T(
+                    "card.relogin.otherAccount",
+                    Pii.MaskAccountLabel(a["alias"]?.GetValue<string>(), email),
+                    target);
+            }
+        }
+        return snap["unmanagedLoginEmail"]?.GetValue<string>() is { Length: > 0 } other
+            ? Loc.T("card.relogin.otherAccount", Pii.MaskEmail(other), target)
+            : Loc.T("card.relogin.signedOut", target);
     }
 
     private void DoToggleDisable()

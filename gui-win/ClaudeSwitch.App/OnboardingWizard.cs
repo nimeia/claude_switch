@@ -96,11 +96,15 @@ internal sealed class OnboardingWizard : Form
             try
             {
                 Cursor = Cursors.WaitCursor;
-                _engine.Call("add_current", new { });
+                var added = _engine.Call("add_current", new { });
                 if (_resultLabel is not null)
                 {
                     _resultLabel.ForeColor = Theme.PrimaryDark;
-                    _resultLabel.Text = Loc.T("wizard.added");
+                    // Running the wizard again on the same login refreshes its
+                    // slot rather than listing it twice; say which happened.
+                    _resultLabel.Text = added["existing"]?.GetValue<bool>() == true
+                        ? Loc.T("wizard.alreadyAdded")
+                        : Loc.T("wizard.added");
                 }
                 _btnNext.Text = Loc.T("wizard.start");
                 _step = 3;

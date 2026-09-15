@@ -105,6 +105,41 @@ internal static class WarmupTaskHelper
         return string.Create(CultureInfo.InvariantCulture, $"{h}:{m:D2}");
     }
 
+    /// <summary>
+    /// Local "H:mm" times the base account's 5h window resets before work end,
+    /// when the guardian keeps starting the next one from the base anchor.
+    /// </summary>
+    /// <remarks>
+    /// Mirrors core: a start is allowed until work end, so every reset before
+    /// then begins the next round. A reset at work end begins nothing.
+    /// </remarks>
+    public static IReadOnlyList<string> ResetTimes(int workStartHour, int workEndHour)
+    {
+        var (h, m) = BaseAnchor(workStartHour, workEndHour);
+        int start = Math.Clamp(workStartHour, 0, 22);
+        int end = Math.Clamp(workEndHour, start + 1, 23) * 60;
+        var times = new List<string>();
+        for (int t = h * 60 + m + 300; t < end; t += 300)
+            times.Add(string.Create(CultureInfo.InvariantCulture, $"{t / 60}:{t % 60:D2}"));
+        return times;
+    }
+
+    /// <summary>
+    /// What the work hours turn into on the clock: "6:00 开始 · 11:00、16:00 重置".
+    /// </summary>
+    /// <remarks>
+    /// The work hours alone read as "runs from 9 to 18", when the first start is
+    /// hours earlier — this line is what stops that reading.
+    /// </remarks>
+    public static string PlanText(int workStartHour, int workEndHour)
+    {
+        string start = FormatBaseAnchor(workStartHour, workEndHour);
+        var resets = ResetTimes(workStartHour, workEndHour);
+        return resets.Count == 0
+            ? Loc.T("settings.warmup.plan.startOnly", start)
+            : Loc.T("settings.warmup.plan", start, string.Join(Loc.T("notice.warmup.sep"), resets));
+    }
+
     static void RunSchtasks(string arguments, bool allowFail)
     {
         var psi = new ProcessStartInfo("schtasks")

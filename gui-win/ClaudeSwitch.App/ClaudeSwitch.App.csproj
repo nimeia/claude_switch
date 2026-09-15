@@ -51,30 +51,59 @@
     <EmbeddedResource Include="Strings\*.json" />
   </ItemGroup>
 
-  <!-- The Rust engine, built by: cargo build -p claude-switch-ffi (release). -->
+  <!-- The supervised-run transcript is a local web page (xterm.js draws command
+       output). Embedded like the catalogues and served to WebView2 from memory:
+       nothing is unpacked to disk, and nothing is fetched. -->
   <ItemGroup>
-    <None Include="$(MSBuildThisFileDirectory)..\..\target\release\claude_switch.dll"
-          Condition="Exists('$(MSBuildThisFileDirectory)..\..\target\release\claude_switch.dll')">
-      <Link>claude_switch.dll</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-    </None>
+    <EmbeddedResource Include="AgentView\**\*" LogicalName="AgentView/%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 
-  <Target Name="WarnIfNativeMissing" BeforeTargets="Build">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
+  </ItemGroup>
+
+  <!-- The package references its WPF control in every .NET 5+ project. This app
+       is WinForms: the WPF assembly only drags a WindowsBase version conflict
+       into every build and an unused DLL into the single-file bundle. -->
+  <Target Name="DropWebView2WpfReference" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
+
+  <!-- The Rust engine, built by: cargo build -p claude-switch-ffi (release).
+       Found where Cargo put it, not at a fixed target\release path; see
+       ClaudeSwitch.Native.targets for why. -->
+  <Import Project="..\ClaudeSwitch.Native.targets" />
+
+  <!-- Added in a target rather than as a static item because the path is only
+       known once Cargo has been asked. Before AssignTargetPaths, so both the
+       copy to bin and the publish (single-file bundle included) pick it up. -->
+  <Target Name="IncludeClaudeSwitchNative"
+          DependsOnTargets="ResolveClaudeSwitchNative"
+          BeforeTargets="AssignTargetPaths">
+    <ItemGroup Condition="Exists('$(ClaudeSwitchNativeDll)')">
+      <None Include="$(ClaudeSwitchNativeDll)"
+            Link="claude_switch.dll"
+            CopyToOutputDirectory="PreserveNewest"
+            CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="WarnIfNativeMissing" DependsOnTargets="ResolveClaudeSwitchNative" BeforeTargets="Build">
     <Warning
-      Condition="!Exists('$(MSBuildThisFileDirectory)..\..\target\release\claude_switch.dll')"
-      Text="claude_switch.dll not found — run: cargo build -p claude-switch-ffi --release" />
+      Condition="!Exists('$(ClaudeSwitchNativeDll)')"
+      Text="claude_switch.dll not found at $(ClaudeSwitchNativeDll) — run: cargo build -p claude-switch-ffi --release" />
   </Target>
 
   <!-- Missing engine is only a warning while developing: the IDE still builds and
        the tests that don't touch the engine still run. Publishing without it is
        different — it produces an exe that dies the moment it launches, and that
        must not be shippable by accident. -->
-  <Target Name="RequireNativeForPublish" BeforeTargets="PrepareForPublish">
+  <Target Name="RequireNativeForPublish" DependsOnTargets="ResolveClaudeSwitchNative" BeforeTargets="PrepareForPublish">
     <Error
-      Condition="'$(PublishSingleFileBundle)' == 'true' And !Exists('$(MSBuildThisFileDirectory)..\..\target\release\claude_switch.dll')"
-      Text="Refusing to publish without the native engine. Run first: cargo build -p claude-switch-ffi --release" />
+      Condition="'$(PublishSingleFileBundle)' == 'true' And !Exists('$(ClaudeSwitchNativeDll)')"
+      Text="Refusing to publish without the native engine ($(ClaudeSwitchNativeDll)). Run first: cargo build -p claude-switch-ffi --release" />
   </Target>
   <ItemGroup>
     <!-- Card/drawer controls stay internal; the test project reads their

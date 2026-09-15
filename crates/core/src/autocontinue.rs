@@ -37,24 +37,6 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_CONTINUE_MESSAGE: &str =
     "Continue from where you left off. Do not repeat work that is already done.";
 
-/// Message fragments that mark a retryable transport or backend failure.
-///
-/// Consulted only when `errorKind` did not already settle the class — some
-/// failures reach us with no kind at all.
-const NETWORK_MARKERS: [&str; 11] = [
-    "econnreset",
-    "fetch failed",
-    "connection closed",
-    "connection error",
-    "socket",
-    "overloaded",
-    "timed out",
-    "529",
-    "500",
-    "502",
-    "503",
-];
-
 /// Terminal states a turn can reach on its own (ACP `stopReason`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,33 +126,52 @@ pub enum TransportFailure {
     Timeout,
 }
 
+/// Classify an agent-reported failure under the built-in detection rules.
+///
+/// For callers with no engine to load updated rules from, such as the headless
+/// `acp-run`; the engine itself uses [`classify_failure_with`] and the rules in
+/// force.
+#[must_use]
+pub fn classify_failure(error_kind: Option<&str>, message: &str) -> InterruptKind {
+    classify_failure_with(&crate::rules::builtin().classification, error_kind, message)
+}
+
 /// Classify an agent-reported failure.
 ///
 /// `error_kind` is ACP's machine-readable class (`data.errorKind`), which uses
-/// the same taxonomy Claude Code writes into its transcripts. `message` is the
-/// human-readable text.
+/// the same taxonomy Claude Code writes into its transcripts (`"error"` on an
+/// API error record). `message` is the human-readable text. *Which* kinds and
+/// fragments mean what is data in `rules` ([`crate::rules`]), because it tracks
+/// wording that is not ours to keep stable. The order they are tried in is the
+/// rule, and stays here:
 ///
-/// **Order matters.** A quota hit is reported with `errorKind: "server_error"`,
-/// so the message text is checked *first*; without that, hitting a limit would
-/// be retried on a ten-second backoff instead of waiting for the window.
+/// 1. **A rate-limit kind.** `rate_limit` is exactly the quota wall. The text
+///    has already changed under us once — `Claude AI usage limit reached`
+///    became `You've hit your session limit · resets 2:50pm` — and a text-only
+///    rule silently stopped recognising the wall.
+/// 2. **Rate-limit text, before any other kind.** Older adapters report a quota
+///    hit as `server_error`; without the text check first, hitting a limit
+///    would be retried on a ten-second backoff instead of waiting for the window.
+/// 3. Auth and network kinds, then network text, then auth text.
 #[must_use]
-pub fn classify_failure(error_kind: Option<&str>, message: &str) -> InterruptKind {
-    let text = message.to_ascii_lowercase();
+pub fn classify_failure_with(
+    rules: &crate::rules::ClassificationRules,
+    error_kind: Option<&str>,
+    message: &str,
+) -> InterruptKind {
+    use crate::rules::{has_kind, matches_any};
 
-    if text.contains("usage limit reached") || text.contains("rate limit") || text.contains("429") {
+    if has_kind(&rules.rate_limit_kinds, error_kind) || matches_any(&rules.rate_limit_text, message)
+    {
         return InterruptKind::RateLimit;
     }
-
-    match error_kind {
-        Some("authentication_failed") => return InterruptKind::Auth,
-        Some("server_error") => return InterruptKind::Network,
-        _ => {}
+    if has_kind(&rules.auth_kinds, error_kind) {
+        return InterruptKind::Auth;
     }
-
-    if NETWORK_MARKERS.iter().any(|m| text.contains(m)) {
+    if has_kind(&rules.network_kinds, error_kind) || matches_any(&rules.network_text, message) {
         return InterruptKind::Network;
     }
-    if text.contains("403") || text.contains("authenticate") {
+    if matches_any(&rules.auth_text, message) {
         return InterruptKind::Auth;
     }
     InterruptKind::Unknown
@@ -223,6 +224,23 @@ pub struct QuotaContext {
     /// Lets a *network* failure be recognised as pointless to retry: with the
     /// quota already gone, the retry would only reach the same wall.
     pub exhausted: bool,
+}
+
+/// Outcome callers should increment budgets against.
+///
+/// A transient interrupt on an account with no quota left is a rate-limit
+/// wearing other clothes. [`decide`] already waits out the window in that
+/// case; without this remap, a caller that keys `rate_limit_waits` off
+/// `InterruptKind::RateLimit` would keep incrementing `attempt` instead, and
+/// the wait budget would never bind.
+#[must_use]
+pub const fn effective_outcome(outcome: TurnOutcome, quota: &QuotaContext) -> TurnOutcome {
+    match outcome {
+        TurnOutcome::Interrupted(kind) if kind.is_transient() && quota.exhausted => {
+            TurnOutcome::Interrupted(InterruptKind::RateLimit)
+        }
+        other => other,
+    }
 }
 
 /// Woken this long after the reported reset, so a clock skew of a few seconds
@@ -425,6 +443,9 @@ impl ContinueDecision {
 /// `quota` carries what the engine knows about the account's 5h window. With it
 /// unknown (all fields default), waiting falls back to a fixed delay and
 /// switching is never proposed — correct for a caller with no usage data.
+///
+/// Exhausted-quota transients are treated as [`InterruptKind::RateLimit`] (see
+/// [`effective_outcome`]) so the wait budget, not the blip ladder, is spent.
 #[must_use]
 pub fn decide(
     outcome: TurnOutcome,
@@ -433,6 +454,7 @@ pub fn decide(
     policy: &ContinuePolicy,
     quota: &QuotaContext,
 ) -> ContinueDecision {
+    let outcome = effective_outcome(outcome, quota);
     match outcome {
         TurnOutcome::Completed(StopReason::EndTurn) => ContinueDecision::Stop {
             cause: StopCause::Completed,
@@ -475,12 +497,6 @@ pub fn decide(
         }
         TurnOutcome::Interrupted(kind) => {
             debug_assert!(kind.is_transient());
-            // A retry needs quota to spend. With the window already empty this
-            // is a rate limit wearing a network error's clothes, and backing off
-            // ten seconds would only reach the same wall.
-            if quota.exhausted {
-                return decide_rate_limit(rate_limit_waits, policy, quota);
-            }
             let Some(delay_seconds) = transient_delay(attempt, policy) else {
                 return ContinueDecision::Stop {
                     cause: StopCause::AttemptsExhausted,
@@ -650,6 +666,44 @@ mod tests {
             classify_failure(Some("server_error"), "Claude AI usage limit reached"),
             InterruptKind::RateLimit
         );
+    }
+
+    #[test]
+    fn a_rate_limit_kind_is_the_quota_wall_whatever_the_text() {
+        // Verbatim 2.1.2xx wording, which no text rule used to match.
+        assert_eq!(
+            classify_failure(
+                Some("rate_limit"),
+                "You've hit your session limit · resets 2:50pm (Asia/Shanghai)"
+            ),
+            InterruptKind::RateLimit
+        );
+        assert_eq!(
+            classify_failure(Some("rate_limit"), ""),
+            InterruptKind::RateLimit
+        );
+    }
+
+    #[test]
+    fn the_current_limit_wording_is_recognised_without_a_kind() {
+        // The stalled-terminal scan reads transcripts from older Claude Code
+        // versions too, which record no class beside the text.
+        assert_eq!(
+            classify_failure(
+                None,
+                "You've hit your session limit · resets 2:50pm (Asia/Shanghai)"
+            ),
+            InterruptKind::RateLimit
+        );
+        assert_eq!(
+            classify_failure(None, "You've hit your weekly limit · resets Sep 20, 3pm"),
+            InterruptKind::RateLimit
+        );
+    }
+
+    #[test]
+    fn overloaded_is_a_network_blip() {
+        assert_eq!(classify_failure(Some("overloaded"), "Service busy"), InterruptKind::Network);
     }
 
     #[test]
@@ -1040,6 +1094,116 @@ mod tests {
                 delay_seconds: 300 + RESET_MARGIN_SECONDS,
                 needs_fresh_process: false,
                 switch_account: false,
+            }
+        );
+    }
+
+    #[test]
+    fn an_exhausted_transient_looks_like_a_rate_limit_to_callers() {
+        // Both runners increment rateLimitWaits vs attempt off the outcome.
+        // If this stayed `network`, the wait budget would never bind.
+        let q = QuotaContext {
+            exhausted: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_outcome(TurnOutcome::Interrupted(InterruptKind::Network), &q),
+            TurnOutcome::Interrupted(InterruptKind::RateLimit)
+        );
+        assert_eq!(
+            effective_outcome(TurnOutcome::Interrupted(InterruptKind::AdapterCrash), &q),
+            TurnOutcome::Interrupted(InterruptKind::RateLimit)
+        );
+        // Auth is not a blip: exhaustion must not hide a login problem.
+        assert_eq!(
+            effective_outcome(TurnOutcome::Interrupted(InterruptKind::Auth), &q),
+            TurnOutcome::Interrupted(InterruptKind::Auth)
+        );
+        assert_eq!(
+            effective_outcome(
+                TurnOutcome::Interrupted(InterruptKind::Network),
+                &QuotaContext::default()
+            ),
+            TurnOutcome::Interrupted(InterruptKind::Network)
+        );
+    }
+
+    #[test]
+    fn an_exhausted_transient_consumes_the_quota_wait_budget() {
+        let p = ContinuePolicy {
+            max_rate_limit_waits: 2,
+            ..Default::default()
+        };
+        let q = QuotaContext {
+            seconds_until_reset: Some(300),
+            exhausted: true,
+            ..Default::default()
+        };
+        let n = TurnOutcome::Interrupted(InterruptKind::Network);
+        assert!(matches!(
+            decide(n, 0, 0, &p, &q),
+            ContinueDecision::Continue { .. }
+        ));
+        assert_eq!(
+            decide(n, 0, 2, &p, &q),
+            ContinueDecision::Stop {
+                cause: StopCause::RateLimitWaitsExhausted
+            }
+        );
+        // The blip ladder is not spent: attempt can be anything.
+        assert_eq!(
+            decide(n, 99, 2, &p, &q),
+            ContinueDecision::Stop {
+                cause: StopCause::RateLimitWaitsExhausted
+            }
+        );
+    }
+
+    #[test]
+    fn a_one_shot_policy_does_not_continue_or_wait() {
+        // What the GUI sends when Auto-continue is off: no blip ladder, no
+        // long retries, no quota waits, and truncation is reported.
+        let p = ContinuePolicy {
+            max_attempts: 0,
+            continue_on_truncation: false,
+            max_long_retries: 0,
+            max_rate_limit_waits: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            decide(
+                TurnOutcome::Interrupted(InterruptKind::Network),
+                0,
+                0,
+                &p,
+                &QuotaContext::default()
+            ),
+            ContinueDecision::Stop {
+                cause: StopCause::AttemptsExhausted
+            }
+        );
+        assert_eq!(
+            decide(
+                TurnOutcome::Completed(StopReason::MaxTokens),
+                0,
+                0,
+                &p,
+                &QuotaContext::default()
+            ),
+            ContinueDecision::Stop {
+                cause: StopCause::Truncated
+            }
+        );
+        assert_eq!(
+            decide(
+                TurnOutcome::Interrupted(InterruptKind::RateLimit),
+                0,
+                0,
+                &p,
+                &QuotaContext::default()
+            ),
+            ContinueDecision::Stop {
+                cause: StopCause::RateLimitWaitsExhausted
             }
         );
     }

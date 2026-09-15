@@ -103,11 +103,13 @@ impl Switcher {
 
         let mut seq = self.load_sequence()?;
         let num = slot.unwrap_or_else(|| seq.next_slot());
-        if let Some(existing) = seq.account(num) {
-            if existing.email != email {
-                // Overwrite allowed (caller confirmed in GUI).
-            }
-        }
+        // Refreshing a slot that already holds this account keeps what the user
+        // set on it. Overwriting it with a different account (the caller
+        // confirmed that) starts the record afresh.
+        let kept = seq
+            .account(num)
+            .filter(|existing| existing.email.eq_ignore_ascii_case(&email))
+            .cloned();
 
         self.store.write_slot(num, &email, &creds)?;
         self.store
@@ -116,9 +118,13 @@ impl Switcher {
 
         let rec = AccountRecord {
             email: email.clone(),
-            added: chrono::Utc::now().to_rfc3339(),
-            alias,
-            disabled: false,
+            added: kept
+                .as_ref()
+                .map(|k| k.added.clone())
+                .filter(|a| !a.is_empty())
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            alias: alias.or_else(|| kept.as_ref().and_then(|k| k.alias.clone())),
+            disabled: kept.as_ref().is_some_and(|k| k.disabled),
             ..identity_record(&config_json)
         };
         seq.upsert_account(num, rec);

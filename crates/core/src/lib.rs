@@ -3,6 +3,7 @@
 pub mod agentruns;
 pub mod autocontinue;
 pub mod autoswitch;
+pub mod cleanup;
 pub mod credentials;
 pub mod engine;
 pub mod errors;
@@ -15,6 +16,8 @@ pub mod paths;
 pub mod plan;
 pub mod projects;
 pub mod proxy;
+pub mod resume;
+pub mod rules;
 pub mod sequence;
 pub mod session;
 pub mod settings;

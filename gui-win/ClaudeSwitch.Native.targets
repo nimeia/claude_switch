@@ -1,0 +1,77 @@
+<Project>
+  <!--
+    Where the Rust engine (claude_switch.dll) is.
+
+    The engine is built into <target dir>\release. The target dir is the
+    repository's target\ folder only until CARGO_TARGET_DIR or a Cargo config -
+    this repository's, or the user's own ~/.cargo/config.toml - moves it. A path
+    fixed to target\release then keeps finding whatever was last built there:
+    the app builds, every test that does not call a new engine method passes,
+    and it ships an old engine. That happened.
+
+    So Cargo is asked. `cargo metadata` reports the target directory after every
+    config source has been applied. Without Cargo on PATH (a machine that only
+    builds the GUI) the repository's target\release is used. Setting the
+    ClaudeSwitchNativeDll property uses that file and skips the lookup.
+  -->
+
+  <PropertyGroup>
+    <ClaudeSwitchRepoRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)..'))</ClaudeSwitchRepoRoot>
+  </PropertyGroup>
+
+  <!-- Reads target_directory out of `cargo metadata` output. A task rather than
+       property functions: the JSON carries quotes, semicolons and apostrophes,
+       any of which MSBuild's own string handling would trip over. -->
+  <UsingTask TaskName="ClaudeSwitchReadCargoTargetDirectory"
+             TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <MetadataFile ParameterType="System.String" Required="true" />
+      <TargetDirectory ParameterType="System.String" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Text.RegularExpressions" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        var match = Regex.Match(
+            File.ReadAllText(MetadataFile),
+            "\"target_directory\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+        TargetDirectory = match.Success ? Regex.Unescape(match.Groups[1].Value) : "";
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="ResolveClaudeSwitchNative" Condition="'$(ClaudeSwitchNativeDll)' == ''">
+    <PropertyGroup>
+      <_ClaudeSwitchCargoMetadata>$(MSBuildProjectDirectory)\$(IntermediateOutputPath)cargo-metadata.json</_ClaudeSwitchCargoMetadata>
+    </PropertyGroup>
+    <MakeDir Directories="$(MSBuildProjectDirectory)\$(IntermediateOutputPath)" />
+
+    <!-- Output goes to a file, not the build log: it is a whole workspace
+         description, and only one field of it is wanted. -->
+    <Exec Command="cargo metadata --format-version 1 --no-deps &gt; &quot;$(_ClaudeSwitchCargoMetadata)&quot;"
+          WorkingDirectory="$(ClaudeSwitchRepoRoot)"
+          EchoOff="true"
+          IgnoreExitCode="true"
+          IgnoreStandardErrorWarningFormat="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="_ClaudeSwitchCargoExit" />
+    </Exec>
+
+    <ClaudeSwitchReadCargoTargetDirectory
+        Condition="'$(_ClaudeSwitchCargoExit)' == '0' And Exists('$(_ClaudeSwitchCargoMetadata)')"
+        MetadataFile="$(_ClaudeSwitchCargoMetadata)">
+      <Output TaskParameter="TargetDirectory" PropertyName="_ClaudeSwitchCargoTargetDir" />
+    </ClaudeSwitchReadCargoTargetDirectory>
+
+    <PropertyGroup>
+      <ClaudeSwitchNativeDll Condition="'$(_ClaudeSwitchCargoTargetDir)' != ''">$(_ClaudeSwitchCargoTargetDir)\release\claude_switch.dll</ClaudeSwitchNativeDll>
+      <ClaudeSwitchNativeDll Condition="'$(ClaudeSwitchNativeDll)' == ''">$(ClaudeSwitchRepoRoot)target\release\claude_switch.dll</ClaudeSwitchNativeDll>
+      <_ClaudeSwitchNativeSource Condition="'$(_ClaudeSwitchCargoTargetDir)' != ''">Cargo target directory</_ClaudeSwitchNativeSource>
+      <_ClaudeSwitchNativeSource Condition="'$(_ClaudeSwitchCargoTargetDir)' == ''">Cargo not available; repository target folder</_ClaudeSwitchNativeSource>
+    </PropertyGroup>
+
+    <Message Importance="high" Text="Claude Switch engine: $(ClaudeSwitchNativeDll) ($(_ClaudeSwitchNativeSource))" />
+  </Target>
+</Project>

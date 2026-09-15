@@ -42,6 +42,7 @@ pub mod client;
 
 pub use adapter::{AdapterConfig, AdapterError};
 pub use autocontinue::{
-    classify, ContinuePolicy, ContinueDecision, InterruptKind, StopReason, TurnOutcome,
+    classify, effective_outcome, ContinueDecision, ContinuePolicy, InterruptKind, StopReason,
+    TurnOutcome,
 };
 pub use client::{AcpClient, AcpError, Handler, PermissionOutcome, SessionInfo};

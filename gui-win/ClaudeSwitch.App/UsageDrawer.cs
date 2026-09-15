@@ -198,6 +198,7 @@ public sealed class UsageDrawer : Panel
         {
             Font = Theme.FontBody,
             ShowImageMargin = false,
+            Renderer = new SageToolStripRenderer(),
         };
 
         // ── Scrollable body ───────────────────────────────────────
@@ -354,7 +355,7 @@ public sealed class UsageDrawer : Panel
 
         var deleteItem = new ToolStripMenuItem(Loc.T("menu.delete"))
         {
-            ForeColor = Theme.Danger,
+            Tag = "danger",
         };
         deleteItem.Click += (_, _) => DeleteRequested?.Invoke(this, EventArgs.Empty);
 

@@ -3,52 +3,70 @@ using ClaudeSwitch.Core;
 
 namespace ClaudeSwitch.App;
 
-/// <summary>One resumable conversation, as offered in a menu.</summary>
+/// <summary>One recently updated conversation, as offered in a menu.</summary>
 /// <param name="Path">Directory the session belongs to.</param>
 /// <param name="Name">Directory's last segment — how the menu names it.</param>
 /// <param name="SessionId">Argument for <c>claude --resume</c>.</param>
-/// <param name="Title">Opening prompt, when the transcript had a usable one.</param>
-/// <param name="LastActiveMs">Newest activity, for ordering and for the label.</param>
+/// <param name="Title">Claude Code's own title for it, else its opening prompt.</param>
+/// <param name="LastActiveMs">Last write to that conversation, for the label.</param>
+/// <param name="ProfileNumber">
+/// Session-mode profile holding the transcript, or null for the default home.
+/// Resuming has to happen there: Claude Code only looks in its own config
+/// directory, and anywhere else reports that the conversation does not exist.
+/// </param>
+/// <param name="Live">
+/// Running in a terminal right now. Shown, because it is the newest work; not
+/// resumable, because two terminals would then write into one transcript.
+/// </param>
+/// <param name="File">The transcript — how a deletion names the conversation.</param>
+/// <param name="Bytes">The transcript plus what belongs to it: what deleting it frees.</param>
 internal sealed record RecentSession(
     string Path,
     string Name,
     string SessionId,
     string? Title,
-    long? LastActiveMs);
+    long? LastActiveMs,
+    int? ProfileNumber = null,
+    bool Live = false,
+    string? File = null,
+    long Bytes = 0);
 
 /// <summary>
-/// The most recent conversation per directory — a one-click way back in.
+/// The most recently updated conversations — a one-click way back in.
 ///
 /// Reaching a session used to take four steps (open the directory window, pick a
-/// directory, pick a session, press resume). The frequent case is only ever
-/// "back to where I left off in project X", and that fits in a menu.
-///
-/// The data is free: `list_projects` already reads each directory's newest
-/// session id and opening prompt (~10 ms for 21 directories), so this needs no
-/// scan of its own.
+/// directory, pick a session, press resume). The frequent case is "back to what I
+/// was just doing", and that fits in a menu.
 /// </summary>
+/// <remarks>
+/// Per conversation, newest update first, whichever directory it is in. The menu
+/// used to hold one entry per directory, which hid most of a busy day — three
+/// conversations touched this afternoon in one project showed as one, while last
+/// week's elsewhere took the remaining rows. What counts as offerable is the
+/// engine's call (core <c>resume.rs</c>).
+/// </remarks>
 internal static class RecentSessions
 {
-    /// <summary>Newest first, one entry per directory, only those resumable.</summary>
-    public static List<RecentSession> Parse(JsonNode? projects, int max)
+    /// <summary>The engine's list, in its order (newest update first), capped.</summary>
+    public static List<RecentSession> Parse(JsonNode? recent, int max)
     {
         var list = new List<RecentSession>();
-        if (projects?["projects"] is not JsonArray arr) return list;
+        if (recent?["sessions"] is not JsonArray arr) return list;
 
-        foreach (var p in arr)
+        foreach (var s in arr)
         {
-            if (p is null) continue;
-            string? id = p["lastSessionId"]?.GetValue<string>();
-            // A directory registered but never worked in has no session to resume.
-            if (string.IsNullOrWhiteSpace(id)) continue;
-            if ((p["sessionCount"]?.GetValue<int>() ?? 0) == 0) continue;
-
+            if (s?["sessionId"]?.GetValue<string>() is not { Length: > 0 } id) continue;
+            string path = s["path"]?.GetValue<string>() ?? "";
             list.Add(new RecentSession(
-                p["path"]?.GetValue<string>() ?? "",
-                p["name"]?.GetValue<string>() ?? "",
-                id!,
-                p["lastPrompt"]?.GetValue<string>(),
-                p["lastActiveMs"]?.GetValue<long>()));
+                path,
+                s["name"]?.GetValue<string>() ?? System.IO.Path.GetFileName(path.TrimEnd('/', '\\')),
+                id,
+                s["title"]?.GetValue<string>() ?? s["prompt"]?.GetValue<string>(),
+                s["modifiedMs"]?.GetValue<long>(),
+                s["profileNumber"]?.GetValue<int>(),
+                s["live"]?.GetValue<bool>() ?? false,
+                s["file"]?.GetValue<string>(),
+                s["totalBytes"]?.GetValue<long>() ?? 0));
             if (list.Count >= max) break;
         }
         return list;
@@ -59,7 +77,7 @@ internal static class RecentSessions
     {
         try
         {
-            return Parse(engine.Call("list_projects"), max);
+            return Parse(engine.Call("recent_sessions", new { limit = max }), max);
         }
         catch
         {
@@ -113,7 +131,7 @@ internal static class RecentSessions
             <= 'ᅟ'                       // Hangul Jamo
             or >= '⺀' and <= '꓏'    // CJK radicals … Yi
             or >= '가' and <= '힣'    // Hangul syllables
-            or >= '豈' and <= '﫿'    // CJK compatibility ideographs
+            or >= '豈' and <= '﫿'    // CJK compatibility ideographs
             or >= '︰' and <= '﹯'    // CJK compatibility forms
             or >= '＀' and <= '｠'    // full-width forms
             or >= '￠' and <= '￦');

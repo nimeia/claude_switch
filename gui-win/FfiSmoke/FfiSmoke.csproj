@@ -8,15 +8,14 @@
   <ItemGroup>
     <ProjectReference Include="..\ClaudeSwitch.Core\ClaudeSwitch.Core.csproj" />
   </ItemGroup>
-  <!-- Load path for DllImport("claude_switch") is the app directory. -->
-  <Target Name="CopyNativeDll" AfterTargets="Build">
-    <PropertyGroup>
-      <_NativeDll>$(MSBuildThisFileDirectory)..\..\target\release\claude_switch.dll</_NativeDll>
-    </PropertyGroup>
-    <Copy SourceFiles="$(_NativeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"
-          Condition="Exists('$(_NativeDll)')" />
-    <Warning Text="claude_switch.dll missing — run: cargo build -p claude-switch-ffi --release"
-             Condition="!Exists('$(_NativeDll)')" />
+  <!-- Load path for DllImport("claude_switch") is the app directory. The DLL
+       comes from wherever Cargo put it (see ClaudeSwitch.Native.targets). -->
+  <Import Project="..\ClaudeSwitch.Native.targets" />
+  <Target Name="CopyNativeDll" AfterTargets="Build" DependsOnTargets="ResolveClaudeSwitchNative">
+    <Copy SourceFiles="$(ClaudeSwitchNativeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"
+          Condition="Exists('$(ClaudeSwitchNativeDll)')" />
+    <Warning Text="claude_switch.dll missing at $(ClaudeSwitchNativeDll) — run: cargo build -p claude-switch-ffi --release"
+             Condition="!Exists('$(ClaudeSwitchNativeDll)')" />
   </Target>
 </Project>
 

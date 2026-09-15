@@ -72,6 +72,19 @@ pub struct ProjectSummary {
     pub transcript_dirs: Vec<String>,
     /// Total size of this directory's transcripts — what a scan would cost.
     pub transcript_bytes: u64,
+    /// Everything this directory's history occupies: transcripts, their
+    /// sidecar folders and per-session stores — what cleaning it could free.
+    /// Auto memory is not included; see [`crate::cleanup::folder_bytes`].
+    #[serde(default)]
+    pub total_bytes: u64,
+    /// The newest conversation here that `claude --resume` can open — see
+    /// [`crate::resume`]. Filled by the engine; `None` when every session is
+    /// empty, running, or one Claude Code would not offer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume: Option<ResumeTarget>,
+    /// The directory exists on disk. Filled by the engine.
+    #[serde(default)]
+    pub directory_exists: bool,
 
     // ── Most recent session only. Never totals. ──────────────────────────
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,6 +98,9 @@ pub struct ProjectSummary {
 }
 
 /// One resumable conversation.
+// A wire record read by the shell, not a state machine: each flag is an
+// independent fact about the transcript, and the shell reads them by name.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
@@ -92,6 +108,10 @@ pub struct SessionSummary {
     pub id: String,
     pub file: String,
     pub bytes: u64,
+    /// The transcript plus what belongs to it — subagent transcripts, spilled
+    /// tool output, file snapshots. What deleting this session frees.
+    #[serde(default)]
+    pub total_bytes: u64,
     /// File mtime in epoch ms (always available, unlike in-file timestamps).
     pub modified_ms: i64,
     /// First timestamp inside the transcript, when one could be read.
@@ -100,9 +120,58 @@ pub struct SessionSummary {
     /// Opening user message, trimmed for display.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_prompt: Option<String>,
+    /// Claude Code's own title for the conversation — its `ai-title` record,
+    /// which is what its resume picker shows. Short, and unlike the opening
+    /// prompt it survives a compaction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Working directory recorded inside the transcript.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Holds a real exchange: something the user typed, or a model reply. A
+    /// session opened and left with `/exit` or `/login` has none, and Claude
+    /// Code reports there is no conversation to resume.
+    #[serde(default)]
+    pub has_conversation: bool,
+    /// How the session was started (`cli`, `sdk-cli`, …), when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint: Option<String>,
+    /// Opened with `/loop`, which Claude Code keeps out of its resume lists.
+    #[serde(default)]
+    pub loop_session: bool,
+    /// Config home holding the transcript. Filled by the engine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_home: Option<String>,
+    /// The session-mode profile holding it, if any. Filled by the engine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_number: Option<u32>,
+    /// A Claude Code process is running it right now. Filled by the engine.
+    #[serde(default)]
+    pub live: bool,
+    /// Can be resumed from here: it has a conversation, nothing is running it,
+    /// and its config home can still be launched. Filled by the engine.
+    #[serde(default)]
+    pub resumable: bool,
+}
+
+/// The conversation a directory offers to resume, and where it must be resumed.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeTarget {
+    pub session_id: String,
+    /// Config home holding the transcript. Claude Code only looks in its own
+    /// `CLAUDE_CONFIG_DIR`, so resuming anywhere else reports no conversation.
+    pub config_home: String,
+    /// The session-mode profile that home is; `None` for the default home.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_number: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Claude Code's title for it, when the transcript has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Last write to that transcript, epoch ms.
+    pub modified_ms: i64,
 }
 
 /// Cumulative totals for one directory — the expensive answer.
@@ -191,7 +260,7 @@ fn i64_field(v: &Value, key: &str) -> Option<i64> {
     v.get(key).and_then(Value::as_i64).filter(|n| *n > 0)
 }
 
-fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
+pub(crate) fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
     meta.modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -205,11 +274,20 @@ pub fn transcripts_root(env: &PathEnv) -> PathBuf {
     env.claude_config_home().join("projects")
 }
 
-/// Read the head of a transcript to learn its `cwd`, opening prompt and start.
+/// How far into a transcript to look for what may lie past its head: the
+/// working directory, and whether there is any conversation at all. A session
+/// can open with tens of KB of file snapshots before its first message.
+const SCAN_BYTES: u64 = 1024 * 1024;
+
+/// Read the start of a transcript: its `cwd`, opening prompt and start, how it
+/// was launched, and whether it holds a conversation.
 ///
-/// Only the first [`HEAD_BYTES`] are read: a transcript can be tens of MB, and
-/// everything wanted here is written near the top.
-fn read_head(file: &Path) -> SessionSummary {
+/// The title and launch facts come from the first [`HEAD_BYTES`]; the working
+/// directory and the conversation check look up to [`SCAN_BYTES`] in. Reading
+/// stops once everything is known, which for an ordinary session is within its
+/// first few lines. A transcript longer than the scan counts as a conversation,
+/// whatever its opening holds — empty sessions are a few KB.
+pub(crate) fn read_head(file: &Path) -> SessionSummary {
     let meta = std::fs::metadata(file).ok();
     let mut out = SessionSummary {
         id: file
@@ -226,13 +304,23 @@ fn read_head(file: &Path) -> SessionSummary {
     let Ok(f) = std::fs::File::open(file) else {
         return out;
     };
-    let mut reader = BufReader::new(f.take(HEAD_BYTES));
+    let mut reader = BufReader::new(f.take(SCAN_BYTES));
     let mut line = String::new();
-    while out.first_prompt.is_none() || out.cwd.is_none() {
+    let mut read: u64 = 0;
+    let mut seen_user = false;
+    loop {
+        let in_head = read < HEAD_BYTES;
+        let wanted = out.cwd.is_none()
+            || !out.has_conversation
+            || (in_head
+                && (out.first_prompt.is_none() || out.entrypoint.is_none() || out.title.is_none()));
+        if !wanted {
+            break;
+        }
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) | Err(_) => break,
-            Ok(_) => {}
+            Ok(n) => read = read.saturating_add(u64::try_from(n).unwrap_or(u64::MAX)),
         }
         let Ok(rec) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -252,11 +340,59 @@ fn read_head(file: &Path) -> SessionSummary {
                 .and_then(Value::as_str)
                 .and_then(parse_iso_ms);
         }
-        if out.first_prompt.is_none() && is_real_user_turn(&rec) {
-            out.first_prompt = message_text(&rec)
-                .filter(|t| !is_synthetic_prompt(t))
-                .map(|t| trim_prompt(&t));
+        if out.entrypoint.is_none() {
+            out.entrypoint = rec
+                .get("entrypoint")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
         }
+        match rec.get("type").and_then(Value::as_str) {
+            Some("assistant") => {
+                // Claude Code writes synthetic replies for local commands such
+                // as `/login`, and for API errors; neither is a conversation.
+                let model = rec
+                    .get("message")
+                    .and_then(|m| m.get("model"))
+                    .and_then(Value::as_str);
+                if model != Some("<synthetic>") {
+                    out.has_conversation = true;
+                }
+            }
+            Some("user") if is_real_user_turn(&rec) => {
+                let Some(text) = message_text(&rec) else {
+                    continue;
+                };
+                if !seen_user {
+                    seen_user = true;
+                    let opening = text.trim_start();
+                    out.loop_session =
+                        opening.starts_with("/loop") || opening.starts_with("<command-name>/loop<");
+                }
+                if !is_synthetic_prompt(&text) {
+                    out.has_conversation = true;
+                    // Only the head is searched *for* a title, but one met
+                    // further in — while still looking for the directory or the
+                    // conversation — is kept: a session that opens with tens of
+                    // KB of snapshots would otherwise never have one.
+                    if out.first_prompt.is_none() {
+                        out.first_prompt = Some(trim_prompt(&text));
+                    }
+                }
+            }
+            // Re-appended every few turns with the same text; the first will do.
+            Some("ai-title") if out.title.is_none() => {
+                out.title = rec
+                    .get("aiTitle")
+                    .and_then(Value::as_str)
+                    .map(trim_prompt)
+                    .filter(|t| !t.is_empty());
+            }
+            _ => {}
+        }
+    }
+    if !out.has_conversation && out.bytes > SCAN_BYTES {
+        out.has_conversation = true;
     }
     out
 }
@@ -287,11 +423,22 @@ pub fn is_synthetic_prompt(text: &str) -> bool {
     t.is_empty() || SYNTHETIC_PREFIXES.iter().any(|p| t.starts_with(p))
 }
 
-/// Whether a record is the user actually speaking (not injected, not a subagent).
+/// Whether a record is the user actually speaking — not injected, not a
+/// subagent, and not the summary a compaction leaves in place of the
+/// conversation it replaced.
 fn is_real_user_turn(rec: &Value) -> bool {
     rec.get("type").and_then(Value::as_str) == Some("user")
         && rec.get("isMeta").and_then(Value::as_bool) != Some(true)
         && rec.get("isSidechain").and_then(Value::as_bool) != Some(true)
+        && !is_compact_summary(rec)
+}
+
+/// The summary Claude Code writes when a conversation runs out of context. It
+/// is an ordinary user record, so taken as the opening prompt every continued
+/// session was titled "This session is being continued from a previous
+/// conversation…".
+fn is_compact_summary(rec: &Value) -> bool {
+    rec.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
 }
 
 /// Plain text of a message record, joining text blocks.
@@ -368,8 +515,18 @@ fn scan_transcript_dirs(root: &Path) -> Vec<(String, TranscriptDir)> {
             .map(|m| m.len())
             .sum();
         let newest = read_head(&files[0]);
+        // The newest transcript does not always name its directory within the
+        // head that is read: a session can open with tens of KB of file
+        // snapshots before its first message. An older one usually does, and
+        // without this the folder was listed under its encoded name while the
+        // real directory showed up again as having no sessions at all.
+        let cwd = newest
+            .cwd
+            .clone()
+            .or_else(|| files[1..].iter().find_map(|f| read_head(f).cwd));
+        let cwd_known = cwd.is_some();
         // Fall back to the folder name only when no transcript names a cwd.
-        let path = newest.cwd.clone().unwrap_or_else(|| {
+        let path = cwd.unwrap_or_else(|| {
             dir.file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -383,6 +540,8 @@ fn scan_transcript_dirs(root: &Path) -> Vec<(String, TranscriptDir)> {
                 dir: dir.to_string_lossy().to_string(),
                 session_count: u32::try_from(files.len()).unwrap_or(u32::MAX),
                 bytes,
+                total_bytes: crate::cleanup::folder_bytes(&dir),
+                cwd_known,
                 newest,
             },
         ));
@@ -395,7 +554,30 @@ struct TranscriptDir {
     dir: String,
     session_count: u32,
     bytes: u64,
+    total_bytes: u64,
+    /// `path` came from a transcript rather than the folder name.
+    cwd_known: bool,
     newest: SessionSummary,
+}
+
+/// The folder name Claude Code files a directory's transcripts under.
+///
+/// Every character that is not an ASCII letter or digit becomes `-`, counted in
+/// UTF-16 units as Claude Code counts them. `None` past 200 characters, where
+/// Claude Code shortens the name and appends a hash this cannot reproduce.
+#[must_use]
+pub fn project_slug(path: &str) -> Option<String> {
+    let mut slug = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+        } else {
+            for _ in 0..c.len_utf16() {
+                slug.push('-');
+            }
+        }
+    }
+    (slug.len() <= 200).then_some(slug)
 }
 
 /// Every Claude config home whose history belongs to this machine.
@@ -532,6 +714,25 @@ fn merge_transcripts(
     facts_ms: &mut BTreeMap<String, i64>,
 ) {
     for (key, t) in scan_transcript_dirs(&transcripts_root(env)) {
+        // A folder whose transcripts never name their directory is filed under
+        // the registered directory Claude Code would have given that folder
+        // name, rather than listed a second time under the name itself.
+        let key = if t.cwd_known {
+            key
+        } else {
+            let folder = Path::new(&t.dir)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_lowercase();
+            by_key
+                .iter()
+                .find(|(_, p)| {
+                    p.registered
+                        && project_slug(&p.path).is_some_and(|s| s.to_lowercase() == folder)
+                })
+                .map_or(key, |(k, _)| k.clone())
+        };
         let item = by_key.entry(key.clone()).or_insert_with(|| ProjectSummary {
             path: t.path.clone(),
             name: display_name(&t.path),
@@ -540,6 +741,7 @@ fn merge_transcripts(
         // Sums, not assignments: this root is one of several.
         item.session_count = item.session_count.saturating_add(t.session_count);
         item.transcript_bytes = item.transcript_bytes.saturating_add(t.bytes);
+        item.total_bytes = item.total_bytes.saturating_add(t.total_bytes);
         item.transcript_dirs.push(t.dir);
 
         // Last *activity* is the transcript's mtime. The timestamp inside the
@@ -558,8 +760,8 @@ fn merge_transcripts(
             if !t.newest.id.is_empty() {
                 item.last_session_id = Some(t.newest.id.clone());
             }
-            if t.newest.first_prompt.is_some() {
-                item.last_prompt.clone_from(&t.newest.first_prompt);
+            if let Some(about) = t.newest.title.as_ref().or(t.newest.first_prompt.as_ref()) {
+                item.last_prompt = Some(about.clone());
             }
         }
     }
@@ -619,8 +821,22 @@ pub fn list_sessions_in(transcript_dirs: &[PathBuf]) -> Result<Vec<SessionSummar
     }
     files.sort();
 
-    let mut out: Vec<SessionSummary> = files.iter().map(|p| read_head(p)).collect();
-    out.sort_by_key(|s| std::cmp::Reverse(s.started_ms.unwrap_or(s.modified_ms)));
+    let mut out: Vec<SessionSummary> = files
+        .iter()
+        .map(|p| {
+            let mut s = read_head(p);
+            s.total_bytes = crate::cleanup::session_bytes(p);
+            s
+        })
+        .collect();
+    // Most recently *updated* first. A conversation picked up again today
+    // belongs at the top however long ago it began; ordering by start put a
+    // week-old session that is still in use below yesterday's one-liners.
+    out.sort_by(|a, b| {
+        b.modified_ms
+            .cmp(&a.modified_ms)
+            .then_with(|| b.started_ms.cmp(&a.started_ms))
+    });
     Ok(out)
 }
 
@@ -726,10 +942,12 @@ fn accumulate(
 
     match rec.get("type").and_then(Value::as_str) {
         Some("user") => {
-            // Injected preamble is machinery, not something the user asked;
-            // counting it would inflate every session's first day.
+            // Injected preamble and compaction summaries are machinery, not
+            // something the user asked; counting them would inflate every
+            // session's first day.
             // `is_none_or` would read better but is newer than this crate's MSRV.
             let real = rec.get("isMeta").and_then(Value::as_bool) != Some(true)
+                && !is_compact_summary(rec)
                 && !message_text(rec).is_some_and(|t| is_synthetic_prompt(&t));
             if real {
                 stats.user_messages += 1;
@@ -1259,6 +1477,38 @@ mod tests {
         let dir = home.join(".claude").join("projects").join("proj");
         let sessions = list_sessions(&dir).unwrap();
         assert_eq!(sessions[0].first_prompt.as_deref(), Some("帮我修一下构建"));
+    }
+
+    #[test]
+    fn a_continued_session_is_titled_by_what_it_is_about() {
+        // Continuing after the context ran out opens the transcript with the
+        // compaction summary as an ordinary user record; taken as the opening
+        // prompt, every continued session read "This session is being
+        // continued…".
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        write_transcript(
+            home,
+            "proj",
+            "s1",
+            &[
+                serde_json::json!({ "type": "ai-title", "aiTitle": "修复  构建\n脚本", "sessionId": "s1" }),
+                serde_json::json!({
+                    "type": "user", "isCompactSummary": true, "cwd": "/p",
+                    "message": { "content": "This session is being continued from a previous conversation that ran out of context." }
+                }),
+                serde_json::json!({
+                    "type": "user", "cwd": "/p",
+                    "message": { "content": "接着改" }
+                }),
+            ],
+        );
+
+        let dir = home.join(".claude").join("projects").join("proj");
+        let sessions = list_sessions(&dir).unwrap();
+        assert_eq!(sessions[0].first_prompt.as_deref(), Some("接着改"));
+        // Claude Code's own title, flattened to one line like any other.
+        assert_eq!(sessions[0].title.as_deref(), Some("修复 构建 脚本"));
     }
 
     #[test]

@@ -21,12 +21,23 @@ public class StalledJournalTests : IDisposable
     private readonly string _root = Path.Combine(
         Path.GetTempPath(), "cswitch-stalled-journal-" + Guid.NewGuid().ToString("N"));
 
+    /// <summary>Working directory the runs were rooted at.</summary>
+    private readonly string _work;
+
+    /// <summary>Session-mode profile the runs ran under, holding their conversations.</summary>
+    private readonly string _profile;
+
     private readonly Engine _engine;
     private readonly AgentRunStore _store;
 
     public StalledJournalTests()
     {
         Directory.CreateDirectory(_root);
+        // Real places, not made-up paths: the journal keeps a resumable record
+        // only while its directory, profile and conversation still exist.
+        _work = Path.Combine(_root, "work", "proj");
+        Directory.CreateDirectory(_work);
+        _profile = Path.Combine(_root, "backup", "sessions", "2-a_x.com");
         _engine = new Engine(_root);
         _store = new AgentRunStore(_engine);
     }
@@ -38,17 +49,24 @@ public class StalledJournalTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private void SaveRun(string id, string status) =>
+    private void SaveRun(string id, string status)
+    {
+        // The conversation the run would resume, where it would look for it.
+        var transcripts = Path.Combine(_profile, "projects", "proj");
+        Directory.CreateDirectory(transcripts);
+        File.WriteAllText(Path.Combine(transcripts, id + ".jsonl"), "{}\n");
+
         _store.Save(
             id,
             sessionId: id,
-            cwd: "D:/work/proj",
+            cwd: _work,
             accountNumber: 2,
-            configDir: "D:/backup/sessions/2-a_x.com",
+            configDir: _profile,
             mode: "acceptEdits",
             prompt: "refactor the parser",
             status: status,
             stopCause: status == "completed" ? "completed" : null);
+    }
 
     private AgentRunRecord? Find(string id) => _store.List().FirstOrDefault(r => r.Id == id);
 
@@ -81,7 +99,7 @@ public class StalledJournalTests : IDisposable
 
         var after = Find("sess-fields")!;
         Assert.Equal(2, after.AccountNumber);
-        Assert.Equal("D:/backup/sessions/2-a_x.com", after.ConfigDir);
+        Assert.Equal(_profile, after.ConfigDir);
         Assert.Equal("acceptEdits", after.Mode);
         Assert.Equal("refactor the parser", after.Prompt);
         Assert.Equal("sess-fields", after.SessionId);
@@ -104,5 +122,17 @@ public class StalledJournalTests : IDisposable
         var after = Find("sess-ok")!;
         Assert.Equal("completed", after.Status);
         Assert.Equal("completed", after.StopCause);
+    }
+
+    [Fact]
+    public void A_resumable_run_whose_conversation_is_gone_is_not_offered_back()
+    {
+        // Resuming loads the recorded session and never starts afresh, so a
+        // record whose transcript was swept can only fail when clicked.
+        SaveRun("sess-swept", "interrupted");
+        Assert.True(Find("sess-swept")!.IsResumable);
+
+        File.Delete(Path.Combine(_profile, "projects", "proj", "sess-swept.jsonl"));
+        Assert.Null(Find("sess-swept"));
     }
 }

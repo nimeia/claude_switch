@@ -5,56 +5,61 @@ using Xunit;
 namespace ClaudeSwitch.App.Tests;
 
 /// <summary>
-/// The one-click way back into a conversation. Built from the directory listing
-/// the app already computes, so the rules that matter are about which rows can
-/// actually be resumed and how they read in a menu.
+/// The one-click way back into a conversation. The engine picks and orders what
+/// can be resumed; the rules that matter here are that its order and flags
+/// survive, and how rows read in a menu.
 /// </summary>
 public class RecentSessionsTests
 {
-    private static JsonNode Projects(string inner) =>
-        JsonNode.Parse("{\"projects\":[" + inner + "]}")!;
+    private static JsonNode Recent(params string[] sessions) =>
+        JsonNode.Parse("{\"sessions\":[" + string.Join(",", sessions) + "]}")!;
 
-    private static string Project(
-        string name, string? sessionId, int sessionCount, string? prompt = null, long? active = null)
+    private static string Session(
+        string directory, string id, string? prompt = null, long? modified = null, int? profile = null, bool live = false,
+        string? title = null, string? file = null, long? bytes = null)
     {
         var o = new JsonObject
         {
-            ["path"] = $"D:/dev/{name}",
-            ["name"] = name,
-            ["sessionCount"] = sessionCount,
+            ["sessionId"] = id,
+            ["path"] = $"D:/dev/{directory}",
+            ["name"] = directory,
+            ["configHome"] = profile is null ? @"C:\u\.claude" : $@"C:\b\sessions\{profile}-x",
+            ["live"] = live,
         };
-        if (sessionId is not null) o["lastSessionId"] = sessionId;
-        if (prompt is not null) o["lastPrompt"] = prompt;
-        if (active is not null) o["lastActiveMs"] = active;
+        if (prompt is not null) o["prompt"] = prompt;
+        if (title is not null) o["title"] = title;
+        if (file is not null) o["file"] = file;
+        if (bytes is not null) o["totalBytes"] = bytes;
+        if (modified is not null) o["modifiedMs"] = modified;
+        if (profile is not null) o["profileNumber"] = profile;
         return o.ToJsonString();
     }
 
     [Fact]
-    public void Only_directories_with_a_resumable_session_are_offered()
+    public void Every_recent_conversation_is_listed_not_one_per_directory()
     {
-        var node = Projects(string.Join(",", [
-            Project("worked-in", "sess-1", 3, "修一下构建"),
-            // Registered but never used: there is no conversation to resume.
-            Project("registered-only", null, 0),
-            // A stale id with no transcripts behind it would fail on launch.
-            Project("no-transcripts", "sess-ghost", 0, "old"),
-        ]));
+        // Two conversations touched today in one directory, one last week in
+        // another: all three, newest first, as the engine ordered them.
+        var got = RecentSessions.Parse(
+            Recent(
+                Session("busy", "s-afternoon", modified: 3_000),
+                Session("busy", "s-morning", modified: 2_000),
+                Session("quiet", "s-last-week", modified: 1_000)),
+            8);
 
-        var got = RecentSessions.Parse(node, 8);
-        Assert.Single(got);
-        Assert.Equal("worked-in", got[0].Name);
-        Assert.Equal("sess-1", got[0].SessionId);
+        Assert.Equal(new[] { "s-afternoon", "s-morning", "s-last-week" }, got.Select(s => s.SessionId));
+        Assert.Equal("busy", got[1].Name);
     }
 
     [Fact]
     public void The_list_is_capped()
     {
-        var many = Enumerable.Range(0, 20).Select(i => Project($"p{i}", $"s{i}", 1));
-        var got = RecentSessions.Parse(Projects(string.Join(",", many)), 5);
+        var many = Enumerable.Range(0, 20).Select(i => Session($"p{i}", $"s{i}")).ToArray();
+        var got = RecentSessions.Parse(Recent(many), 5);
         Assert.Equal(5, got.Count);
-        // Order is the engine's (newest first); the cap must not reshuffle it.
-        Assert.Equal("p0", got[0].Name);
-        Assert.Equal("p4", got[4].Name);
+        // The cap must not reshuffle the engine's order.
+        Assert.Equal("s0", got[0].SessionId);
+        Assert.Equal("s4", got[4].SessionId);
     }
 
     [Fact]
@@ -62,7 +67,55 @@ public class RecentSessionsTests
     {
         Assert.Empty(RecentSessions.Parse(null, 8));
         Assert.Empty(RecentSessions.Parse(JsonNode.Parse("{}"), 8));
-        Assert.Empty(RecentSessions.Parse(Projects(""), 8));
+        Assert.Empty(RecentSessions.Parse(Recent(), 8));
+        Assert.Empty(RecentSessions.Parse(Recent("{\"path\":\"D:/x\"}"), 8));
+    }
+
+    [Fact]
+    public void A_running_conversation_is_listed_and_flagged()
+    {
+        // The newest update is usually the conversation still open. It is shown
+        // so the list is not stale, and flagged so the menu will not resume it.
+        var got = RecentSessions.Parse(
+            Recent(Session("here", "s-open", live: true), Session("here", "s-before")),
+            8);
+        Assert.True(got[0].Live);
+        Assert.False(got[1].Live);
+    }
+
+    [Fact]
+    public void A_profile_conversation_carries_its_profile()
+    {
+        var got = RecentSessions.Parse(
+            Recent(Session("in-profile", "sess-p", profile: 2), Session("in-default", "sess-d")),
+            8);
+        Assert.Equal(2, got.Single(s => s.Name == "in-profile").ProfileNumber);
+        Assert.Null(got.Single(s => s.Name == "in-default").ProfileNumber);
+    }
+
+    [Fact]
+    public void Claude_Codes_own_title_wins_over_the_opening_prompt()
+    {
+        // A continued conversation's opening record is the compaction summary;
+        // the title Claude Code keeps for it says what it is about.
+        var got = RecentSessions.Parse(
+            Recent(
+                Session("titled", "s-titled", prompt: "帮我看看这个项目", title: "查看项目情况"),
+                Session("untitled", "s-plain", prompt: "修一下构建")),
+            8);
+        Assert.Equal("查看项目情况", got[0].Title);
+        Assert.Equal("修一下构建", got[1].Title);
+    }
+
+    [Fact]
+    public void A_row_carries_its_transcript_and_size()
+    {
+        // The conversations window deletes by transcript and sorts by size.
+        var got = RecentSessions.Parse(
+            Recent(Session("p", "s1", file: @"C:\u\.claude\projects\p\s1.jsonl", bytes: 4096)),
+            8);
+        Assert.Equal(@"C:\u\.claude\projects\p\s1.jsonl", got[0].File);
+        Assert.Equal(4096, got[0].Bytes);
     }
 
     [Fact]

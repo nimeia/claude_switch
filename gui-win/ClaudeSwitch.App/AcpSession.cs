@@ -121,17 +121,29 @@ internal sealed class AcpSession : IAsyncDisposable
         var init = await session.RequestAsync("initialize", new JsonObject
         {
             ["protocolVersion"] = ProtocolVersion,
-            ["clientCapabilities"] = new JsonObject
-            {
-                ["fs"] = new JsonObject { ["readTextFile"] = true, ["writeTextFile"] = true },
-                ["terminal"] = false,
-            },
+            ["clientCapabilities"] = ClientCapabilities(),
         }, ct).ConfigureAwait(false);
 
         session.AgentCapabilities = init["agentCapabilities"];
         session.AgentName = init["agentInfo"]?["name"]?.GetValue<string>() ?? "unknown";
         return session;
     }
+
+    /// <summary>What this client tells the agent it can do.</summary>
+    /// <remarks>
+    /// <c>terminal</c> stays false: this client does not host the terminals ACP's
+    /// <c>terminal/*</c> methods would create. <c>_meta.terminal_output</c> is a
+    /// different thing — the claude-agent-acp extension that attaches a Bash
+    /// call's raw output and exit code to the tool call itself, which the
+    /// transcript view draws in a terminal. Without it the output arrives as a
+    /// code block with its colours stripped.
+    /// </remarks>
+    internal static JsonObject ClientCapabilities() => new()
+    {
+        ["fs"] = new JsonObject { ["readTextFile"] = true, ["writeTextFile"] = true },
+        ["terminal"] = false,
+        ["_meta"] = new JsonObject { ["terminal_output"] = true },
+    };
 
     /// <summary>Start a fresh conversation rooted at <paramref name="cwd"/>.</summary>
     public async Task<AcpSessionInfo> NewSessionAsync(string cwd, CancellationToken ct = default)

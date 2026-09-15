@@ -40,9 +40,9 @@ use crate::adapter::AdapterConfig;
 use crate::client::{AcpClient, AcpError, Handler};
 
 pub use claude_switch_core::autocontinue::{
-    backoff_seconds, classify_failure, classify_transport, decide, ContinueDecision,
-    ContinuePolicy, InterruptKind, QuotaContext, RateLimitAction, StopCause, StopReason,
-    TransportFailure, TurnOutcome, DEFAULT_CONTINUE_MESSAGE,
+    backoff_seconds, classify_failure, classify_transport, decide, effective_outcome,
+    ContinueDecision, ContinuePolicy, InterruptKind, QuotaContext, RateLimitAction, StopCause,
+    StopReason, TransportFailure, TurnOutcome, DEFAULT_CONTINUE_MESSAGE,
 };
 
 /// Classify the result of [`AcpClient::prompt`].
@@ -55,7 +55,10 @@ pub use claude_switch_core::autocontinue::{
 pub fn classify(result: &Result<Value, AcpError>) -> TurnOutcome {
     match result {
         Ok(value) => {
-            let reason = value.get("stopReason").and_then(Value::as_str).unwrap_or("");
+            let reason = value
+                .get("stopReason")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             TurnOutcome::Completed(StopReason::parse(reason))
         }
         Err(AcpError::Rpc(err)) => {
@@ -68,6 +71,16 @@ pub fn classify(result: &Result<Value, AcpError>) -> TurnOutcome {
             TurnOutcome::Interrupted(classify_transport(TransportFailure::Timeout))
         }
         Err(_) => TurnOutcome::Interrupted(InterruptKind::Unknown),
+    }
+}
+
+/// Which counter a continuation spends. Mirrors the GUI: `rateLimit` waits
+/// use their own budget so a quota wall does not eat the blip ladder.
+fn spend_retry_budget(outcome: TurnOutcome, attempt: &mut u32, rate_waits: &mut u32) {
+    if matches!(outcome, TurnOutcome::Interrupted(InterruptKind::RateLimit)) {
+        *rate_waits += 1;
+    } else {
+        *attempt += 1;
     }
 }
 
@@ -204,14 +217,19 @@ impl Runner {
                 Err(e) => {
                     // Failing to connect is itself classifiable: a dead adapter
                     // is worth a retry, a bad credential is not.
-                    let outcome = classify(&Err(e));
+                    let quota = QuotaContext::default();
+                    let outcome = effective_outcome(classify(&Err(e)), &quota);
                     let detail = Some(format!("{outcome:?} while connecting"));
-                    turns.push(TurnRecord { outcome, detail, waited_before });
-                    match decide(outcome, attempt, rate_waits, &self.policy, &QuotaContext::default()) {
+                    turns.push(TurnRecord {
+                        outcome,
+                        detail,
+                        waited_before,
+                    });
+                    match decide(outcome, attempt, rate_waits, &self.policy, &quota) {
                         ContinueDecision::Continue { delay_seconds, .. } => {
                             let delay = Duration::from_secs(delay_seconds);
                             self.client = None;
-                            attempt += 1;
+                            spend_retry_budget(outcome, &mut attempt, &mut rate_waits);
                             total_waited += delay;
                             waited_before = delay;
                             std::thread::sleep(delay);
@@ -224,22 +242,27 @@ impl Runner {
 
             let client = self.client.as_mut().expect("ensure_ready leaves a client");
             let result = client.prompt(&session_id, &text, handler, self.turn_timeout);
-            let outcome = classify(&result);
+            let quota = QuotaContext::default();
+            let outcome = effective_outcome(classify(&result), &quota);
             let detail = match &result {
                 Err(AcpError::Rpc(e)) => Some(e.message.clone()),
                 Err(e) => Some(e.to_string()),
                 Ok(_) => None,
             };
-            turns.push(TurnRecord { outcome, detail, waited_before });
+            turns.push(TurnRecord {
+                outcome,
+                detail,
+                waited_before,
+            });
 
-            match decide(outcome, attempt, rate_waits, &self.policy, &QuotaContext::default()) {
+            match decide(outcome, attempt, rate_waits, &self.policy, &quota) {
                 ContinueDecision::Stop { cause } => break cause,
-                ContinueDecision::Continue { delay_seconds, needs_fresh_process, .. } => {
-                    if matches!(outcome, TurnOutcome::Interrupted(InterruptKind::RateLimit)) {
-                        rate_waits += 1;
-                    } else {
-                        attempt += 1;
-                    }
+                ContinueDecision::Continue {
+                    delay_seconds,
+                    needs_fresh_process,
+                    ..
+                } => {
+                    spend_retry_budget(outcome, &mut attempt, &mut rate_waits);
                     if needs_fresh_process {
                         self.client = None;
                     }
@@ -342,5 +365,25 @@ mod tests {
             classify(&Err(AcpError::Protocol("bad frame".into()))),
             TurnOutcome::Interrupted(InterruptKind::Unknown)
         );
+    }
+
+    #[test]
+    fn an_exhausted_network_error_spends_the_quota_wait_not_the_blip_ladder() {
+        // Same increment the run loop uses after classify + effective_outcome.
+        let classified = classify(&rpc("API Error: 529 Overloaded", Some("server_error")));
+        let outcome = effective_outcome(
+            classified,
+            &QuotaContext {
+                exhausted: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(outcome, TurnOutcome::Interrupted(InterruptKind::RateLimit));
+
+        let mut attempt = 0;
+        let mut rate_waits = 0;
+        spend_retry_budget(outcome, &mut attempt, &mut rate_waits);
+        assert_eq!(attempt, 0, "must not spend the blip ladder");
+        assert_eq!(rate_waits, 1);
     }
 }

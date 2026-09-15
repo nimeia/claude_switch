@@ -189,10 +189,19 @@ fn shift_time(t: NaiveTime, hours: f64) -> Option<NaiveTime> {
     NaiveTime::from_hms_opt(h, m, s)
 }
 
-/// Whether the 5h window is already open (cannot be moved or cancelled).
+/// How long past its reported reset a window still counts as open, in seconds.
 ///
-/// `resets_at` in the future is the only reliable signal — usage poll does not
-/// open a window, and a 0% open window still carries a reset timestamp.
+/// A start sent before the reset lands in the old window: it opens nothing,
+/// then holds [`ATTEMPT_COOLDOWN`], so the next round began 15 minutes late.
+/// Waiting until after the reset — plus this margin for drift between the
+/// local clock and the server's — makes the start open the new window.
+const RESET_GRACE_SECS: i64 = 60;
+
+/// Whether the 5h window is still open (cannot be moved or cancelled).
+///
+/// `resets_at` is the only reliable signal — usage poll does not open a
+/// window, and a 0% open window still carries a reset timestamp. The window
+/// counts as open until [`RESET_GRACE_SECS`] after that timestamp.
 #[must_use]
 pub fn window_is_active(resets_at: Option<&str>, now: DateTime<Utc>) -> bool {
     let Some(raw) = resets_at.map(str::trim).filter(|s| !s.is_empty()) else {
@@ -207,7 +216,7 @@ pub fn window_is_active(resets_at: Option<&str>, now: DateTime<Utc>) -> bool {
                 .map(|d| d.with_timezone(&Utc))
         });
     match parsed {
-        Ok(reset) => reset > now + chrono::Duration::seconds(60),
+        Ok(reset) => now < reset + chrono::Duration::seconds(RESET_GRACE_SECS),
         Err(_) => false,
     }
 }
@@ -496,6 +505,57 @@ mod tests {
         assert!(!window_is_active(Some(&past), now));
         assert!(!window_is_active(None, now));
         assert!(!window_is_active(Some(""), now));
+    }
+
+    #[test]
+    fn window_stays_open_until_just_after_reset() {
+        let now = Utc::now();
+        let at = |secs: i64| (now + chrono::Duration::seconds(secs)).to_rfc3339();
+        // Just before the reset: a start now would land in the old window.
+        assert!(window_is_active(Some(&at(30)), now));
+        // Just after it, inside the clock-drift margin.
+        assert!(window_is_active(Some(&at(-30)), now));
+        // Clearly past it.
+        assert!(!window_is_active(Some(&at(-120)), now));
+    }
+
+    #[test]
+    fn decide_waits_for_the_reset_before_starting_the_next_round() {
+        let settings = WarmupSettings {
+            enabled: true,
+            work_start: "09:00".into(),
+            work_end: "18:00".into(),
+            ..Default::default()
+        };
+        let reset_local = Local::now()
+            .date_naive()
+            .and_time(t(11, 0))
+            .and_local_timezone(Local)
+            .single()
+            .unwrap();
+        let reset = reset_local.to_utc().to_rfc3339();
+        let decide_at = |now: DateTime<Local>| {
+            decide(
+                &settings,
+                now,
+                0,
+                1,
+                Some(&reset),
+                None,
+                Instant::now(),
+                ATTEMPT_COOLDOWN,
+                WarmupMode::Scheduled,
+            )
+        };
+        // A poll 30s before the reset used to fire into the old window.
+        assert_eq!(
+            decide_at(reset_local - ChronoDuration::seconds(30)),
+            WarmupDecision::Skip(SkipReason::WindowActive)
+        );
+        assert_eq!(
+            decide_at(reset_local + ChronoDuration::seconds(90)),
+            WarmupDecision::Fire
+        );
     }
 
     #[test]

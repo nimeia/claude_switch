@@ -21,11 +21,17 @@
     <ProjectReference Include="..\ClaudeSwitch.App\ClaudeSwitch.App.csproj" />
     <ProjectReference Include="..\ClaudeSwitch.Core\ClaudeSwitch.Core.csproj" />
   </ItemGroup>
-  <!-- Native engine DLL next to test host for Engine integration tests -->
-  <Target Name="CopyNativeDll" AfterTargets="Build">
-    <PropertyGroup>
-      <_NativeDll>$(MSBuildThisFileDirectory)..\..\target\release\claude_switch.dll</_NativeDll>
-    </PropertyGroup>
-    <Copy SourceFiles="$(_NativeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('$(_NativeDll)')" />
+  <!-- WebView2 reaches this project transitively and brings its WPF control with
+       it; see the matching target in ClaudeSwitch.App.csproj. -->
+  <Target Name="DropWebView2WpfReference" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
+  <!-- Native engine DLL next to test host for Engine integration tests, from
+       wherever Cargo put it (see ClaudeSwitch.Native.targets). -->
+  <Import Project="..\ClaudeSwitch.Native.targets" />
+  <Target Name="CopyNativeDll" AfterTargets="Build" DependsOnTargets="ResolveClaudeSwitchNative">
+    <Copy SourceFiles="$(ClaudeSwitchNativeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="Exists('$(ClaudeSwitchNativeDll)')" />
   </Target>
 </Project>

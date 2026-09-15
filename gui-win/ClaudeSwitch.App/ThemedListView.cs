@@ -84,6 +84,58 @@ internal sealed class ThemedListView : ListView
         Invalidate(Items[index].Bounds);
     }
 
+    private int _sortColumn = -1;
+    private bool _sortDescending;
+
+    /// <summary>
+    /// Let a header click sort by that column.
+    /// </summary>
+    /// <remarks>
+    /// A cell sorts by its sub-item's <c>Tag</c> when that is comparable — a size
+    /// in bytes, a time in epoch ms — and by its text otherwise. Sorting "12 MB"
+    /// against "640 KB" as text would put them in exactly the wrong order.
+    /// </remarks>
+    public bool Sortable
+    {
+        get => HeaderStyle == ColumnHeaderStyle.Clickable;
+        set => HeaderStyle = value ? ColumnHeaderStyle.Clickable : ColumnHeaderStyle.Nonclickable;
+    }
+
+    protected override void OnColumnClick(ColumnClickEventArgs e)
+    {
+        base.OnColumnClick(e);
+        if (!Sortable) return;
+
+        // Sizes and times are most useful largest / newest first, so a first
+        // click on a column of values starts descending; names start A→Z.
+        _sortDescending = e.Column == _sortColumn
+            ? !_sortDescending
+            : Items.Count > 0
+              && e.Column < Items[0].SubItems.Count
+              && Items[0].SubItems[e.Column].Tag is IComparable and not string;
+        _sortColumn = e.Column;
+        ListViewItemSorter = new CellComparer(_sortColumn, _sortDescending);
+        Sort();
+        Invalidate();
+    }
+
+    /// <summary>Compares rows by one column, as described on <see cref="Sortable"/>.</summary>
+    internal sealed class CellComparer(int column, bool descending) : System.Collections.IComparer
+    {
+        public int Compare(object? x, object? y)
+        {
+            var a = Cell(x as ListViewItem);
+            var b = Cell(y as ListViewItem);
+            int result = a?.Tag is IComparable ta && b?.Tag is { } tb && ta.GetType() == tb.GetType()
+                ? ta.CompareTo(tb)
+                : string.Compare(a?.Text, b?.Text, StringComparison.CurrentCultureIgnoreCase);
+            return descending ? -result : result;
+        }
+
+        private ListViewItem.ListViewSubItem? Cell(ListViewItem? item) =>
+            item is not null && column < item.SubItems.Count ? item.SubItems[column] : null;
+    }
+
     protected override void OnDrawColumnHeader(DrawListViewColumnHeaderEventArgs e)
     {
         var g = e.Graphics;
@@ -97,12 +149,15 @@ internal sealed class ThemedListView : ListView
             e.Bounds.Y,
             Math.Max(0, e.Bounds.Width - Theme.Space2 * 2),
             e.Bounds.Height);
+        string label = e.Header?.Text ?? "";
+        if (e.ColumnIndex == _sortColumn)
+            label += _sortDescending ? " ▾" : " ▴";
         TextRenderer.DrawText(
             g,
-            e.Header?.Text ?? "",
+            label,
             Theme.FontCaption,
             text,
-            Theme.TextMuted,
+            e.ColumnIndex == _sortColumn ? Theme.TextSecondary : Theme.TextMuted,
             Flags(e.ColumnIndex));
         e.DrawDefault = false;
     }

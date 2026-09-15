@@ -32,8 +32,8 @@
 //! - A turn that ended `end_turn` is the model **handing control back to a
 //!   human**. Prompting it again is the exact mistake [`crate::autocontinue`]
 //!   exists to avoid — most stops are deliberate. Idleness does not change that.
-//! - A turn that ended on `usage limit reached` or a socket error stopped
-//!   *against its will*, and is the only thing worth resuming.
+//! - A turn that ended on a usage limit or a socket error stopped *against its
+//!   will*, and is the only thing worth resuming.
 //!
 //! There is a third tail, and it is the dangerous one: a user message with no
 //! reply after it. That means the turn was cut off mid-generation — either it is
@@ -42,15 +42,33 @@
 //! out the orphan with a synthetic `"No response requested."` reply instead of
 //! answering, and the protocol still reports `stopReason: end_turn`. So
 //! [`TailState::Dangling`] is never a candidate.
+//!
+//! # Sessions Claude Code will continue by itself
+//!
+//! Claude Code now arms its own automatic continue when a turn hits the session
+//! limit (`autoContinueAtUsageLimit`, on by default), writes
+//! `Usage limit reached · continuing automatically at 2:50pm` into the
+//! transcript, and sends its own continuation at the reset. Such a session is
+//! waiting, not stalled: prodding it sends a second "continue", and taking it
+//! over puts a second writer on the transcript the moment the original fires.
+//! [`auto_continue_pending`] reads that notice, and [`scan_root`] leaves a
+//! session alone while the arm is live and its process is still there to act
+//! on it.
+//!
+//! Which notices mean what, and how long an arm is trusted, are detection rules
+//! ([`crate::rules`]) rather than constants: they are Claude Code's UI strings,
+//! and an update has to be able to follow them without a new build.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use chrono::{Local, NaiveTime, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::autocontinue::{classify_failure, InterruptKind};
+use crate::autocontinue::{classify_failure_with, InterruptKind};
 use crate::paths::PathEnv;
+use crate::rules::{AutoContinueRules, ClassificationRules, DetectionRules};
 
 /// Bytes read from the end of a transcript.
 ///
@@ -119,7 +137,14 @@ pub enum TailState {
     /// not something to resume automatically.
     AwaitingUser,
     /// Last turn ended on an error the session never got past.
-    Failed { message: String },
+    ///
+    /// `error_kind` is the class Claude Code recorded with it (`rate_limit`,
+    /// `server_error`, …) — the same taxonomy ACP reports, and sturdier than
+    /// the text, whose wording has already changed once.
+    Failed {
+        message: String,
+        error_kind: Option<String>,
+    },
     /// A user message with nothing after it: cut off mid-generation, or still
     /// generating right now. Never safe to take over.
     Dangling,
@@ -288,8 +313,8 @@ pub fn read_tail_lines(file: &Path) -> Vec<String> {
 /// without writing files.
 ///
 /// Walks backwards to the last record that is part of the conversation,
-/// ignoring the bookkeeping entries (`queue-operation`, `ai-title`, attachments)
-/// that surround it.
+/// ignoring the bookkeeping entries (`queue-operation`, `ai-title`, attachments,
+/// system notices) that surround it.
 #[must_use]
 pub fn classify_tail(lines: &[String]) -> TailState {
     for line in lines.iter().rev() {
@@ -302,7 +327,10 @@ pub fn classify_tail(lines: &[String]) -> TailState {
             Some("assistant") => {
                 let text = message_text(&rec);
                 if is_api_error(&rec) {
-                    return TailState::Failed { message: text };
+                    return TailState::Failed {
+                        message: text,
+                        error_kind: rec.get("error").and_then(Value::as_str).map(String::from),
+                    };
                 }
                 // A synthesised reply closed out an orphaned turn; it is not an
                 // answer, and the turn it "answered" is still unfinished work.
@@ -328,8 +356,13 @@ pub fn stall_reason(
     modified_ms: i64,
     now_ms: i64,
     criteria: StallCriteria,
+    rules: &ClassificationRules,
 ) -> Option<StallReason> {
-    let TailState::Failed { message } = tail else {
+    let TailState::Failed {
+        message,
+        error_kind,
+    } = tail
+    else {
         return None;
     };
 
@@ -340,13 +373,111 @@ pub fn stall_reason(
         return None;
     }
 
-    match classify_failure(None, message) {
+    match classify_failure_with(rules, error_kind.as_deref(), message) {
         InterruptKind::RateLimit => Some(StallReason::RateLimit),
         InterruptKind::Network => Some(StallReason::Network),
         // Auth failures need a human, and an unrecognised error is not
         // something to prompt blindly through.
         _ => None,
     }
+}
+
+/// Whether Claude Code itself will continue this session when its usage limit
+/// resets.
+///
+/// Reads the newest notice after the last conversation record. An arm is
+/// trusted until the time it announced plus the rules' grace period; after that
+/// it is presumed dead — asleep through the reset, or cancelled by a keypress
+/// that leaves no record — and the session is a candidate again, because being
+/// prodded is then exactly what it needs. A later notice that ends the continue
+/// ends the arm at once.
+///
+/// Errs towards "pending": a missed prod costs the user an Enter, a duplicate
+/// one costs a second turn on the same work.
+#[must_use]
+pub fn auto_continue_pending(lines: &[String], now_ms: i64, rules: &AutoContinueRules) -> bool {
+    for line in lines.iter().rev() {
+        let Ok(rec) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record_role(&rec).is_some() {
+            // The conversation itself, and no arm after it.
+            return false;
+        }
+        if rec.get("type").and_then(Value::as_str) != Some("system") {
+            continue;
+        }
+        let Some(content) = rec.get("content").and_then(Value::as_str) else {
+            continue;
+        };
+        if rules.is_ended_notice(content) {
+            return false;
+        }
+        if rules.is_armed_notice(content) {
+            let Some(notice_ms) = rec
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.timestamp_millis())
+            else {
+                return true;
+            };
+            let deadline = announced_reset_ms(content, notice_ms, &rules.reset_time_marker)
+                .unwrap_or(notice_ms + rules.fallback_ms());
+            return now_ms <= deadline + rules.grace_ms();
+        }
+    }
+    false
+}
+
+/// The reset time an arm notice announces, as epoch milliseconds.
+///
+/// Claude Code writes it as a local wall-clock time after `marker` — `at 2:50pm`,
+/// `at 3pm` — so it is read in this machine's time zone, as the next such time
+/// after the notice itself.
+fn announced_reset_ms(content: &str, notice_ms: i64, marker: &str) -> Option<i64> {
+    let after = content.split(marker).nth(1)?;
+    let token: String = after
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == ':')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let (clock, pm) = match token.strip_suffix("pm") {
+        Some(t) => (t, true),
+        None => (token.strip_suffix("am")?, false),
+    };
+    let (hour, minute) = match clock.split_once(':') {
+        Some((h, m)) => (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?),
+        None => (clock.parse::<u32>().ok()?, 0),
+    };
+    if !(1..=12).contains(&hour) || minute > 59 {
+        return None;
+    }
+    let hour = match (hour, pm) {
+        (12, false) => 0,
+        (12, true) => 12,
+        (h, true) => h + 12,
+        (h, false) => h,
+    };
+
+    let notice = Local.timestamp_millis_opt(notice_ms).single()?;
+    let at = notice
+        .date_naive()
+        .and_time(NaiveTime::from_hms_opt(hour, minute, 0)?);
+    let mut reset_ms = Local
+        .from_local_datetime(&at)
+        .earliest()?
+        .timestamp_millis();
+    // Announced to the minute, so a time up to a minute before the notice is
+    // still today's; anything earlier is tomorrow's.
+    if reset_ms + 60_000 < notice_ms {
+        reset_ms = Local
+            .from_local_datetime(&(at + chrono::Duration::days(1)))
+            .earliest()?
+            .timestamp_millis();
+    }
+    Some(reset_ms)
 }
 
 /// Every stalled session under one Claude config home.
@@ -361,6 +492,7 @@ pub fn scan_root(
     config_dir: Option<&Path>,
     now_ms: i64,
     criteria: StallCriteria,
+    rules: &DetectionRules,
 ) -> Vec<StalledSession> {
     let mut out = Vec::new();
     let root = crate::projects::transcripts_root(env);
@@ -389,8 +521,15 @@ pub fn scan_root(
         for file in files.flatten() {
             let f = file.path();
             if f.extension().is_some_and(|e| e == "jsonl") {
-                if let Some(mut found) = inspect(&f, account_number, config_dir, now_ms, criteria) {
+                if let Some((mut found, claude_continues)) =
+                    inspect(&f, account_number, config_dir, now_ms, criteria, rules)
+                {
                     found.pid = owners.get(&found.session_id).copied();
+                    // Claude Code will continue it at the reset — but only a
+                    // live process can; the arm died with one that exited.
+                    if claude_continues && found.pid.is_some() {
+                        continue;
+                    }
                     out.push(found);
                 }
             }
@@ -402,13 +541,17 @@ pub fn scan_root(
 }
 
 /// Test one transcript, cheaply rejecting it on mtime before reading any of it.
+///
+/// Also says whether Claude Code has its own continue armed for a quota stall,
+/// which only the caller — holding the pid map — can act on.
 fn inspect(
     file: &Path,
     account_number: Option<u32>,
     config_dir: Option<&Path>,
     now_ms: i64,
     criteria: StallCriteria,
-) -> Option<StalledSession> {
+    rules: &DetectionRules,
+) -> Option<(StalledSession, bool)> {
     let meta = std::fs::metadata(file).ok()?;
     let modified_ms = meta
         .modified()
@@ -424,24 +567,29 @@ fn inspect(
 
     let lines = read_tail_lines(file);
     let tail = classify_tail(&lines);
-    let reason = stall_reason(&tail, modified_ms, now_ms, criteria)?;
-    let TailState::Failed { message } = tail else {
+    let reason = stall_reason(&tail, modified_ms, now_ms, criteria, &rules.classification)?;
+    let TailState::Failed { message, .. } = tail else {
         return None;
     };
+    let claude_continues = reason == StallReason::RateLimit
+        && auto_continue_pending(&lines, now_ms, &rules.auto_continue);
 
-    Some(StalledSession {
-        session_id: file.file_stem()?.to_str()?.to_string(),
-        file: file.to_string_lossy().to_string(),
-        cwd: cwd_from_tail(&lines),
-        config_dir: config_dir.map(|p| p.to_string_lossy().to_string()),
-        account_number,
-        modified_ms,
-        idle_ms: idle,
-        reason,
-        last_error: message,
-        // Filled in by the caller, which reads the pid map once per root.
-        pid: None,
-    })
+    Some((
+        StalledSession {
+            session_id: file.file_stem()?.to_str()?.to_string(),
+            file: file.to_string_lossy().to_string(),
+            cwd: cwd_from_tail(&lines),
+            config_dir: config_dir.map(|p| p.to_string_lossy().to_string()),
+            account_number,
+            modified_ms,
+            idle_ms: idle,
+            reason,
+            last_error: message,
+            // Filled in by the caller, which reads the pid map once per root.
+            pid: None,
+        },
+        claude_continues,
+    ))
 }
 
 /// The `cwd` recorded inside the transcript.
@@ -472,7 +620,10 @@ fn cwd_from_tail(lines: &[String]) -> Option<String> {
 /// app may itself have been launched from inside a session terminal, and the
 /// default login's stalled sessions must not be invisible because of it.
 #[must_use]
-pub fn scan_roots(env: &PathEnv, backup_root: &Path) -> Vec<(PathEnv, Option<u32>, Option<PathBuf>)> {
+pub fn scan_roots(
+    env: &PathEnv,
+    backup_root: &Path,
+) -> Vec<(PathEnv, Option<u32>, Option<PathBuf>)> {
     let mut base = env.clone();
     base.claude_config_dir = None;
     let mut out = vec![(base, None, None)];
@@ -495,10 +646,18 @@ pub fn scan_all(
     roots: &[(PathEnv, Option<u32>, Option<PathBuf>)],
     now_ms: i64,
     criteria: StallCriteria,
+    rules: &DetectionRules,
 ) -> Vec<StalledSession> {
     let mut out = Vec::new();
     for (env, number, dir) in roots {
-        out.extend(scan_root(env, *number, dir.as_deref(), now_ms, criteria));
+        out.extend(scan_root(
+            env,
+            *number,
+            dir.as_deref(),
+            now_ms,
+            criteria,
+            rules,
+        ));
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.modified_ms));
     out
@@ -507,6 +666,7 @@ pub fn scan_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules;
     use serde_json::json;
 
     fn line(v: Value) -> String {
@@ -540,6 +700,36 @@ mod tests {
         }))
     }
 
+    /// An API error as Claude Code 2.1.2xx records it: the class in `error`.
+    fn api_error_of_kind(text: &str, kind: &str) -> String {
+        line(json!({
+            "type": "assistant",
+            "cwd": "D:/work",
+            "isApiErrorMessage": true,
+            "error": kind,
+            "message": { "role": "assistant", "model": "<synthetic>",
+                         "content": [{ "type": "text", "text": text }] }
+        }))
+    }
+
+    /// A notice Claude Code writes into the transcript, at a local wall-clock time.
+    fn notice(content: &str, at: chrono::DateTime<Local>) -> String {
+        line(json!({
+            "type": "system",
+            "subtype": "informational",
+            "content": content,
+            "level": "notice",
+            "timestamp": at.with_timezone(&chrono::Utc).to_rfc3339(),
+        }))
+    }
+
+    fn local(h: u32, m: u32) -> chrono::DateTime<Local> {
+        Local
+            .with_ymd_and_hms(2026, 9, 15, h, m, 0)
+            .single()
+            .unwrap()
+    }
+
     fn synthetic() -> String {
         line(json!({
             "type": "assistant",
@@ -551,6 +741,24 @@ mod tests {
 
     fn noise() -> String {
         line(json!({ "type": "queue-operation" }))
+    }
+
+    /// [`stall_reason`] under the built-in rules.
+    fn reason(tail: &TailState, modified: i64, now: i64, c: StallCriteria) -> Option<StallReason> {
+        stall_reason(tail, modified, now, c, &rules::builtin().classification)
+    }
+
+    /// [`auto_continue_pending`] under the built-in rules.
+    fn pending(lines: &[String], now: i64) -> bool {
+        auto_continue_pending(lines, now, &rules::builtin().auto_continue)
+    }
+
+    fn reset_at(content: &str, notice_ms: i64) -> Option<i64> {
+        announced_reset_ms(
+            content,
+            notice_ms,
+            &rules::builtin().auto_continue.reset_time_marker,
+        )
     }
 
     #[test]
@@ -565,7 +773,8 @@ mod tests {
         assert_eq!(
             t,
             TailState::Failed {
-                message: "Claude AI usage limit reached|1234".into()
+                message: "Claude AI usage limit reached|1234".into(),
+                error_kind: None,
             }
         );
     }
@@ -636,6 +845,7 @@ mod tests {
     fn failed(text: &str) -> TailState {
         TailState::Failed {
             message: text.into(),
+            error_kind: None,
         }
     }
 
@@ -644,8 +854,53 @@ mod tests {
         let c = StallCriteria::default();
         let modified = NOW - 20 * 60_000; // 20 minutes ago
         assert_eq!(
-            stall_reason(&failed("Claude AI usage limit reached"), modified, NOW, c),
+            reason(&failed("Claude AI usage limit reached"), modified, NOW, c),
             Some(StallReason::RateLimit)
+        );
+    }
+
+    #[test]
+    fn the_current_session_limit_wording_is_a_quota_wall() {
+        // Verbatim from a 2.1.2xx transcript. The old text rule missed this
+        // wording entirely, so such sessions were never offered at all.
+        let lines = [
+            user("go"),
+            api_error_of_kind(
+                "You've hit your session limit · resets 2:50pm (Asia/Shanghai)",
+                "rate_limit",
+            ),
+        ];
+        let tail = classify_tail(&lines);
+        assert_eq!(
+            tail,
+            TailState::Failed {
+                message: "You've hit your session limit · resets 2:50pm (Asia/Shanghai)".into(),
+                error_kind: Some("rate_limit".into()),
+            }
+        );
+        let c = StallCriteria::default();
+        assert_eq!(
+            reason(&tail, NOW - 20 * 60_000, NOW, c),
+            Some(StallReason::RateLimit)
+        );
+    }
+
+    #[test]
+    fn updated_rules_change_what_counts_as_a_quota_wall() {
+        // The point of the rules being data: a new wording is followed by an
+        // update, not a build.
+        let mut rules = rules::builtin().classification.clone();
+        rules.rate_limit_kinds.clear();
+        rules.rate_limit_text = vec![vec!["quota paused".to_owned()]];
+        let c = StallCriteria::default();
+        let modified = NOW - 20 * 60_000;
+        assert_eq!(
+            stall_reason(&failed("Quota paused until 3pm"), modified, NOW, c, &rules),
+            Some(StallReason::RateLimit)
+        );
+        assert_eq!(
+            reason(&failed("Quota paused until 3pm"), modified, NOW, c),
+            None
         );
     }
 
@@ -654,7 +909,12 @@ mod tests {
         let c = StallCriteria::default();
         let modified = NOW - 30 * 60_000;
         assert_eq!(
-            stall_reason(&failed("API Error: Connection closed mid-response."), modified, NOW, c),
+            reason(
+                &failed("API Error: Connection closed mid-response."),
+                modified,
+                NOW,
+                c
+            ),
             Some(StallReason::Network)
         );
     }
@@ -664,7 +924,7 @@ mod tests {
         // Two minutes of silence is a turn in progress, not a stall.
         let c = StallCriteria::default();
         assert_eq!(
-            stall_reason(&failed("usage limit reached"), NOW - 2 * 60_000, NOW, c),
+            reason(&failed("usage limit reached"), NOW - 2 * 60_000, NOW, c),
             None
         );
     }
@@ -674,7 +934,7 @@ mod tests {
         // The 5h bucket it stalled in has rolled over; this is archaeology.
         let c = StallCriteria::default();
         assert_eq!(
-            stall_reason(&failed("usage limit reached"), NOW - 6 * 3_600_000, NOW, c),
+            reason(&failed("usage limit reached"), NOW - 6 * 3_600_000, NOW, c),
             None
         );
     }
@@ -684,7 +944,10 @@ mod tests {
         // The rule this module exists to protect: `end_turn` means the model
         // handed control back to a human, and time does not change that.
         let c = StallCriteria::default();
-        assert_eq!(stall_reason(&TailState::AwaitingUser, NOW - 3_600_000, NOW, c), None);
+        assert_eq!(
+            reason(&TailState::AwaitingUser, NOW - 3_600_000, NOW, c),
+            None
+        );
     }
 
     #[test]
@@ -692,15 +955,20 @@ mod tests {
         // It may still be generating right now; resuming it burns the turn on a
         // synthetic close-out instead of doing the work.
         let c = StallCriteria::default();
-        assert_eq!(stall_reason(&TailState::Dangling, NOW - 3_600_000, NOW, c), None);
-        assert_eq!(stall_reason(&TailState::Unknown, NOW - 3_600_000, NOW, c), None);
+        assert_eq!(reason(&TailState::Dangling, NOW - 3_600_000, NOW, c), None);
+        assert_eq!(reason(&TailState::Unknown, NOW - 3_600_000, NOW, c), None);
     }
 
     #[test]
     fn an_auth_failure_needs_a_human_not_a_retry() {
         let c = StallCriteria::default();
         assert_eq!(
-            stall_reason(&failed("Failed to authenticate. API Error: 403"), NOW - 3_600_000, NOW, c),
+            reason(
+                &failed("Failed to authenticate. API Error: 403"),
+                NOW - 3_600_000,
+                NOW,
+                c
+            ),
             None
         );
     }
@@ -710,7 +978,7 @@ mod tests {
         // Clock skew between the writer and us must not manufacture a candidate.
         let c = StallCriteria::default();
         assert_eq!(
-            stall_reason(&failed("usage limit reached"), NOW + 60_000, NOW, c),
+            reason(&failed("usage limit reached"), NOW + 60_000, NOW, c),
             None
         );
     }
@@ -734,6 +1002,123 @@ mod tests {
         assert_eq!(c.idle_minutes, 24 * 60);
     }
 
+    // ── Claude Code's own continue ───────────────────────────────────────
+
+    fn armed_at_1422() -> Vec<String> {
+        vec![
+            user("go"),
+            api_error_of_kind(
+                "You've hit your session limit · resets 2:50pm (Asia/Shanghai)",
+                "rate_limit",
+            ),
+            notice(
+                "Usage limit reached · continuing automatically at 2:50pm · esc or type to cancel",
+                local(14, 22),
+            ),
+        ]
+    }
+
+    #[test]
+    fn an_armed_continue_is_pending_until_its_reset_and_grace() {
+        let lines = armed_at_1422();
+        let reset = local(14, 50).timestamp_millis();
+        let grace = rules::builtin().auto_continue.grace_ms();
+        assert!(pending(&lines, local(14, 40).timestamp_millis()));
+        assert!(pending(&lines, reset + grace));
+        // Past the grace the arm is presumed dead — asleep through the reset —
+        // and prodding is what the session needs.
+        assert!(!pending(&lines, reset + grace + 60_000));
+    }
+
+    #[test]
+    fn a_notice_that_ends_the_continue_makes_it_a_candidate_again() {
+        let mut lines = armed_at_1422();
+        lines.push(notice(
+            "Automatic continue was turned off · this task will not resume on its own",
+            local(14, 30),
+        ));
+        assert!(!pending(&lines, local(14, 40).timestamp_millis()));
+    }
+
+    #[test]
+    fn no_notice_means_nothing_is_pending() {
+        // The setting is off, or an older Claude Code: nothing will continue it.
+        let lines = [
+            user("go"),
+            api_error_of_kind(
+                "You've hit your session limit · resets 2:50pm (Asia/Shanghai)",
+                "rate_limit",
+            ),
+        ];
+        assert!(!pending(&lines, local(14, 40).timestamp_millis()));
+    }
+
+    #[test]
+    fn an_arm_before_the_last_conversation_record_is_spent() {
+        // It fired, the model answered, and the session hit a different wall.
+        let mut lines = armed_at_1422();
+        lines.push(assistant("continuing the work"));
+        lines.push(api_error("API Error: Connection closed mid-response."));
+        assert!(!pending(&lines, local(15, 0).timestamp_millis()));
+    }
+
+    #[test]
+    fn a_reworded_arm_notice_is_followed_through_the_rules() {
+        let lines = vec![
+            user("go"),
+            api_error_of_kind("You've hit your session limit", "rate_limit"),
+            notice(
+                "Session paused · resuming by itself at 2:50pm",
+                local(14, 22),
+            ),
+        ];
+        let now = local(14, 40).timestamp_millis();
+        assert!(
+            !pending(&lines, now),
+            "the built-in rules do not know this wording"
+        );
+
+        let mut updated = rules::builtin().auto_continue.clone();
+        updated.armed_prefixes = vec!["Session paused · resuming".to_owned()];
+        assert!(auto_continue_pending(&lines, now, &updated));
+    }
+
+    #[test]
+    fn a_reset_announced_past_midnight_is_tomorrows() {
+        let content =
+            "Usage limit reached · continuing automatically at 1:10am · esc or type to cancel";
+        let notice_ms = local(23, 40).timestamp_millis();
+        let expected = Local
+            .with_ymd_and_hms(2026, 9, 16, 1, 10, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(reset_at(content, notice_ms), Some(expected));
+    }
+
+    #[test]
+    fn announced_times_read_with_and_without_minutes() {
+        let notice_ms = local(9, 0).timestamp_millis();
+        assert_eq!(
+            reset_at("… continuing automatically at 3pm · esc", notice_ms),
+            Some(local(15, 0).timestamp_millis())
+        );
+        assert_eq!(
+            reset_at("… continuing automatically at 12:05am", notice_ms),
+            Some(
+                Local
+                    .with_ymd_and_hms(2026, 9, 16, 0, 5, 0)
+                    .single()
+                    .unwrap()
+                    .timestamp_millis()
+            )
+        );
+        assert_eq!(
+            reset_at("… continuing shortly · esc to cancel", notice_ms),
+            None
+        );
+    }
+
     // ── end to end over a real file ──────────────────────────────────────
 
     #[test]
@@ -746,12 +1131,20 @@ mod tests {
         let stalled = projects.join("11111111-1111-1111-1111-111111111111.jsonl");
         std::fs::write(
             &stalled,
-            format!("{}\n{}\n", user("do the thing"), api_error("Claude AI usage limit reached")),
+            format!(
+                "{}\n{}\n",
+                user("do the thing"),
+                api_error("Claude AI usage limit reached")
+            ),
         )
         .unwrap();
 
         let finished = projects.join("22222222-2222-2222-2222-222222222222.jsonl");
-        std::fs::write(&finished, format!("{}\n{}\n", user("hi"), assistant("done"))).unwrap();
+        std::fs::write(
+            &finished,
+            format!("{}\n{}\n", user("hi"), assistant("done")),
+        )
+        .unwrap();
 
         // Backdate both well past the idle threshold.
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 60);
@@ -762,9 +1155,20 @@ mod tests {
 
         let env = PathEnv::isolated(home);
         let now = chrono::Utc::now().timestamp_millis();
-        let found = scan_root(&env, Some(2), Some(Path::new("D:/profile")), now, StallCriteria::default());
+        let found = scan_root(
+            &env,
+            Some(2),
+            Some(Path::new("D:/profile")),
+            now,
+            StallCriteria::default(),
+            rules::builtin(),
+        );
 
-        assert_eq!(found.len(), 1, "only the stalled session qualifies: {found:?}");
+        assert_eq!(
+            found.len(),
+            1,
+            "only the stalled session qualifies: {found:?}"
+        );
         let s = &found[0];
         assert_eq!(s.session_id, "11111111-1111-1111-1111-111111111111");
         assert_eq!(s.reason, StallReason::RateLimit);
@@ -798,7 +1202,8 @@ mod tests {
         assert_eq!(
             classify_tail(&lines),
             TailState::Failed {
-                message: "Claude AI usage limit reached".into()
+                message: "Claude AI usage limit reached".into(),
+                error_kind: None,
             }
         );
     }

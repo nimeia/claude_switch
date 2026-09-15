@@ -75,6 +75,19 @@ impl RunStatus {
     }
 }
 
+/// Why a run that looks resumable can no longer be resumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Unresumable {
+    /// Its working directory no longer exists.
+    DirectoryGone,
+    /// Its conversation's transcript is gone — swept by Claude Code's retention
+    /// or deleted — so there is nothing to load.
+    TranscriptGone,
+    /// It ran under a session-mode profile that has since been removed.
+    ProfileGone,
+}
+
 /// One supervised run.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -249,6 +262,35 @@ impl RunJournal {
         before - self.runs.len()
     }
 
+    /// Drop records offered for resuming whose resume can no longer work.
+    ///
+    /// A record is a promise that continuing will pick the conversation up
+    /// again. Once its directory is gone, its transcript has been swept, or the
+    /// profile it ran under was removed, the promise cannot be kept, and a row
+    /// offering it only fails when clicked — while interrupted records are
+    /// otherwise never pruned, so such rows would stay for good. `blocker` says
+    /// why a run cannot resume, if it cannot; injected so the rule is testable
+    /// without a filesystem. Live and completed records are left alone.
+    pub fn drop_unresumable(
+        &mut self,
+        blocker: &dyn Fn(&AgentRun) -> Option<Unresumable>,
+    ) -> Vec<(String, Unresumable)> {
+        let mut dropped = Vec::new();
+        self.runs.retain(|run| {
+            if !run.is_resumable() {
+                return true;
+            }
+            match blocker(run) {
+                Some(why) => {
+                    dropped.push((run.id.clone(), why));
+                    false
+                }
+                None => true,
+            }
+        });
+        dropped
+    }
+
     /// Runs that could be resumed, newest first.
     #[must_use]
     pub fn resumable(&self) -> Vec<&AgentRun> {
@@ -291,19 +333,41 @@ pub fn process_is_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn windows_process_is_alive(pid: u32) -> bool {
-    // Reading the process list avoids linking a Win32 crate into core for one
-    // question, and is accurate enough: a pid absent from the list is gone.
-    // A recycled pid would make a dead run look alive, which fails safe — the
-    // run is simply not offered for resume until the next launch.
-    let Ok(output) = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-        .output()
-    else {
-        // Cannot tell: assume gone, so a stuck record still becomes resumable.
-        return false;
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.contains(&format!("\"{pid}\""))
+    // Asked of the process itself, never by running a child. This used to read
+    // `tasklist` output, and that deadlocked the GUI: `agent_run_list` reaps on
+    // every read, and the first read after a run starts races the GUI launching
+    // the ACP adapter with inheritable handles. The adapter could inherit the
+    // write end of the pipe capturing tasklist's output, so `output()` waited
+    // for an end of file that only the adapter exiting could deliver — holding
+    // the engine lock, with the UI thread and the run's own journal writes
+    // queued behind it.
+    //
+    // Declared inline, as `session::is_pid_alive` does, rather than pulling in
+    // a Win32 crate for three symbols.
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+        fn GetExitCodeProcess(handle: isize, code: *mut u32) -> i32;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            // Denied means it exists and belongs to someone we cannot open.
+            return std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ACCESS_DENIED);
+        }
+        let mut code = 0u32;
+        let read = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        // A process that has exited still opens while anyone holds a handle to
+        // it; only the exit code says it is gone. Unable to read one: assume
+        // gone, so a stuck record still becomes resumable. A recycled pid makes
+        // a dead run look alive, which fails safe — the run is simply not
+        // offered for resume until the next launch.
+        read && code == STILL_ACTIVE
+    }
 }
 
 /// Epoch milliseconds now.
@@ -335,6 +399,20 @@ mod tests {
             stop_cause: None,
             last_error: None,
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_exited_process_is_gone_even_while_its_handle_is_held() {
+        // `child` keeps its process handle open until dropped, so the process
+        // object still exists and opens — the case an OpenProcess-only check
+        // would call alive.
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit 3"])
+            .spawn()
+            .expect("spawn cmd");
+        child.wait().expect("wait for cmd");
+        assert!(!process_is_alive(child.id()));
     }
 
     #[test]
