@@ -30,6 +30,89 @@ internal static class ClaudeCli
     /// <summary>Full path to the CLI, or null when it is not installed / not on PATH.</summary>
     public static string? FindExecutable() => Find("claude");
 
+    /// <summary>First Claude Code that understands <c>statusLine.refreshInterval</c>.</summary>
+    private static readonly Version RefreshIntervalSince = new(2, 1, 97);
+
+    private static Version? s_version;
+    private static bool s_versionProbed;
+
+    /// <summary>
+    /// Installed Claude Code version, or null when it cannot be asked.
+    /// </summary>
+    /// <remarks>
+    /// Probed once per run, and only when something actually needs the answer:
+    /// this spawns the Node CLI, which takes the better part of a second.
+    /// </remarks>
+    public static Version? InstalledVersion()
+    {
+        if (s_versionProbed) return s_version;
+        s_versionProbed = true;
+        try
+        {
+            if (FindExecutable() is not { } exe) return null;
+            using var p = Process.Start(new ProcessStartInfo(exe, "--version")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            });
+            if (p is null) return null;
+            string output = p.StandardOutput.ReadToEnd();
+            if (!p.WaitForExit(5000)) return null;
+            s_version = ParseVersion(output);
+        }
+        catch (Exception)
+        {
+            // No Claude Code, no permission, a hung CLI: the caller's feature
+            // has a "do not write that key" path, which is the safe answer.
+        }
+        return s_version;
+    }
+
+    /// <summary>
+    /// The version out of <c>claude --version</c> output, or null if there is
+    /// none to find.
+    /// </summary>
+    /// <remarks>
+    /// The line reads <c>2.1.223 (Claude Code)</c> today, and has carried other
+    /// trailers before. Take the first three-part number and ignore the rest
+    /// rather than matching the whole line, which would start returning null
+    /// the next time the wording changes.
+    /// </remarks>
+    internal static Version? ParseVersion(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output)) return null;
+        var m = System.Text.RegularExpressions.Regex.Match(output, @"(\d+)\.(\d+)\.(\d+)");
+        if (!m.Success) return null;
+        try
+        {
+            return new Version(
+                int.Parse(m.Groups[1].Value),
+                int.Parse(m.Groups[2].Value),
+                int.Parse(m.Groups[3].Value));
+        }
+        catch (Exception)
+        {
+            // A number too long for int: not a version we can compare.
+            return null;
+        }
+    }
+
+    /// <summary>Whether that version understands <c>statusLine.refreshInterval</c>.</summary>
+    internal static bool SupportsRefreshInterval(Version? version) =>
+        version is not null && version >= RefreshIntervalSince;
+
+    /// <summary>
+    /// The status-line refresh interval to write, or null to leave the key out.
+    /// </summary>
+    /// <remarks>
+    /// Older Claude Code versions do not know the key, and an unknown key in
+    /// <c>settings.json</c> is something they complain about at the user.
+    /// </remarks>
+    public static int? StatusLineRefreshInterval() =>
+        SupportsRefreshInterval(InstalledVersion()) ? 10 : null;
+
     /// <summary>PATH lookup honouring PATHEXT, plus the usual per-user install dir.</summary>
     public static string? Find(string command)
     {

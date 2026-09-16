@@ -250,12 +250,41 @@ impl AutoSwitchEngine {
             if headroom < active_headroom + settings.hysteresis_pct {
                 continue;
             }
-            // `is_none_or` reads better but postdates this crate's MSRV.
-            if !out.best.is_some_and(|(_, h)| headroom >= h) {
+            // Keep the standing best only while it still has the most room, so
+            // ties go to the earlier slot. `is_none_or` reads better but
+            // postdates this crate's MSRV.
+            if !out.best.is_some_and(|(_, best)| best >= headroom) {
                 out.best = Some((num, headroom));
             }
         }
         out
+    }
+
+    /// Where a switch would land once the active account tops out.
+    ///
+    /// Ranked as though `active` had just reached the threshold, so the answer
+    /// is the one the next real tick would give rather than a second opinion —
+    /// the status line's "spare" segment promises exactly that (see
+    /// [`crate::statusline`]). Unlike [`Self::decide`] it is not gated on
+    /// autoswitch being enabled: with it off the answer is still where a manual
+    /// switch should go.
+    #[must_use]
+    pub fn spare_at_threshold(
+        seq: &SequenceData,
+        usage: &UsageCache,
+        settings: &AutoSwitchSettings,
+        active: u32,
+        session_busy: &[u32],
+    ) -> Option<u32> {
+        let ranked = Self::rank(
+            seq,
+            usage,
+            settings,
+            active,
+            settings.threshold,
+            session_busy,
+        );
+        ranked.best.map(|(num, _)| num).or(ranked.api_key_fallback)
     }
 
     /// Decide whether to switch given sequence + usage cache + settings.
@@ -450,6 +479,89 @@ mod tests {
         let cache = UsageCache::new();
         cache.put(1, usage_at(95.0, 50.0), UsageStatus::Ok);
         (seq_two(), cache)
+    }
+
+    #[test]
+    fn the_candidate_with_the_most_room_wins() {
+        // Two eligible spares: the emptier one is the point of the "best"
+        // strategy, and picking the other quietly halves what the switch buys.
+        let mut seq = seq_two();
+        seq.upsert_account(
+            3,
+            AccountRecord {
+                email: "c@x.com".into(),
+                uuid: String::new(),
+                org_uuid: String::new(),
+                org_name: String::new(),
+                added: String::new(),
+                alias: None,
+                disabled: false,
+            },
+        );
+        let cache = UsageCache::new();
+        cache.put(1, usage_at(95.0, 50.0), UsageStatus::Ok);
+        cache.put(2, usage_at(70.0, 20.0), UsageStatus::Ok);
+        cache.put(3, usage_at(15.0, 10.0), UsageStatus::Ok);
+
+        let d = AutoSwitchEngine::new().decide(&seq, &cache, &settings_at(90.0));
+        assert_eq!(d.target, Some(3), "{}", d.detail);
+
+        // Order in the sequence must not decide it.
+        cache.put(2, usage_at(15.0, 10.0), UsageStatus::Ok);
+        cache.put(3, usage_at(70.0, 20.0), UsageStatus::Ok);
+        let d = AutoSwitchEngine::new().decide(&seq, &cache, &settings_at(90.0));
+        assert_eq!(d.target, Some(2), "{}", d.detail);
+    }
+
+    #[test]
+    fn the_spare_is_where_a_switch_would_land_even_while_the_active_is_healthy() {
+        // The status line answers "where next?" long before the tick would fire,
+        // so the ranking is run as though the active account had just reached
+        // the threshold — and it must agree with what the tick then does.
+        let seq = seq_two();
+        let cache = UsageCache::new();
+        cache.put(1, usage_at(10.0, 5.0), UsageStatus::Ok);
+        cache.put(2, usage_at(8.0, 3.0), UsageStatus::Ok);
+        let settings = settings_at(90.0);
+
+        assert_eq!(
+            AutoSwitchEngine::spare_at_threshold(&seq, &cache, &settings, 1, &[]),
+            Some(2)
+        );
+
+        // Same inputs once the active account is actually out of room.
+        cache.put(1, usage_at(95.0, 50.0), UsageStatus::Ok);
+        let d = AutoSwitchEngine::new().decide(&seq, &cache, &settings);
+        assert_eq!(d.target, Some(2), "{}", d.detail);
+    }
+
+    #[test]
+    fn the_spare_skips_what_a_switch_would_skip() {
+        let seq = seq_two();
+        let cache = UsageCache::new();
+        cache.put(1, usage_at(10.0, 5.0), UsageStatus::Ok);
+        let settings = settings_at(90.0);
+
+        // Unmeasured is not free: never offer it as the spare.
+        cache.put(2, Usage::default(), UsageStatus::NeedsLogin);
+        assert_eq!(
+            AutoSwitchEngine::spare_at_threshold(&seq, &cache, &settings, 1, &[]),
+            None
+        );
+
+        // A session terminal already owns that account's quota.
+        cache.put(2, usage_at(8.0, 3.0), UsageStatus::Ok);
+        assert_eq!(
+            AutoSwitchEngine::spare_at_threshold(&seq, &cache, &settings, 1, &[2]),
+            None
+        );
+
+        // And an account with no room of its own is no spare either.
+        cache.put(2, usage_at(96.0, 20.0), UsageStatus::Ok);
+        assert_eq!(
+            AutoSwitchEngine::spare_at_threshold(&seq, &cache, &settings, 1, &[]),
+            None
+        );
     }
 
     #[test]

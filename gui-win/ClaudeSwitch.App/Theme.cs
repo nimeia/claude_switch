@@ -75,6 +75,32 @@ public static class Theme
     public static readonly Font FontSmall = new(FontFamily, 8.25f, FontStyle.Regular);
     public static readonly Font FontCaption = new(FontFamily, 8f, FontStyle.Regular);
 
+    /// <summary>
+    /// The status-line preview. That line is drawn in a terminal, so showing it
+    /// in a proportional font would misreport the one thing a preview is for:
+    /// how wide it ends up.
+    /// </summary>
+    public static readonly Font FontMono = new(MonoFamily(), 8.25f, FontStyle.Regular);
+
+    /// <summary>First monospace family actually installed; Windows always has
+    /// one of these, and the generic fallback covers the case where it does not.</summary>
+    private static string MonoFamily()
+    {
+        foreach (string name in new[] { "Cascadia Mono", "Consolas" })
+        {
+            try
+            {
+                using var family = new System.Drawing.FontFamily(name);
+                return name;
+            }
+            catch (ArgumentException)
+            {
+                // Not installed; try the next one.
+            }
+        }
+        return System.Drawing.FontFamily.GenericMonospace.Name;
+    }
+
     // Spacing (4px base)
     public const int Space1 = 4;
     public const int Space2 = 8;

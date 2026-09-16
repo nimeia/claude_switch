@@ -129,6 +129,9 @@ pub struct Paths {
     pub claude_config_home: PathBuf,
     pub global_config: PathBuf,
     pub credentials: PathBuf,
+    /// Claude Code's own `settings.json` — someone else's file, which this tool
+    /// only ever merges into (see [`crate::statusline::install`]).
+    pub claude_settings: PathBuf,
     pub backup_root: PathBuf,
     pub credentials_dir: PathBuf,
     pub configs_dir: PathBuf,
@@ -138,6 +141,8 @@ pub struct Paths {
     pub sequence_file: PathBuf,
     pub settings_file: PathBuf,
     pub autoswitch_state_file: PathBuf,
+    /// What the status line reads (see [`crate::statusline`]).
+    pub statusline_file: PathBuf,
     /// Journal of supervised agent runs (see [`crate::agentruns`]).
     pub agent_runs_file: PathBuf,
     /// Installed override of the detection rules (see [`crate::rules`]).
@@ -153,6 +158,7 @@ impl Paths {
             claude_config_home: env.claude_config_home(),
             global_config: env.global_config_path(),
             credentials: env.credentials_path(),
+            claude_settings: env.claude_config_home().join("settings.json"),
             credentials_dir: backup_root.join("credentials"),
             configs_dir: backup_root.join("configs"),
             cache_dir: backup_root.join("cache"),
@@ -161,6 +167,7 @@ impl Paths {
             sequence_file: backup_root.join("sequence.json"),
             settings_file: backup_root.join("settings.json"),
             autoswitch_state_file: backup_root.join("autoswitch_state.json"),
+            statusline_file: backup_root.join(crate::statusline::STATE_FILENAME),
             agent_runs_file: backup_root.join(crate::agentruns::JOURNAL_FILENAME),
             detection_rules_file: backup_root.join(crate::rules::RULES_FILENAME),
             backup_root,

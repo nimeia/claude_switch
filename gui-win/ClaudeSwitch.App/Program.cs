@@ -238,6 +238,13 @@ sealed class MainForm : Form
     private readonly PollCoordinator _poll = new();
     private readonly Label _autoHint;
     private readonly CheckBox _hideEmail;
+    private readonly CheckBox _statusline;
+    private readonly Label _statuslineLabel;
+    /// <summary>The three presets, as one choice: the selected pill is emphasised.</summary>
+    private readonly SegmentedChoice _statuslinePresets;
+    private readonly Label _statuslinePreview;
+    /// <summary>Preset shown even while the feature is off, so the preview means something.</summary>
+    private string _statuslinePreset = "standard";
     private readonly Label _settingsSaved;
     private AccountCard? _selected;
     private List<AccountCardModel> _models = [];
@@ -658,12 +665,12 @@ sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 4,
             Margin = new Padding(0),
             Padding = new Padding(0),
         };
         _settingsBody.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < 4; i++)
             _settingsBody.RowStyles.Add(new RowStyle(SizeType.Absolute, SettingsRowH));
 
         static FlowLayoutPanel SettingsRow() => new()
@@ -676,6 +683,7 @@ sealed class MainForm : Form
         };
         var settingsFlow = SettingsRow();
         var warmupFlow = SettingsRow();
+        var statuslineFlow = SettingsRow();
         var advancedFlow = SettingsRow();
 
         // Field label: names the value beside it, in the quieter of the two
@@ -760,10 +768,51 @@ sealed class MainForm : Form
             if (_settingsLoading) return;
             UiPrefs.HideEmail = _hideEmail.Checked;
             UiPrefs.Save();
+            // The status line renders in its own process: mirror the choice
+            // into the engine's settings, which is what it reads.
+            try { _engine.Call("set_ui", new { hideEmail = _hideEmail.Checked }); }
+            catch (Exception) { /* the cards below are the visible half */ }
             RebuildCards();
             if (DetailOpen && _selected is not null)
                 _drawer.Bind(_selected.Model);
             FlashSettingsSaved(_hideEmail.Checked ? Loc.T("settings.hideEmail.on") : Loc.T("settings.hideEmail.off"));
+        };
+
+        // The status line: one checkbox, one choice of three, and the line
+        // itself. The preview is the whole point of the row — it is rendered by
+        // the same code the installed binary runs, so what is shown here is what
+        // the terminal gets.
+        _statusline = OptionBox(Loc.T("settings.statusline"));
+        _statusline.CheckedChanged += (_, _) =>
+        {
+            if (_settingsLoading) return;
+            ApplyStatusline(_statusline.Checked);
+        };
+        _statuslineLabel = FieldLabel(Loc.T("settings.statusline.preset"));
+        _statuslinePresets = new SegmentedChoice(
+            ("lean", PresetName("lean")),
+            ("standard", PresetName("standard")),
+            ("full", PresetName("full")))
+        {
+            Margin = new Padding(0, 4, 0, 0),
+            AccessibleName = Loc.T("settings.statusline.preset"),
+        };
+        _statuslinePresets.Selected = _statuslinePreset;
+        _statuslinePresets.SelectionChanged += (_, _) =>
+        {
+            if (_settingsLoading) return;
+            _statuslinePreset = _statuslinePresets.Selected;
+            // Off: remember the choice and show it. On: it is a live change.
+            if (_statusline.Checked) ApplyStatusline(true);
+            else RefreshStatuslinePreview();
+        };
+        _statuslinePreview = new Label
+        {
+            Text = "",
+            AutoSize = true,
+            Margin = new Padding(Theme.Space3, 7, 0, 0),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = Theme.FontMono,
         };
 
         _warmupEnabled = OptionBox(Loc.T("settings.warmup"), wide: true);
@@ -929,6 +978,11 @@ sealed class MainForm : Form
         warmupFlow.Controls.Add(_warmupPlan);
         warmupFlow.Controls.Add(_warmupNowBtn);
 
+        statuslineFlow.Controls.Add(_statusline);
+        statuslineFlow.Controls.Add(_statuslineLabel);
+        statuslineFlow.Controls.Add(_statuslinePresets);
+        statuslineFlow.Controls.Add(_statuslinePreview);
+
         // Everything that is configured once and then forgotten.
         advancedFlow.Controls.Add(_advancedLabel);
         advancedFlow.Controls.Add(_startupEnabled);
@@ -938,7 +992,8 @@ sealed class MainForm : Form
 
         _settingsBody.Controls.Add(settingsFlow, 0, 0);
         _settingsBody.Controls.Add(warmupFlow, 0, 1);
-        _settingsBody.Controls.Add(advancedFlow, 0, 2);
+        _settingsBody.Controls.Add(statuslineFlow, 0, 2);
+        _settingsBody.Controls.Add(advancedFlow, 0, 3);
         // Fill goes in first so the docked header above claims its height first.
         _settingsStrip.Controls.Add(_settingsBody);
         _settingsStrip.Controls.Add(_settingsHeader);
@@ -1179,6 +1234,14 @@ sealed class MainForm : Form
         ApplyBandHeights();
         ApplyShellTheme();
         LoadSettingsUi();
+        // Both of these talk to something slow — the status line's own binary
+        // and `claude --version` — and neither has anything to say to the user
+        // unless it fails, so neither belongs on the thread drawing the window.
+        _ = Task.Run(() =>
+        {
+            ClaudeCli.StatusLineRefreshInterval();
+            HealStatusline();
+        });
         Reload();
         LoadActivityStripAsync();
         UpdateSwitchEnabled();
@@ -1596,6 +1659,14 @@ sealed class MainForm : Form
         _warmupNowBtn.Text = Loc.T("settings.warmup.now");
         _warmupTask.Text = Loc.T("settings.warmup.task");
         _warmupCloud.Text = Loc.T("settings.warmup.cloud");
+        _statusline.Text = Loc.T("settings.statusline");
+        _statuslineLabel.Text = Loc.T("settings.statusline.preset");
+        _statuslinePresets.AccessibleName = Loc.T("settings.statusline.preset");
+        foreach (string preset in new[] { "lean", "standard", "full" })
+            _statuslinePresets.SetText(preset, PresetName(preset));
+        // The preview is a rendered line, not a sentence, but the row around it
+        // just changed width — and an "unreadable" notice in it is a sentence.
+        RefreshStatuslinePreview();
         // Plan line and tooltips are composed from translated pieces.
         SyncWarmupUiEnabled();
         ApplySettingsExpansion(UiPrefs.SettingsExpanded, save: false);
@@ -1638,7 +1709,7 @@ sealed class MainForm : Form
     private const float StatusBandH = 28f;
     private const float SettingsCollapsedH = 28f;
     private const float SettingsRowH = 34f;
-    private const float SettingsExpandedH = SettingsCollapsedH + SettingsRowH * 3 + 6f;
+    private const float SettingsExpandedH = SettingsCollapsedH + SettingsRowH * 4 + 6f;
     /// <summary>
     /// One height for every toolbar item, so buttons, dropdowns and the search
     /// box share a baseline instead of each finding its own.
@@ -1897,6 +1968,11 @@ sealed class MainForm : Form
         _thrWindow.ForeColor = Theme.TextPrimary;
         SyncAutoSwitchUiEnabled();
         SyncWarmupUiEnabled();
+        // The preview is a sample of someone else's window, not a setting: it
+        // reads at the same weight as the captions around it rather than
+        // shouting in body-text black.
+        _statuslineLabel.ForeColor = CaptionColor(true);
+        _statuslinePreview.ForeColor = CaptionColor(_statusline.Checked);
         _toolStrip.BackColor = Theme.BgApp;
         _toolStrip.ForeColor = Theme.TextPrimary;
         _toolStrip.Renderer = new SageToolStripRenderer();
@@ -1994,6 +2070,9 @@ sealed class MainForm : Form
         _toolTipWarmup.SetToolTip(_warmupTask, Loc.T("settings.warmup.task.tip", start));
         _toolTipWarmup.SetToolTip(_warmupCloud, Loc.T("settings.warmup.cloud.tip", start));
         _toolTipWarmup.SetToolTip(_warmupNowBtn, Loc.T("settings.warmup.now.tip"));
+        // Rides the same refresh: it is the one place in this row that explains
+        // what the checkbox writes and where.
+        _toolTipWarmup.SetToolTip(_statusline, Loc.T("settings.statusline.tip"));
     }
 
     private ToolTip? _toolTipWarmup;
@@ -3855,6 +3934,7 @@ sealed class MainForm : Form
                 _warmupCloud.Checked = warmup?["cloud"]?["enabled"]?.GetValue<bool>() ?? false;
             SyncAutoSwitchUiEnabled();
             SyncWarmupUiEnabled();
+            LoadStatuslineUi();
         }
         catch (Exception ex)
         {
@@ -3863,6 +3943,138 @@ sealed class MainForm : Form
         finally
         {
             _settingsLoading = false;
+        }
+    }
+
+    // ── Status line ──────────────────────────────────────────────────────────
+
+    /// <summary>Turn the status line on or off, or re-write it for a new preset.</summary>
+    private void ApplyStatusline(bool enabled)
+    {
+        try
+        {
+            bool takeover = false;
+            if (enabled && _engine.Call("statusline_status") is { } status
+                && status["standing"]?.GetValue<string>() == "foreign")
+            {
+                // Someone else's status line. Ask before replacing it, and say
+                // whose it is — "another tool" is not something a user can act on.
+                var answer = MessageBox.Show(
+                    this,
+                    Loc.T("settings.statusline.takeover", status["command"]?.GetValue<string>() ?? ""),
+                    Loc.T("settings.statusline"),
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+                if (answer != DialogResult.Yes)
+                {
+                    LoadStatuslineUi();
+                    return;
+                }
+                takeover = true;
+            }
+
+            _engine.Call("statusline_set", new
+            {
+                enabled,
+                preset = _statuslinePreset,
+                binaryPath = StatuslineHelper.BinaryPath,
+                takeover,
+                refreshInterval = ClaudeCli.StatusLineRefreshInterval(),
+            });
+            FlashSettingsSaved(enabled
+                ? Loc.T("settings.statusline.on", PresetName(_statuslinePreset))
+                : Loc.T("settings.statusline.off"));
+            _statuslinePreview.ForeColor = CaptionColor(enabled);
+            RefreshStatuslinePreview();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                this, StatuslineHelper.Explain(ex), Loc.T("settings.statusline"),
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            // Show what the engine says is true, not what the click implied.
+            LoadStatuslineUi();
+        }
+    }
+
+    /// <summary>Read the installed state back and put the row in it.</summary>
+    private void LoadStatuslineUi()
+    {
+        bool wasLoading = _settingsLoading;
+        _settingsLoading = true;
+        try
+        {
+            var status = _engine.Call("statusline_status");
+            _statusline.Checked = status["enabled"]?.GetValue<bool>() ?? false;
+            if (status["preset"]?.GetValue<string>() is { Length: > 0 } preset)
+                _statuslinePreset = preset;
+            MarkStatuslinePreset();
+            _statuslinePreview.ForeColor = CaptionColor(_statusline.Checked);
+            RefreshStatuslinePreview();
+
+            // A file we cannot parse is the one state the user has to fix
+            // themselves, and the checkbox alone would never say so.
+            if (status["standing"]?.GetValue<string>() == "unreadable")
+                _statuslinePreview.Text = Loc.T("settings.statusline.unreadable");
+        }
+        catch (Exception ex)
+        {
+            _statuslinePreview.Text = StatuslineHelper.Explain(ex);
+        }
+        finally
+        {
+            _settingsLoading = wasLoading;
+        }
+    }
+
+    private void MarkStatuslinePreset() => _statuslinePresets.Selected = _statuslinePreset;
+
+    /// <summary>
+    /// Draw the line the chosen preset would produce.
+    /// </summary>
+    /// <remarks>
+    /// Rendered by the engine, which runs the same code the installed binary
+    /// does, against the real published state — so the account and the
+    /// percentages are the user's own, and only the payload Claude Code would
+    /// send is stood in for.
+    /// </remarks>
+    private void RefreshStatuslinePreview()
+    {
+        try
+        {
+            var result = _engine.Call("statusline_preview", new { preset = _statuslinePreset });
+            _statuslinePreview.Text =
+                StatuslineHelper.OneLine(result["line"]?.GetValue<string>());
+        }
+        catch (Exception ex)
+        {
+            _statuslinePreview.Text = StatuslineHelper.Explain(ex);
+        }
+    }
+
+    private static string PresetName(string preset) => Loc.T($"settings.statusline.{preset}");
+
+    /// <summary>
+    /// Re-point a status line that drifted while the app was closed.
+    /// </summary>
+    /// <remarks>
+    /// An upgrade changes the stamped version, and this app is portable enough
+    /// that its backup root can move. Best effort by design: a status line that
+    /// cannot be repaired is not a reason to interrupt someone opening the app.
+    /// </remarks>
+    private void HealStatusline()
+    {
+        try
+        {
+            _engine.Call("statusline_heal", new
+            {
+                binaryPath = StatuslineHelper.BinaryPath,
+                refreshInterval = ClaudeCli.StatusLineRefreshInterval(),
+            });
+        }
+        catch (Exception)
+        {
+            // Reported by the settings row the next time it is read.
         }
     }
 

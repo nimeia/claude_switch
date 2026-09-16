@@ -89,6 +89,14 @@ impl AutoSwitchSettings {
 pub struct UiSettings {
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Mask emails outside the app window — currently the status line
+    /// (see [`crate::statusline`]).
+    ///
+    /// The GUI keeps the checkbox state in its own `UiPrefs` and mirrors it
+    /// here: the status-line renderer runs in another process that never sees
+    /// `UiPrefs`, and an account label is the one place it can leak an address.
+    #[serde(default)]
+    pub hide_email: bool,
 }
 
 fn default_theme() -> String {
@@ -99,6 +107,7 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             theme: default_theme(),
+            hide_email: false,
         }
     }
 }
@@ -219,6 +228,27 @@ impl WarmupSettings {
     }
 }
 
+/// The status line this tool installs into Claude Code (see
+/// [`crate::statusline`]).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatuslineSettings {
+    /// What the user asked for. What Claude Code is actually running is read
+    /// back from its own `settings.json`, never assumed from here.
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub preset: crate::statusline::Preset,
+    /// The command last written into `~/.claude/settings.json`; a mismatch is
+    /// drift to be healed (a moved backup root, an upgrade, an edit by hand).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_command: Option<String>,
+    /// The `statusLine` value displaced when taking over from another tool.
+    /// Kept so that turning this off puts the user's own back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced: Option<serde_json::Value>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -230,6 +260,8 @@ pub struct Settings {
     pub warmup: WarmupSettings,
     #[serde(default)]
     pub ui: UiSettings,
+    #[serde(default)]
+    pub statusline: StatuslineSettings,
 }
 
 fn default_schema() -> u32 {
@@ -243,6 +275,7 @@ impl Default for Settings {
             autoswitch: AutoSwitchSettings::default(),
             warmup: WarmupSettings::default(),
             ui: UiSettings::default(),
+            statusline: StatuslineSettings::default(),
         }
     }
 }

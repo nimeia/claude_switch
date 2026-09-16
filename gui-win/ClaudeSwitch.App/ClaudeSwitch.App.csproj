@@ -90,10 +90,29 @@
     </ItemGroup>
   </Target>
 
+  <!-- The status line renderer, built by: cargo build -p claude-switch-statusline
+       (release). Claude Code runs it once per repaint, so it ships as its own
+       small binary rather than as a second launch of this app. It travels inside
+       the single file and is written out to <backup root>\bin only when the user
+       turns the status line on (see crates/core/src/statusline.rs). -->
+  <Target Name="IncludeClaudeSwitchStatusline"
+          DependsOnTargets="ResolveClaudeSwitchNative"
+          BeforeTargets="AssignTargetPaths">
+    <ItemGroup Condition="Exists('$(ClaudeSwitchStatuslineExe)')">
+      <None Include="$(ClaudeSwitchStatuslineExe)"
+            Link="cs-statusline.exe"
+            CopyToOutputDirectory="PreserveNewest"
+            CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
   <Target Name="WarnIfNativeMissing" DependsOnTargets="ResolveClaudeSwitchNative" BeforeTargets="Build">
     <Warning
       Condition="!Exists('$(ClaudeSwitchNativeDll)')"
       Text="claude_switch.dll not found at $(ClaudeSwitchNativeDll) — run: cargo build -p claude-switch-ffi --release" />
+    <Warning
+      Condition="!Exists('$(ClaudeSwitchStatuslineExe)')"
+      Text="cs-statusline.exe not found at $(ClaudeSwitchStatuslineExe) — run: cargo build -p claude-switch-statusline --release" />
   </Target>
 
   <!-- Missing engine is only a warning while developing: the IDE still builds and
@@ -104,6 +123,12 @@
     <Error
       Condition="'$(PublishSingleFileBundle)' == 'true' And !Exists('$(ClaudeSwitchNativeDll)')"
       Text="Refusing to publish without the native engine ($(ClaudeSwitchNativeDll)). Run first: cargo build -p claude-switch-ffi --release" />
+    <!-- A bundle without it still runs, but the status line can never be turned
+         on: the app would have nothing to write into <backup root>\bin. That is
+         a feature missing from a release, so it fails the publish, not the build. -->
+    <Error
+      Condition="'$(PublishSingleFileBundle)' == 'true' And !Exists('$(ClaudeSwitchStatuslineExe)')"
+      Text="Refusing to publish without the status line renderer ($(ClaudeSwitchStatuslineExe)). Run first: cargo build -p claude-switch-statusline --release" />
   </Target>
   <ItemGroup>
     <!-- Card/drawer controls stay internal; the test project reads their

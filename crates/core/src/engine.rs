@@ -23,6 +23,7 @@ use crate::sequence::SequenceData;
 use crate::session;
 use crate::settings::{AutoSwitchSettings, CloudAccount, Settings, WarmupSettings};
 use crate::stalled;
+use crate::statusline;
 use crate::switcher::{AccountRef, SwitchResult, Switcher};
 use crate::usage::{
     fetch_usage, plan_after_fetch, MockHttp, SharedHttp, UreqHttp, Usage, UsageCache, UsageStatus,
@@ -110,6 +111,27 @@ pub struct AddedAccount {
     pub email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+}
+
+/// Stand-in payload for the status-line preview.
+///
+/// Only the parts Claude Code would send are invented; the account and its
+/// percentages come from the real published state, so the preview shows the
+/// user their own line rather than a mock-up of someone else's.
+const PREVIEW_PAYLOAD: &str = r#"{
+    "model": { "display_name": "Sonnet 5" },
+    "effort": { "level": "high" },
+    "workspace": { "current_dir": "my-project" },
+    "context_window": { "used_percentage": 24 },
+    "cost": { "total_cost_usd": 1.24, "total_duration_ms": 2520000 }
+}"#;
+
+/// `statusLine.refreshInterval`, when the host found a Claude Code that takes it.
+fn refresh_interval_param(params: &serde_json::Value) -> Option<u32> {
+    params
+        .get("refreshInterval")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
 }
 
 /// Required string parameter, named in the error so a typo is obvious.
@@ -675,6 +697,58 @@ impl Engine {
         serde_json::to_string(&snap).map_err(|e| Error::Internal(e.to_string()))
     }
 
+    /// Publish what a status line cannot work out for itself (see
+    /// [`crate::statusline`]).
+    ///
+    /// Rides the usage poll because that is when the numbers change, and stays
+    /// best-effort: a status line is a convenience, and a read-only disk must
+    /// not be able to break polling for it. The file carries no token — the
+    /// same sensitivity as `sequence.json` beside it.
+    fn publish_statusline(&self, seq: &SequenceData, active: Option<u32>) {
+        let settings = self.settings.lock().clone();
+        let busy = self.session_busy(seq);
+        let spare = active.and_then(|num| {
+            AutoSwitchEngine::spare_at_threshold(seq, &self.usage, &settings.autoswitch, num, &busy)
+        });
+
+        let brief = |w: Option<&crate::usage::UsageWindow>| {
+            w.map(|w| statusline::WindowBrief {
+                pct: w.pct,
+                resets_at: w.resets_at.clone(),
+            })
+        };
+        let accounts = seq
+            .sequence
+            .iter()
+            .filter_map(|&num| {
+                let rec = seq.account(num)?;
+                let usage = self.usage.get(num).unwrap_or_default();
+                Some(statusline::AccountBrief {
+                    slot: num,
+                    email: rec.email.clone(),
+                    alias: rec.alias.clone(),
+                    state: self.usage.status(num),
+                    five_hour: brief(usage.five_hour.as_ref()),
+                    seven_day: brief(usage.seven_day.as_ref()),
+                })
+            })
+            .collect();
+
+        let state = statusline::State {
+            schema_version: statusline::STATUSLINE_SCHEMA_VERSION,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            active_slot: active,
+            spare_slot: spare,
+            auto_switch: statusline::AutoSwitchBrief {
+                enabled: settings.autoswitch.enabled,
+                threshold: settings.autoswitch.threshold,
+            },
+            hide_email: settings.ui.hide_email,
+            accounts,
+        };
+        let _ = state.save(&self.paths.statusline_file);
+    }
+
     // -- session mode ------------------------------------------------------
 
     /// Profile directory for a slot (whether or not it exists yet).
@@ -1119,6 +1193,8 @@ impl Engine {
             None
         };
 
+        self.publish_statusline(&seq, active);
+
         self.emit(CoreEvent::SnapshotUpdated);
         Ok(RefreshUsageResult {
             ok: true,
@@ -1230,6 +1306,104 @@ impl Engine {
         s.autoswitch = auto.clamp();
         s.save(&self.paths.settings_file)?;
         Ok(())
+    }
+
+    /// Merge shell preferences that the core needs to know about.
+    ///
+    /// Only the fields the caller passes are touched: a GUI knows about the
+    /// checkbox the user just clicked, not about every other preference stored
+    /// beside it.
+    pub fn set_ui(&self, theme: Option<String>, hide_email: Option<bool>) -> Result<()> {
+        let mut s = self.settings.lock();
+        if let Some(theme) = theme {
+            s.ui.theme = theme;
+        }
+        if let Some(hide) = hide_email {
+            s.ui.hide_email = hide;
+        }
+        s.save(&self.paths.settings_file)?;
+        Ok(())
+    }
+
+    // -- status line -------------------------------------------------------
+
+    /// Where the status line stands, ours and Claude Code's side both.
+    #[must_use]
+    pub fn statusline_status(&self) -> statusline::install::Status {
+        let our = self.settings.lock().statusline.clone();
+        statusline::install::status(&self.paths, &our)
+    }
+
+    /// Turn the status line on (installing the binary and writing Claude Code's
+    /// `settings.json`) or off (restoring what was there before).
+    ///
+    /// `source` is where this build keeps the renderer: only the host that
+    /// unpacked it knows, so it is passed in rather than guessed at.
+    pub fn statusline_set(
+        &self,
+        enabled: bool,
+        preset: statusline::Preset,
+        source: &Path,
+        takeover: bool,
+        refresh_interval: Option<u32>,
+    ) -> Result<statusline::install::Status> {
+        let mut s = self.settings.lock();
+        let status = if enabled {
+            statusline::install::enable(
+                &self.paths,
+                &mut s.statusline,
+                &statusline::install::Request {
+                    preset,
+                    source,
+                    version: crate::VERSION,
+                    takeover,
+                    refresh_interval,
+                },
+            )?
+        } else {
+            statusline::install::disable(&self.paths, &mut s.statusline)?
+        };
+        // Only once Claude Code's file is written: our settings record what was
+        // done, and a failed install must not leave them claiming otherwise.
+        s.save(&self.paths.settings_file)?;
+        Ok(status)
+    }
+
+    /// Re-point a status line that drifted (upgrade, moved backup root, an edit
+    /// by hand). A no-op when the feature is off or another tool owns it.
+    pub fn statusline_heal(
+        &self,
+        source: &Path,
+        refresh_interval: Option<u32>,
+    ) -> Result<statusline::install::Status> {
+        let mut s = self.settings.lock();
+        let before = s.statusline.clone();
+        let status = statusline::install::heal(
+            &self.paths,
+            &mut s.statusline,
+            source,
+            crate::VERSION,
+            refresh_interval,
+        )?;
+        if s.statusline != before {
+            s.save(&self.paths.settings_file)?;
+        }
+        Ok(status)
+    }
+
+    /// The line a preset would draw, as plain text for the settings window.
+    ///
+    /// Rendered by the same code as the real thing, from the real published
+    /// state, so what the user is shown cannot drift from what they will get.
+    /// Only the payload Claude Code would send is stood in for.
+    #[must_use]
+    pub fn statusline_preview(&self, preset: statusline::Preset) -> String {
+        let mut frame = statusline::Frame::new(preset, Local::now());
+        frame.live = statusline::Live::parse(PREVIEW_PAYLOAD);
+        frame.state = statusline::State::load(&self.paths.statusline_file);
+        frame.identity = statusline::identity(&self.paths.global_config, frame.state.as_ref());
+        frame.branch = Some("main".into());
+        statusline::render(&frame)
     }
 
     pub fn set_warmup(&self, warmup: WarmupSettings) -> Result<()> {
@@ -2647,6 +2821,66 @@ impl Engine {
                 let s = self.get_settings();
                 Ok(serde_json::to_value(s).map_err(|e| Error::Internal(e.to_string()))?)
             }
+            // Shell preferences the core acts on. `hideEmail` reaches the status
+            // line, which runs in another process and cannot see the GUI's own
+            // preference file.
+            "set_ui" => {
+                let theme = params
+                    .get("theme")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned);
+                let hide_email = params.get("hideEmail").and_then(serde_json::Value::as_bool);
+                self.set_ui(theme, hide_email)?;
+                Ok(json!({ "ok": true }))
+            }
+            // Status line. `binaryPath` is where this build keeps the renderer
+            // (the .NET bundle unpacks it beside the app); the engine cannot
+            // work that out from inside a DLL, so the host says.
+            "statusline_status" => {
+                Ok(serde_json::to_value(self.statusline_status())
+                    .map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "statusline_set" => {
+                let enabled = params
+                    .get("enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+                let preset = params
+                    .get("preset")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(statusline::Preset::parse)
+                    .unwrap_or_default();
+                let source = if enabled {
+                    PathBuf::from(str_param(params, "binaryPath")?)
+                } else {
+                    PathBuf::new()
+                };
+                let takeover = params
+                    .get("takeover")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let status = self.statusline_set(
+                    enabled,
+                    preset,
+                    &source,
+                    takeover,
+                    refresh_interval_param(params),
+                )?;
+                Ok(serde_json::to_value(status).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "statusline_heal" => {
+                let source = PathBuf::from(str_param(params, "binaryPath")?);
+                let status = self.statusline_heal(&source, refresh_interval_param(params))?;
+                Ok(serde_json::to_value(status).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "statusline_preview" => {
+                let preset = params
+                    .get("preset")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(statusline::Preset::parse)
+                    .unwrap_or_default();
+                Ok(json!({ "line": self.statusline_preview(preset) }))
+            }
             "set_autoswitch" => {
                 let auto: AutoSwitchSettings = serde_json::from_value(params.clone())
                     .map_err(|e| Error::Validation(e.to_string()))?;
@@ -2913,6 +3147,120 @@ mod tests {
         assert!(
             (b.usage.as_ref().unwrap().five_hour.as_ref().unwrap().pct - 80.0).abs() < f64::EPSILON
         );
+    }
+
+    #[test]
+    fn a_usage_poll_publishes_what_the_status_line_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+        // tok-a 25/10, tok-c 45/30, tok-b 80/20.
+        eng.add_raw(
+            1,
+            "a@x.com",
+            &oauth_cred("a@x.com", "tok-a"),
+            &oauth_cfg("a@x.com"),
+            Some("work".into()),
+        )
+        .unwrap();
+        eng.add_raw(
+            2,
+            "c@x.com",
+            &oauth_cred("c@x.com", "tok-c"),
+            &oauth_cfg("c@x.com"),
+            None,
+        )
+        .unwrap();
+        eng.add_raw(
+            3,
+            "b@x.com",
+            &oauth_cred("b@x.com", "tok-b"),
+            &oauth_cfg("b@x.com"),
+            None,
+        )
+        .unwrap();
+        eng.switch_to("1").unwrap();
+        eng.refresh_usage().unwrap();
+
+        let state =
+            statusline::State::load(&eng.paths.statusline_file).expect("poll publishes the file");
+        assert_eq!(state.active_slot, Some(1));
+        // Both spares are under the threshold; the one with more room wins, the
+        // same way the tick would choose.
+        assert_eq!(state.spare_slot, Some(2));
+        assert!(!state.is_stale(chrono::Local::now()));
+
+        let a = state.account(1).expect("slot 1");
+        assert_eq!(a.alias.as_deref(), Some("work"));
+        assert_eq!(a.state, UsageStatus::Ok);
+        assert!((a.five_hour.as_ref().unwrap().pct - 25.0).abs() < f64::EPSILON);
+        assert!((a.seven_day.as_ref().unwrap().pct - 10.0).abs() < f64::EPSILON);
+
+        // The file sits in the backup root and is read by another process: it
+        // carries identities, never credentials.
+        let raw = std::fs::read_to_string(&eng.paths.statusline_file).unwrap();
+        assert!(!raw.contains("tok-a"), "{raw}");
+        assert!(!raw.contains("accessToken"), "{raw}");
+    }
+
+    #[test]
+    fn the_status_line_goes_in_and_comes_back_out_through_the_call_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+        let source = dir.path().join("bundled.exe");
+        std::fs::write(&source, b"renderer").unwrap();
+        // A file the user already had, to prove the merge leaves it alone.
+        std::fs::create_dir_all(eng.paths.claude_settings.parent().unwrap()).unwrap();
+        std::fs::write(&eng.paths.claude_settings, br#"{"model":"opus"}"#).unwrap();
+
+        let v = eng.call_json("statusline_status", &json!({})).unwrap();
+        assert_eq!(v["enabled"], false);
+        assert_eq!(v["standing"], "settled");
+
+        let v = eng
+            .call_json(
+                "statusline_set",
+                &json!({
+                    "enabled": true,
+                    "preset": "full",
+                    "binaryPath": source,
+                    "refreshInterval": 10,
+                }),
+            )
+            .unwrap();
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["preset"], "full");
+        assert_eq!(v["standing"], "settled");
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&eng.paths.claude_settings).unwrap())
+                .unwrap();
+        assert_eq!(written["model"], "opus", "the user's own keys survive");
+        assert!(crate::statusline::install::is_ours(
+            written["statusLine"]["command"].as_str().unwrap()
+        ));
+        assert_eq!(written["statusLine"]["refreshInterval"], 10);
+
+        // The choice survives a restart: it is in our settings file, not just
+        // in memory.
+        let reloaded = Settings::load(&eng.paths.settings_file).unwrap();
+        assert!(reloaded.statusline.enabled);
+        assert_eq!(reloaded.statusline.preset, crate::statusline::Preset::Full);
+
+        // The preview runs the same renderer the installed binary will.
+        let line = eng
+            .call_json("statusline_preview", &json!({ "preset": "lean" }))
+            .unwrap();
+        let line = line["line"].as_str().unwrap();
+        assert!(line.contains("Sonnet 5"), "{line}");
+        assert!(!line.contains('\u{1b}'), "the preview is plain text: {line}");
+
+        eng.call_json("statusline_set", &json!({ "enabled": false }))
+            .unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&eng.paths.claude_settings).unwrap())
+                .unwrap();
+        assert!(written.get("statusLine").is_none());
+        assert_eq!(written["model"], "opus");
     }
 
     #[test]

@@ -1,0 +1,21 @@
+[package]
+name = "claude-switch-statusline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The status line Claude Code runs on every repaint"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+claude-switch-core = { path = "../core" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# Runs once per repaint, so what it costs to start is paid over and over: size
+# and load time matter more here than a few percent of throughput.
+[[bin]]
+name = "cs-statusline"
+path = "src/main.rs"

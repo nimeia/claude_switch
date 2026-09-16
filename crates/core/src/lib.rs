@@ -22,6 +22,7 @@ pub mod sequence;
 pub mod session;
 pub mod settings;
 pub mod stalled;
+pub mod statusline;
 pub mod switcher;
 pub mod usage;
 pub mod warmup;

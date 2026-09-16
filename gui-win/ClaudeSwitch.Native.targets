@@ -41,7 +41,8 @@
     </Task>
   </UsingTask>
 
-  <Target Name="ResolveClaudeSwitchNative" Condition="'$(ClaudeSwitchNativeDll)' == ''">
+  <Target Name="ResolveClaudeSwitchNative"
+          Condition="'$(ClaudeSwitchNativeDll)' == '' Or '$(ClaudeSwitchStatuslineExe)' == ''">
     <PropertyGroup>
       <_ClaudeSwitchCargoMetadata>$(MSBuildProjectDirectory)\$(IntermediateOutputPath)cargo-metadata.json</_ClaudeSwitchCargoMetadata>
     </PropertyGroup>
@@ -65,13 +66,19 @@
       <Output TaskParameter="TargetDirectory" PropertyName="_ClaudeSwitchCargoTargetDir" />
     </ClaudeSwitchReadCargoTargetDirectory>
 
+    <!-- Each path is only filled in when the caller did not preset it: with two
+         artifacts to resolve, this target now runs even when one of them was
+         handed in. -->
     <PropertyGroup>
-      <ClaudeSwitchNativeDll Condition="'$(_ClaudeSwitchCargoTargetDir)' != ''">$(_ClaudeSwitchCargoTargetDir)\release\claude_switch.dll</ClaudeSwitchNativeDll>
+      <ClaudeSwitchNativeDll Condition="'$(ClaudeSwitchNativeDll)' == '' And '$(_ClaudeSwitchCargoTargetDir)' != ''">$(_ClaudeSwitchCargoTargetDir)\release\claude_switch.dll</ClaudeSwitchNativeDll>
       <ClaudeSwitchNativeDll Condition="'$(ClaudeSwitchNativeDll)' == ''">$(ClaudeSwitchRepoRoot)target\release\claude_switch.dll</ClaudeSwitchNativeDll>
+      <ClaudeSwitchStatuslineExe Condition="'$(ClaudeSwitchStatuslineExe)' == '' And '$(_ClaudeSwitchCargoTargetDir)' != ''">$(_ClaudeSwitchCargoTargetDir)\release\cs-statusline.exe</ClaudeSwitchStatuslineExe>
+      <ClaudeSwitchStatuslineExe Condition="'$(ClaudeSwitchStatuslineExe)' == ''">$(ClaudeSwitchRepoRoot)target\release\cs-statusline.exe</ClaudeSwitchStatuslineExe>
       <_ClaudeSwitchNativeSource Condition="'$(_ClaudeSwitchCargoTargetDir)' != ''">Cargo target directory</_ClaudeSwitchNativeSource>
       <_ClaudeSwitchNativeSource Condition="'$(_ClaudeSwitchCargoTargetDir)' == ''">Cargo not available; repository target folder</_ClaudeSwitchNativeSource>
     </PropertyGroup>
 
     <Message Importance="high" Text="Claude Switch engine: $(ClaudeSwitchNativeDll) ($(_ClaudeSwitchNativeSource))" />
+    <Message Importance="high" Text="Claude Switch status line: $(ClaudeSwitchStatuslineExe)" />
   </Target>
 </Project>
