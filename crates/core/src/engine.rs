@@ -1286,6 +1286,29 @@ impl Engine {
         Ok(dir)
     }
 
+    /// Where a warmup for this slot runs: `None` means the default login,
+    /// with no `CLAUDE_CONFIG_DIR`.
+    ///
+    /// The active account's credentials live in `~/.claude`; its slot backup
+    /// is a copy that the live session's token rotation outruns, so a profile
+    /// seeded from that copy reports "Not logged in" and every warmup for the
+    /// active account fails — silently for the guardian, which discards the
+    /// child's output. [`Engine::session_prepare`] already resolves the active
+    /// account to the default login; warmups now do the same, and still write
+    /// nothing there: `--no-session-persistence` in an empty temp directory.
+    fn warmup_config_dir(
+        &self,
+        seq: &SequenceData,
+        num: u32,
+        email: &str,
+        org: &str,
+    ) -> Result<Option<PathBuf>> {
+        if self.resolve_active(seq).number == Some(num) {
+            return Ok(None);
+        }
+        self.warmup_ensure_profile(num, email, org).map(Some)
+    }
+
     /// Accounts that participate in warmup stagger (N) and may be fired.
     ///
     /// Only **subscribed + healthy** slots count:
@@ -1425,7 +1448,7 @@ impl Engine {
                 }
                 WarmupDecision::Fire => {
                     self.warmup_state.lock().mark_attempted(num, now_instant);
-                    let fire = self.fire_warmup(num, &email, &org, &claude, &model);
+                    let fire = self.fire_warmup(&seq, num, &email, &org, &claude, &model);
                     if !fire.ok {
                         if let Some(ref detail) = fire.detail {
                             self.emit(CoreEvent::Error {
@@ -1444,13 +1467,14 @@ impl Engine {
 
     fn fire_warmup(
         &self,
+        seq: &SequenceData,
         num: u32,
         email: &str,
         org: &str,
         claude: &std::path::Path,
         model: &str,
     ) -> WarmupFireResult {
-        let profile = match self.warmup_ensure_profile(num, email, org) {
+        let profile = match self.warmup_config_dir(seq, num, email, org) {
             Ok(p) => p,
             Err(e) => {
                 return WarmupFireResult {
@@ -1463,20 +1487,24 @@ impl Engine {
             }
         };
         let work = std::env::temp_dir().join(format!("cswitch-warm-{num}"));
-        match warmup::spawn_warmup(claude, Some(&profile), model, &work) {
+        // None → the default login, and no config dir to report.
+        let shown = profile
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
+        match warmup::spawn_warmup(claude, profile.as_deref(), model, &work) {
             Ok(()) => WarmupFireResult {
                 number: num,
                 email: email.to_string(),
                 ok: true,
                 detail: None,
-                config_dir: Some(profile.to_string_lossy().into_owned()),
+                config_dir: shown,
             },
             Err(detail) => WarmupFireResult {
                 number: num,
                 email: email.to_string(),
                 ok: false,
                 detail: Some(detail),
-                config_dir: Some(profile.to_string_lossy().into_owned()),
+                config_dir: shown,
             },
         }
     }
@@ -1549,11 +1577,12 @@ impl Engine {
         let claude = warmup::find_claude_executable().ok_or_else(|| {
             Error::Validation("claude CLI not found on PATH or ~/.local/bin".into())
         })?;
+        let seq = self.switcher.load_sequence()?;
 
         let mut accounts: Vec<CloudAccount> = Vec::new();
         let mut jobs = Vec::new();
         for target in targets {
-            match self.warmup_ensure_profile(target.number, &target.email, &target.org_uuid) {
+            match self.warmup_config_dir(&seq, target.number, &target.email, &target.org_uuid) {
                 Ok(dir) => jobs.push((target, dir)),
                 Err(e) => accounts.push(CloudAccount {
                     routines: previous(target.number, &target.email),
@@ -1577,7 +1606,7 @@ impl Engine {
                         let prompt = warmup_cloud::sync_prompt(&target.plan, model);
                         let outcome = warmup_cloud::run_sync(
                             claude,
-                            &dir,
+                            dir.as_deref(),
                             &work,
                             &prompt,
                             warmup_cloud::SYNC_TIMEOUT,

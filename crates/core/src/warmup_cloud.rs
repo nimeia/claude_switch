@@ -330,12 +330,14 @@ fn truncate(s: &str, max: usize) -> String {
 ///
 /// - The prompt goes in on stdin: it is multi-line and quoted, which a
 ///   `claude.cmd` shim would mangle as an argument.
-/// - `CLAUDE_CONFIG_DIR` selects the account; auth overrides and the env of
-///   a Claude Code parent are scrubbed so neither can hijack the session.
+/// - `config_dir` selects the account, or `None` runs under the default
+///   login (which is how the *active* account is reached — its profile copy
+///   goes stale as the live session rotates tokens). Auth overrides and the
+///   env of a Claude Code parent are scrubbed so neither can hijack it.
 /// - Killed after `timeout`; a hung session must not hold the sync forever.
 pub fn run_sync(
     claude: &Path,
-    config_dir: &Path,
+    config_dir: Option<&Path>,
     work_dir: &Path,
     prompt: &str,
     timeout: Duration,
@@ -355,10 +357,12 @@ pub fn run_sync(
         .arg("--json-schema")
         .arg(REPORT_SCHEMA)
         .current_dir(work_dir)
-        .env("CLAUDE_CONFIG_DIR", config_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(dir) = config_dir {
+        cmd.env("CLAUDE_CONFIG_DIR", dir);
+    }
     for key in session::AUTH_OVERRIDE_ENV_VARS
         .iter()
         .chain(NESTED_SESSION_ENV_VARS)
