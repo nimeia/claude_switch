@@ -1,0 +1,956 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Claude Switch</title>
+<meta name="description" content="A Windows tray app that switches Claude Code accounts when a rate limit hits — no restart, and the session in progress keeps going.">
+<link rel="icon" href="assets/img/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;1,6..72,300&display=swap">
+<style>
+/* ─────────────────────────────────────────────────────────────
+   Claude Switch — site tokens
+   ivory ground / clay accent; the product's green, amber and red
+   stay semantic: they only ever describe a quota.
+   ───────────────────────────────────────────────────────────── */
+:root{
+  --bg:#F0EEE6;
+  --surface:#FBFAF7;
+  --card:#FFFFFF;
+  --ink:#1C1B19;
+  --ink-2:#57534B;
+  --ink-3:#877F72;
+  --line:#E1DBCD;
+  --line-soft:#EBE6DA;
+  --accent:#C0603B;
+  --accent-ink:#A34E2E;
+  --accent-soft:#F6E5DB;
+  --ok:#3D7A56;
+  --warn:#B8862B;
+  --crit:#BF4B3E;
+  --term-bg:#1B1A17;
+  --term-ink:#E8E4DA;
+  --shadow-1:0 1px 2px rgba(28,27,25,.05), 0 8px 24px -12px rgba(28,27,25,.18);
+  --shadow-2:0 2px 4px rgba(28,27,25,.06), 0 24px 60px -24px rgba(28,27,25,.32);
+  --radius:14px;
+  --sans:"IBM Plex Sans","Segoe UI","Microsoft YaHei UI","PingFang SC","Noto Sans SC",system-ui,sans-serif;
+  --serif:"Newsreader",Georgia,"Songti SC","Noto Serif SC",serif;
+  --mono:"IBM Plex Mono","Cascadia Mono",Consolas,"Courier New",monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#181715;
+    --surface:#201E1B;
+    --card:#262421;
+    --ink:#EFECE4;
+    --ink-2:#B9B2A5;
+    --ink-3:#8C8478;
+    --line:#35322B;
+    --line-soft:#2C2924;
+    --accent:#E18A63;
+    --accent-ink:#EDA487;
+    --accent-soft:#38271F;
+    --ok:#6FB88A;
+    --warn:#DFB755;
+    --crit:#DF7A6A;
+    --term-bg:#121110;
+    --term-ink:#E8E4DA;
+    --shadow-1:0 1px 2px rgba(0,0,0,.4), 0 10px 26px -14px rgba(0,0,0,.7);
+    --shadow-2:0 2px 6px rgba(0,0,0,.45), 0 30px 70px -28px rgba(0,0,0,.85);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#181715;
+  --surface:#201E1B;
+  --card:#262421;
+  --ink:#EFECE4;
+  --ink-2:#B9B2A5;
+  --ink-3:#8C8478;
+  --line:#35322B;
+  --line-soft:#2C2924;
+  --accent:#E18A63;
+  --accent-ink:#EDA487;
+  --accent-soft:#38271F;
+  --ok:#6FB88A;
+  --warn:#DFB755;
+  --crit:#DF7A6A;
+  --term-bg:#121110;
+  --term-ink:#E8E4DA;
+  --shadow-1:0 1px 2px rgba(0,0,0,.4), 0 10px 26px -14px rgba(0,0,0,.7);
+  --shadow-2:0 2px 6px rgba(0,0,0,.45), 0 30px 70px -28px rgba(0,0,0,.85);
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;
+  background:var(--bg);
+  color:var(--ink);
+  font-family:var(--sans);
+  font-size:16px;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+img{max-width:100%;height:auto;display:block}
+a{color:var(--accent-ink);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:4px}
+code,kbd,pre{font-family:var(--mono)}
+
+/* language switching: both copies ship in the HTML, CSS hides one.
+   Only ever *hides* — a rule that re-showed an element would have to
+   name a display mode, and would flatten the grid rows it lands on. */
+:root:not([data-lang="zh"]) [data-l="zh"]{display:none}
+:root[data-lang="zh"] [data-l="en"]{display:none}
+
+.wrap{width:100%;max-width:1080px;margin-inline:auto;padding-inline:20px}
+
+/* ── top bar ─────────────────────────────────────────────── */
+.topbar{
+  position:sticky;top:env(safe-area-inset-top,0px);z-index:40;
+  background:var(--bg);
+  background:color-mix(in srgb,var(--bg) 88%,transparent);
+  backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line-soft);
+}
+.topbar .wrap{display:flex;align-items:center;gap:16px;height:60px}
+.brand{display:flex;align-items:center;gap:10px;color:var(--ink);font-weight:600;letter-spacing:-.01em}
+.brand:hover{text-decoration:none}
+.brand img{width:26px;height:26px;border-radius:50%}
+.navlinks{display:flex;gap:22px;margin-left:auto;font-size:14.5px;color:var(--ink-2)}
+.navlinks a{color:var(--ink-2)}
+.navlinks a:hover{color:var(--ink);text-decoration:none}
+.controls{display:flex;align-items:center;gap:8px;margin-left:auto}
+.navlinks + .controls{margin-left:0}
+.ctl{
+  font:inherit;font-size:13.5px;line-height:1;
+  color:var(--ink-2);background:transparent;
+  border:1px solid var(--line);border-radius:999px;
+  padding:7px 12px;cursor:pointer;
+}
+.ctl:hover{color:var(--ink);border-color:var(--ink-3)}
+.ctl[aria-pressed="true"]{color:var(--ink);background:var(--surface)}
+
+/* ── type scale ──────────────────────────────────────────── */
+h1,h2,h3{font-family:var(--serif);font-weight:400;text-wrap:balance;margin:0}
+h1{font-size:clamp(2.6rem,6vw,4.1rem);line-height:1.04;letter-spacing:-.02em}
+h2{font-size:clamp(1.9rem,3.6vw,2.6rem);line-height:1.12;letter-spacing:-.015em}
+h3{font-size:1.28rem;line-height:1.3}
+p{margin:0}
+.lede{font-size:clamp(1.06rem,1.6vw,1.22rem);color:var(--ink-2);max-width:62ch}
+.eyebrow{
+  font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-3);font-weight:500;
+}
+.serif-note{font-family:var(--serif);font-style:italic;color:var(--ink-2)}
+:root[data-lang="zh"] h1,
+:root[data-lang="zh"] h2,
+:root[data-lang="zh"] h3{word-break:keep-all}
+
+/* ── hero ────────────────────────────────────────────────── */
+.hero{padding-block:clamp(48px,7vw,86px) 0}
+.hero-copy{display:flex;flex-direction:column;gap:20px;max-width:56ch}
+.hero h1 em{font-style:italic;color:var(--accent)}
+.cta-row{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:4px}
+.btn{
+  display:inline-flex;align-items:center;gap:9px;
+  font-size:15px;font-weight:500;line-height:1;
+  padding:13px 20px;border-radius:10px;border:1px solid transparent;
+}
+.btn:hover{text-decoration:none}
+.btn-primary{background:var(--accent);color:#fff;box-shadow:var(--shadow-1)}
+.btn-primary:hover{background:var(--accent-ink)}
+.btn-ghost{border-color:var(--line);color:var(--ink);background:var(--card)}
+.btn-ghost:hover{border-color:var(--ink-3)}
+.meta-line{font-size:13.5px;color:var(--ink-3);font-family:var(--mono)}
+
+/* ── screenshot plates ───────────────────────────────────── */
+.plate{
+  margin-top:clamp(34px,5vw,56px);
+  position:relative;
+  padding:clamp(14px,2.5vw,30px);
+  border-radius:calc(var(--radius) + 8px);
+  background:
+    radial-gradient(120% 90% at 50% -10%, color-mix(in srgb,var(--accent-soft) 70%,transparent), transparent 62%),
+    var(--surface);
+  border:1px solid var(--line-soft);
+}
+.shot{
+  width:100%;border-radius:10px;border:1px solid var(--line);
+  box-shadow:var(--shadow-2);cursor:zoom-in;background:var(--card);
+}
+.shot-plain{cursor:zoom-in;border-radius:10px;border:1px solid var(--line);box-shadow:var(--shadow-1)}
+.only-dark{display:none}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]) .only-dark{display:block}
+  :root:not([data-theme="light"]) .only-light{display:none}
+}
+:root[data-theme="dark"] .only-dark{display:block}
+:root[data-theme="dark"] .only-light{display:none}
+figcaption{font-size:13.5px;color:var(--ink-3);margin-top:10px}
+
+/* ── sections ────────────────────────────────────────────── */
+section{padding-block:clamp(56px,8vw,104px)}
+.section-head{display:flex;flex-direction:column;gap:14px;max-width:60ch}
+.rule{height:1px;background:var(--line-soft);border:0;margin:0}
+
+.split{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:clamp(28px,5vw,64px);align-items:center}
+.split.narrow-right{grid-template-columns:minmax(0,7fr) minmax(0,4fr)}
+.split .col{display:flex;flex-direction:column;gap:18px;min-width:0}
+@media (max-width:880px){
+  .split,.split.narrow-right{grid-template-columns:1fr}
+}
+
+/* claim lists */
+.claims{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:14px}
+.claims li{display:grid;grid-template-columns:auto 1fr;gap:12px;color:var(--ink-2);font-size:15.2px}
+.claims li::before{
+  content:"";width:7px;height:7px;margin-top:9px;border-radius:2px;
+  background:var(--accent);transform:rotate(45deg);
+}
+.claims strong{color:var(--ink);font-weight:600}
+
+/* before / after */
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:34px}
+@media (max-width:720px){.compare{grid-template-columns:1fr}}
+.pane{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:22px 22px 24px;display:flex;flex-direction:column;gap:14px;
+}
+.pane.after{border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
+.pane h3{font-family:var(--sans);font-size:14px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+.pane.after h3{color:var(--accent-ink)}
+.steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px;font-size:15px;color:var(--ink-2)}
+.steps li{display:flex;gap:10px;align-items:baseline}
+.steps .n{font-family:var(--mono);font-size:12px;color:var(--ink-3);min-width:1.6em}
+.pane .kicker{font-size:14px;color:var(--ink-3);margin-top:auto}
+
+/* stat strip */
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--line-soft);
+  border:1px solid var(--line-soft);border-radius:var(--radius);overflow:hidden;margin-top:36px}
+@media (max-width:720px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.stat{background:var(--surface);padding:20px 20px 18px;display:flex;flex-direction:column;gap:6px}
+.stat .v{font-family:var(--serif);font-size:1.9rem;line-height:1;color:var(--ink);font-variant-numeric:tabular-nums}
+.stat .k{font-size:13.5px;color:var(--ink-3)}
+
+/* diagram */
+figure{margin:0}
+.diagram{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:clamp(16px,3vw,28px);
+}
+.diagram svg{width:100%;height:auto;color:var(--ink-2)}
+
+/* ── terminal band ───────────────────────────────────────── */
+.band{background:var(--term-bg);color:var(--term-ink);border-block:1px solid var(--line)}
+.band h2{color:#F5F2EA}
+.band .lede{color:#BDB6A8}
+.band .claims li{color:#BDB6A8}
+.band .claims strong{color:#F5F2EA}
+.band .claims li::before{background:var(--accent)}
+.preset-tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tab{
+  font:inherit;font-size:13.5px;line-height:1;color:#BDB6A8;cursor:pointer;
+  background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.12);
+  border-radius:8px;padding:9px 14px;
+}
+.tab[aria-selected="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.terminal{
+  margin-top:16px;border-radius:12px;overflow:hidden;
+  border:1px solid rgba(255,255,255,.14);background:#0E0D0C;
+  box-shadow:0 30px 60px -30px rgba(0,0,0,.9);
+}
+.terminal-bar{
+  display:flex;align-items:center;gap:8px;padding:10px 14px;
+  background:rgba(255,255,255,.05);border-bottom:1px solid rgba(255,255,255,.08);
+  font-size:12.5px;color:#9A9287;font-family:var(--mono);
+}
+.dot{width:9px;height:9px;border-radius:50%;background:#3A3733}
+.terminal-body{padding:18px 16px 20px;overflow-x:auto}
+.terminal-body pre{
+  margin:0;font-size:13px;line-height:1.85;color:#DCD6CA;white-space:pre;
+}
+.terminal-body .muted{color:#7E766B}
+.terminal-body .g{color:#7FC79B}
+.terminal-body .a{color:#E3B55F}
+.terminal-body .c{color:#E18A63}
+.band-note{font-size:13.5px;color:#8C8478;margin-top:14px;max-width:80ch}
+.terminal-block{margin-top:30px}
+.band-claims{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:24px;margin-top:40px}
+.band-claims li{align-items:start}
+
+/* ── download ────────────────────────────────────────────── */
+.downloads{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:34px}
+@media (max-width:720px){.downloads{grid-template-columns:1fr}}
+.dl{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:24px;display:flex;flex-direction:column;gap:12px;
+}
+.dl.primary{border-color:color-mix(in srgb,var(--accent) 45%,var(--line));box-shadow:var(--shadow-1)}
+.dl .file{font-family:var(--mono);font-size:14px;color:var(--ink);word-break:break-all}
+.dl .why{font-size:14.5px;color:var(--ink-2)}
+.tag{
+  align-self:flex-start;font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--accent-ink);background:var(--accent-soft);border-radius:999px;padding:5px 10px;font-weight:600;
+}
+.notes{display:flex;flex-direction:column;gap:16px;margin-top:30px;font-size:15px;color:var(--ink-2)}
+.notes b{color:var(--ink)}
+pre.code{
+  background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:16px;overflow-x:auto;font-size:13.5px;line-height:1.7;color:var(--ink);margin:0;
+}
+pre.code .cm{color:var(--ink-3)}
+
+/* ── data table ──────────────────────────────────────────── */
+.table-wrap{overflow-x:auto;margin-top:30px;border:1px solid var(--line);border-radius:var(--radius);background:var(--card)}
+table{border-collapse:collapse;width:100%;min-width:560px;font-size:14.5px}
+th,td{text-align:left;padding:13px 18px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+td:first-child{font-family:var(--mono);font-size:13px;color:var(--ink);white-space:nowrap}
+td:last-child{color:var(--ink-2)}
+
+/* ── footer ──────────────────────────────────────────────── */
+footer{border-top:1px solid var(--line-soft);padding-block:44px 56px;font-size:14px;color:var(--ink-3)}
+footer .wrap{display:flex;flex-direction:column;gap:14px}
+.foot-links{display:flex;flex-wrap:wrap;gap:18px}
+.disclaimer{max-width:70ch;font-size:13px}
+
+/* ── lightbox ────────────────────────────────────────────── */
+.lightbox{
+  position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;
+  background:rgba(20,19,17,.86);padding:24px;cursor:zoom-out;
+}
+.lightbox img{max-width:min(1400px,96vw);max-height:92vh;width:auto;border-radius:8px;box-shadow:0 40px 90px -30px rgba(0,0,0,.9)}
+
+@media (max-width:720px){
+  .navlinks{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="assets/img/logo.png" alt=""> Claude Switch</a>
+    <nav class="navlinks">
+      <a href="#switch" data-l="en">The switch</a><a href="#switch" data-l="zh">切换</a>
+      <a href="#sessions" data-l="en">Parallel sessions</a><a href="#sessions" data-l="zh">并行会话</a>
+      <a href="#statusline" data-l="en">Status line</a><a href="#statusline" data-l="zh">状态栏</a>
+      <a href="#install" data-l="en">Install</a><a href="#install" data-l="zh">安装</a>
+    </nav>
+    <div class="controls">
+      <button class="ctl" id="lang-toggle" type="button">中文</button>
+      <button class="ctl" id="theme-toggle" type="button" aria-label="Switch theme">Dark</button>
+      <a class="ctl" href="https://github.com/nimeia/claude_switch" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ── hero ─────────────────────────────────────────────── -->
+  <div class="hero">
+    <div class="wrap">
+      <div class="hero-copy">
+        <p class="eyebrow" data-l="en">Windows tray app · for Claude Code</p>
+        <p class="eyebrow" data-l="zh">Windows 托盘应用 · 为 Claude Code 而写</p>
+
+        <h1 data-l="en">Hit the limit.<br>Keep <em>writing</em>.</h1>
+        <h1 data-l="zh">额度撞墙，<br><em>继续写</em>。</h1>
+
+        <p class="lede" data-l="en">Claude Switch watches the 5-hour and 7-day window on every account you own. When one runs dry it hands the work to the account with the most left — while Claude Code is still running, in the session you are in.</p>
+        <p class="lede" data-l="zh">Claude Switch 盯着你每个账号的 5 小时与 7 天窗口。一旦某个账号见底，它把活儿交给余量最多的那个——Claude Code 不用重启，正在进行的会话继续往下写。</p>
+
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://github.com/nimeia/claude_switch/releases" target="_blank" rel="noopener">
+            <span data-l="en">Download for Windows</span><span data-l="zh">下载 Windows 版</span>
+          </a>
+          <a class="btn btn-ghost" href="https://github.com/nimeia/claude_switch" target="_blank" rel="noopener">
+            <span data-l="en">Read the source</span><span data-l="zh">阅读源码</span>
+          </a>
+        </div>
+        <p class="meta-line" data-l="en">v0.1.0 · one portable .exe · no .NET, no Rust, no installer · MIT</p>
+        <p class="meta-line" data-l="zh">v0.1.0 · 单个绿色 exe · 不装 .NET、不装 Rust、没有安装程序 · MIT</p>
+      </div>
+
+      <div class="plate">
+        <img class="shot only-light" src="assets/img/app-main-light.png" alt="The Claude Switch window: seven accounts, each with a 5-hour and 7-day meter, the automation panel above them and recent conversations below." width="1800" height="1389" loading="eager">
+        <img class="shot only-dark" src="assets/img/app-main-dark.png" alt="The same window in dark mode." width="1800" height="1189" loading="eager">
+      </div>
+    </div>
+  </div>
+
+  <!-- ── the switch ───────────────────────────────────────── -->
+  <section id="switch">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow" data-l="en">The switch</p>
+        <p class="eyebrow" data-l="zh">切换这件事</p>
+        <h2 data-l="en">A switch that lands on the session you are already in</h2>
+        <h2 data-l="zh">切换落在你正在用的那个会话上</h2>
+        <p class="lede" data-l="en">On Windows, Claude Code's credentials are files. Claude Switch takes its three locks, writes the new credentials and the matching <code>.claude.json</code>, and releases them. Your next message goes out on the new account.</p>
+        <p class="lede" data-l="zh">在 Windows 上，Claude Code 的凭据就是文件。Claude Switch 拿到三把锁，写入新的凭据和对应的 <code>.claude.json</code>，然后释放。你发出的下一条消息就走新账号了。</p>
+      </div>
+
+      <div class="compare">
+        <div class="pane">
+          <h3 data-l="en">Without it</h3>
+          <h3 data-l="zh">没有它的时候</h3>
+          <ol class="steps" data-l="en">
+            <li><span class="n">01</span><span>The 5-hour limit hits mid-task and Claude Code stops.</span></li>
+            <li><span class="n">02</span><span>Export credentials from the other account, swap the files.</span></li>
+            <li><span class="n">03</span><span>Restart Claude Code. Reopen the editor tabs.</span></li>
+            <li><span class="n">04</span><span>Re-explain where you were.</span></li>
+          </ol>
+          <ol class="steps" data-l="zh">
+            <li><span class="n">01</span><span>干到一半 5 小时限额到了，Claude Code 停住。</span></li>
+            <li><span class="n">02</span><span>去另一个账号导出凭据，手动换文件。</span></li>
+            <li><span class="n">03</span><span>重启 Claude Code，重新打开编辑器标签页。</span></li>
+            <li><span class="n">04</span><span>再把上下文讲一遍。</span></li>
+          </ol>
+        </div>
+        <div class="pane after">
+          <h3 data-l="en">With Claude Switch</h3>
+          <h3 data-l="zh">有 Claude Switch</h3>
+          <ol class="steps" data-l="en">
+            <li><span class="n">01</span><span>Usage crosses the threshold you set.</span></li>
+            <li><span class="n">02</span><span>It picks the healthiest account that can actually work.</span></li>
+            <li><span class="n">03</span><span>Credentials are swapped under a three-lock transaction.</span></li>
+            <li><span class="n">04</span><span>You keep typing.</span></li>
+          </ol>
+          <ol class="steps" data-l="zh">
+            <li><span class="n">01</span><span>用量越过你设的阈值。</span></li>
+            <li><span class="n">02</span><span>它挑一个真正还能干活、余量最多的账号。</span></li>
+            <li><span class="n">03</span><span>在三把锁的事务里换掉凭据。</span></li>
+            <li><span class="n">04</span><span>你继续打字。</span></li>
+          </ol>
+          <p class="kicker" data-l="en">No restart. No reopened tabs. The running session picks it up on the next message.</p>
+          <p class="kicker" data-l="zh">不重启、不重开标签页。正在跑的会话，下一条消息就生效。</p>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat">
+          <span class="v">5h · 7d</span>
+          <span class="k" data-l="en">Both windows, per account</span>
+          <span class="k" data-l="zh">每个账号的两个窗口</span>
+        </div>
+        <div class="stat">
+          <span class="v">0</span>
+          <span class="k" data-l="en">Network calls to read a plan</span>
+          <span class="k" data-l="zh">读取订阅信息的网络请求</span>
+        </div>
+        <div class="stat">
+          <span class="v">&lt;50ms</span>
+          <span class="k" data-l="en">Status-line render budget</span>
+          <span class="k" data-l="zh">状态栏渲染预算</span>
+        </div>
+        <div class="stat">
+          <span class="v">MIT</span>
+          <span class="k" data-l="en">Licence, Rust core + WinForms UI</span>
+          <span class="k" data-l="zh">许可证，Rust 内核 + WinForms 界面</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ── auto-switch ──────────────────────────────────────── -->
+  <section id="auto">
+    <div class="wrap split narrow-right">
+      <div class="col">
+        <p class="eyebrow" data-l="en">Auto-switch</p>
+        <p class="eyebrow" data-l="zh">自动切换</p>
+        <h2 data-l="en">It switches on a full window — and on a broken account</h2>
+        <h2 data-l="zh">窗口满了会切，账号坏了也会切</h2>
+        <p class="lede" data-l="en">A threshold alone would leave you stranded on an account whose login just died. Failover covers the cases a percentage never catches.</p>
+        <p class="lede" data-l="zh">只看百分比，是会把你困在一个刚刚掉登录的账号上的。故障转移接住的正是这些百分比看不见的情况。</p>
+        <ul class="claims">
+          <li data-l="en"><span><strong>Your threshold, either window.</strong> Default 90% of the 5-hour or the 7-day quota, whichever fills first.</span></li>
+          <li data-l="zh"><span><strong>你的阈值，两个窗口都算。</strong>默认 5 小时或 7 天用量达到 90%，谁先到算谁。</span></li>
+          <li data-l="en"><span><strong>Broken is a reason too.</strong> Dead login, gone subscription, empty slot — it moves on instead of waiting for a number.</span></li>
+          <li data-l="zh"><span><strong>「坏了」也是切换理由。</strong>登录失效、订阅没了、槽位是空的——它直接换，而不是干等一个数字。</span></li>
+          <li data-l="en"><span><strong>Only accounts with measured usage.</strong> A slot it cannot read is skipped, never ranked first as "100% free".</span></li>
+          <li data-l="zh"><span><strong>只切到量得出用量的账号。</strong>读不到的槽位会被跳过，绝不会因为「100% 空闲」而排到第一。</span></li>
+          <li data-l="en"><span><strong>Accounts with a live terminal are left alone.</strong> Their quota is already being spent by that terminal.</span></li>
+          <li data-l="zh"><span><strong>已经有终端在跑的账号会被让开。</strong>那个终端正在花它的额度。</span></li>
+        </ul>
+      </div>
+      <div class="col">
+        <figure>
+          <img class="shot-plain" src="assets/img/app-detail.png" alt="Account details: 5-hour quota 25% used with 75% left, 7-day quota 10% used, plan Pro, payment and subscription dates, all read from local files." width="496" height="681" loading="lazy">
+          <figcaption data-l="en">Plan, payment and subscription date come from that slot's own credentials and its <code>.claude.json</code> backup — read locally, no request goes out.</figcaption>
+          <figcaption data-l="zh">套餐、付款方式和订阅开始日期来自该槽位自己的凭据与 <code>.claude.json</code> 备份——本地读取，不发任何请求。</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ── parallel sessions ────────────────────────────────── -->
+  <section id="sessions">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow" data-l="en">Parallel sessions</p>
+        <p class="eyebrow" data-l="zh">并行会话</p>
+        <h2 data-l="en">Different accounts in different terminals, at the same time</h2>
+        <h2 data-l="zh">同一台机器，不同终端跑不同账号</h2>
+        <p class="lede" data-l="en">Right-click an account card, pick a directory, and a new terminal runs Claude Code logged into that account. Your default login, your other terminals and the VS Code extension carry on untouched.</p>
+        <p class="lede" data-l="zh">右键一张账号卡，选个目录，就会开出一个用该账号登录的 Claude Code 终端。默认登录、其它终端和 VS Code 插件完全不受影响。</p>
+      </div>
+
+      <figure class="diagram" style="margin-top:34px">
+        <svg viewBox="0 0 900 372" role="img" aria-label="Your own config in ~/.claude is re-synced into each per-account session profile at launch; each terminal is pointed at its profile with CLAUDE_CONFIG_DIR, while the default login stays where it is.">
+          <defs>
+            <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="currentColor"></path>
+            </marker>
+          </defs>
+
+          <!-- your config -->
+          <rect x="8" y="96" width="212" height="112" rx="10" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="24" y="124" font-family="IBM Plex Mono, monospace" font-size="12.5" fill="currentColor">~/.claude</text>
+          <text x="24" y="146" font-size="11.5" fill="currentColor" opacity=".78">settings.json · CLAUDE.md</text>
+          <text x="24" y="164" font-size="11.5" fill="currentColor" opacity=".78">skills/ · commands/ · agents/</text>
+          <text x="24" y="182" font-size="11.5" fill="currentColor" opacity=".78">user-level MCP servers</text>
+          <text x="24" y="86" font-size="11" fill="currentColor" data-l="en" opacity=".6" font-weight="600" letter-spacing="1">YOUR CONFIG — ONE COPY</text>
+          <text x="24" y="86" font-size="11" fill="currentColor" opacity=".6" font-weight="600" letter-spacing="1" data-l="zh">你的配置 — 只有一份</text>
+
+          <!-- arrows to profiles -->
+          <line x1="220" y1="132" x2="336" y2="78" stroke="currentColor" stroke-width="1.2" marker-end="url(#arw)"></line>
+          <line x1="220" y1="172" x2="336" y2="226" stroke="currentColor" stroke-width="1.2" marker-end="url(#arw)"></line>
+          <text x="232" y="160" font-size="11" fill="currentColor" data-l="en" opacity=".78">re-synced on every launch</text>
+          <text x="232" y="160" font-size="11" fill="currentColor" opacity=".78" data-l="zh">每次启动重新同步</text>
+
+          <!-- profiles -->
+          <rect x="340" y="40" width="238" height="84" rx="10" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="356" y="66" font-family="IBM Plex Mono, monospace" font-size="12" fill="currentColor">sessions/2-work/</text>
+          <text x="356" y="86" font-size="11.5" fill="currentColor" data-l="en" opacity=".78">credentials for #2 only</text>
+          <text x="356" y="86" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">只放 #2 的凭据</text>
+          <text x="356" y="104" font-size="11.5" fill="currentColor" data-l="en" opacity=".78">its own transcript history</text>
+          <text x="356" y="104" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">自己的会话历史</text>
+
+          <rect x="340" y="196" width="238" height="84" rx="10" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="356" y="222" font-family="IBM Plex Mono, monospace" font-size="12" fill="currentColor">sessions/3-ops/</text>
+          <text x="356" y="242" font-size="11.5" fill="currentColor" data-l="en" opacity=".78">credentials for #3 only</text>
+          <text x="356" y="242" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">只放 #3 的凭据</text>
+          <text x="356" y="260" font-size="11.5" fill="currentColor" data-l="en" opacity=".78">its own transcript history</text>
+          <text x="356" y="260" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">自己的会话历史</text>
+
+          <!-- arrows to terminals -->
+          <line x1="578" y1="82" x2="694" y2="82" stroke="#CE7049" stroke-width="1.4" marker-end="url(#arw)"></line>
+          <line x1="578" y1="238" x2="694" y2="238" stroke="#CE7049" stroke-width="1.4" marker-end="url(#arw)"></line>
+          <text x="580" y="72" font-family="IBM Plex Mono, monospace" font-size="10" fill="#CE7049">CLAUDE_CONFIG_DIR</text>
+          <text x="580" y="228" font-family="IBM Plex Mono, monospace" font-size="10" fill="#CE7049">CLAUDE_CONFIG_DIR</text>
+
+          <!-- terminals -->
+          <rect x="700" y="46" width="192" height="72" rx="10" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="716" y="72" font-size="12.5" fill="currentColor" font-weight="600">Terminal A</text>
+          <text x="716" y="94" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="currentColor" opacity=".78">#2 work · acme-api</text>
+
+          <rect x="700" y="202" width="192" height="72" rx="10" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+          <text x="716" y="228" font-size="12.5" fill="currentColor" font-weight="600">Terminal B</text>
+          <text x="716" y="250" font-family="IBM Plex Mono, monospace" font-size="11.5" fill="currentColor" opacity=".78">#3 ops · data-pipeline</text>
+
+          <!-- default login, untouched -->
+          <line x1="114" y1="208" x2="114" y2="296" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 4" marker-end="url(#arw)"></line>
+          <text x="126" y="254" font-size="11" fill="currentColor" data-l="en" opacity=".7">.credentials.json lives here too</text>
+          <text x="126" y="254" font-size="11" fill="currentColor" opacity=".7" data-l="zh">.credentials.json 也在这里</text>
+          <rect x="8" y="300" width="212" height="60" rx="10" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".65"></rect>
+          <text x="24" y="324" font-size="12" fill="currentColor" data-l="en">Default login</text>
+          <text x="24" y="324" font-size="12" fill="currentColor" data-l="zh">默认登录</text>
+          <text x="24" y="344" font-size="11.5" fill="currentColor" data-l="en" opacity=".78">VS Code, plain `claude`</text>
+          <text x="24" y="344" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">VS Code、直接敲 claude</text>
+          <text x="238" y="330" font-size="11.5" fill="currentColor" data-l="en" opacity=".78">a per-account terminal changes nothing here</text>
+          <text x="238" y="330" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">按账号开的终端不会动它</text>
+        </svg>
+        <figcaption data-l="en">One config, many logins: the profile holds credentials and history, your own settings are copied in at launch, and nothing about the default login moves.</figcaption>
+        <figcaption data-l="zh">一份配置，多个登录：会话配置目录只放凭据和历史，你自己的设置在启动时同步进去，默认登录一动不动。</figcaption>
+      </figure>
+
+      <div class="split" style="margin-top:44px">
+        <div class="col">
+          <ul class="claims">
+            <li data-l="en"><span><strong>Bind a directory to an account.</strong> Opening that folder — from Resume or from Directories — uses it automatically. Subfolders inherit the nearest binding.</span></li>
+            <li data-l="zh"><span><strong>把目录绑定到账号。</strong>从「继续会话」或「目录」里打开这个文件夹时，自动用那个账号。子目录继承最近的绑定。</span></li>
+            <li data-l="en"><span><strong>Your config is shared, not forked.</strong> <code>settings.json</code>, <code>CLAUDE.md</code>, skills, commands, agents and user-level MCP servers re-sync from <code>~/.claude</code> on every start — edit them there.</span></li>
+            <li data-l="zh"><span><strong>配置是共享的，不是分叉。</strong><code>settings.json</code>、<code>CLAUDE.md</code>、skills、commands、agents 和用户级 MCP 服务器每次启动都从 <code>~/.claude</code> 重新同步——要改就改那里。</span></li>
+            <li data-l="en"><span><strong>History is merged, never copied.</strong> Copying transcripts would fork them; instead every view scans all profiles and shows each directory once.</span></li>
+            <li data-l="zh"><span><strong>历史是合并展示，不做复制。</strong>复制会话记录等于把历史分叉；所以各个视图扫描全部配置目录，每个目录只出现一次。</span></li>
+          </ul>
+        </div>
+        <div class="col">
+          <figure>
+            <img class="shot-plain" src="assets/img/app-directories.png" alt="Directories and sessions: seven directories with their bound account, session count, last active time and size, next to the session list for the selected directory." width="1680" height="979" loading="lazy">
+            <figcaption data-l="en">Directories and sessions, merged across every profile. Demo data.</figcaption>
+            <figcaption data-l="zh">「目录与会话」窗口，跨全部配置目录合并。图为演示数据。</figcaption>
+          </figure>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── status line band ─────────────────────────────────── -->
+  <section id="statusline" class="band">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow" style="color:#8C8478" data-l="en">Terminal status line</p>
+        <p class="eyebrow" style="color:#8C8478" data-l="zh">终端状态栏</p>
+        <h2 data-l="en">Which account is this terminal on?</h2>
+        <h2 data-l="zh">这个终端，现在跑在哪个账号上？</h2>
+        <p class="lede" data-l="en">The one thing Claude Code's own status line cannot answer. A line at the bottom of every terminal, from a checkbox — three presets, no widget editor.</p>
+        <p class="lede" data-l="zh">这正是 Claude Code 自带状态栏答不上来的问题。一个复选框，就在每个终端底部多出一行——三档预设，没有第四个旋钮。</p>
+      </div>
+      <div class="terminal-block">
+        <div class="preset-tabs" role="tablist" aria-label="Status line presets">
+          <button class="tab" type="button" role="tab" data-preset="lean" aria-selected="false">Lean</button>
+          <button class="tab" type="button" role="tab" data-preset="standard" aria-selected="true">Standard</button>
+          <button class="tab" type="button" role="tab" data-preset="full" aria-selected="false">Full</button>
+        </div>
+        <div class="terminal">
+          <div class="terminal-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span style="margin-left:6px">acme-api — claude</span></div>
+          <div class="terminal-body">
+<pre id="sl-lean" hidden><span class="muted">&gt;</span> add pagination to the orders endpoint
+<span class="muted">⏺ working…</span>
+
+<span class="c">#2 work</span> · 5h <span class="g">38%</span> · Sonnet 5 high</pre>
+<pre id="sl-standard"><span class="muted">&gt;</span> add pagination to the orders endpoint
+<span class="muted">⏺ working…</span>
+
+<span class="c">#2 work</span> · 5h <span class="g">████</span><span class="muted">░░░░░░</span> 38% · 7d 12% · ctx 24% · Sonnet 5 high · my-project (main)</pre>
+<pre id="sl-full" hidden><span class="muted">&gt;</span> add pagination to the orders endpoint
+<span class="muted">⏺ working…</span>
+
+<span class="c">#2 work</span> · 5h <span class="g">████</span><span class="muted">░░░░░░</span> 38% · 7d 12% · ctx 24% · Sonnet 5 high · my-project (main)
+5h resets 14:30 · 7d resets Fri 09:00 · spare <span class="c">#3 ops</span> <span class="g">8%</span> · auto 90% · $1.24 42m</pre>
+          </div>
+        </div>
+        <p class="band-note" data-l="en">Model, thinking effort, context and cost come from Claude Code's own payload; the account, the windows and the spare come from Claude Switch. <a href="https://github.com/nimeia/claude_switch/blob/master/docs/statusline.md" target="_blank" rel="noopener">Data sources →</a></p>
+        <p class="band-note" data-l="zh">模型、思考强度、上下文和花费来自 Claude Code 自己的数据；账号、窗口和备用账号来自 Claude Switch。<a href="https://github.com/nimeia/claude_switch/blob/master/docs/statusline.md" target="_blank" rel="noopener">数据来源 →</a></p>
+      </div>
+      <ul class="claims band-claims">
+        <li data-l="en"><span><strong>No Node, no runtime.</strong> A ~750 KB native binary that reads three local files and exits. No network, no <code>git</code> subprocess.</span></li>
+          <li data-l="zh"><span><strong>不需要 Node，不需要运行时。</strong>一个约 750 KB 的原生程序，读三个本地文件然后退出。不联网，不跑 <code>git</code> 子进程。</span></li>
+          <li data-l="en"><span><strong>Per terminal, not per machine.</strong> A terminal opened for one account names <em>that</em> account, not the default login.</span></li>
+          <li data-l="zh"><span><strong>按终端，不按机器。</strong>为某个账号开的终端，显示的就是<em>那个</em>账号，而不是默认登录。</span></li>
+          <li data-l="en"><span><strong>Your <code>settings.json</code> is respected.</strong> Only the <code>statusLine</code> key is merged in; a file that does not parse is left alone, and another status line is never replaced without asking.</span></li>
+          <li data-l="zh"><span><strong>尊重你的 <code>settings.json</code>。</strong>只合并 <code>statusLine</code> 这一个键；解析不了的文件原样不动；已有的其它状态栏，不问过你绝不替换。</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ── conversations ────────────────────────────────────── -->
+  <section id="history">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow" data-l="en">Conversations</p>
+        <p class="eyebrow" data-l="zh">会话</p>
+        <h2 data-l="en">One step back into the last conversation</h2>
+        <h2 data-l="zh">一步回到上一次的对话</h2>
+        <p class="lede" data-l="en">The toolbar dropdown and the tray menu list recent sessions per directory. The full window searches every conversation on the machine, whichever account happened to run it.</p>
+        <p class="lede" data-l="zh">工具栏下拉和托盘菜单按目录列出最近会话。完整窗口则搜索这台机器上的全部对话——不管当时是哪个账号跑的。</p>
+      </div>
+      <div class="plate">
+        <img class="shot" src="assets/img/app-conversations.png" alt="All conversations: session titles taken from the first prompt, the directory, the account that ran it, last updated time and size." width="1620" height="979" loading="lazy">
+      </div>
+      <div class="split" style="margin-top:40px">
+        <div class="col">
+          <ul class="claims">
+            <li data-l="en"><span><strong>Resume runs <code>claude</code> directly.</strong> Not through <code>cmd</code>, so the window is your default terminal app and closes cleanly when Claude exits.</span></li>
+            <li data-l="zh"><span><strong>「继续」直接运行 <code>claude</code>。</strong>不经过 <code>cmd</code>，所以窗口就是你设定的默认终端，Claude 退出时窗口干净地关掉。</span></li>
+            <li data-l="en"><span><strong>Directories are account-agnostic.</strong> Claude Code does not record which account owned a conversation — the Account column is the binding you set, not a guess.</span></li>
+            <li data-l="zh"><span><strong>目录本身与账号无关。</strong>Claude Code 不记录一段对话属于哪个账号——「账号」列是你设的绑定，不是推测。</span></li>
+          </ul>
+        </div>
+        <div class="col">
+          <ul class="claims">
+            <li data-l="en"><span><strong>Token counts are computed on demand.</strong> Reading every transcript takes a few hundred milliseconds; nothing leaves the machine.</span></li>
+            <li data-l="zh"><span><strong>token 统计按需计算。</strong>读完全部会话记录通常几百毫秒；没有任何数据离开这台机器。</span></li>
+            <li data-l="en"><span><strong>Clean-up is explicit.</strong> Old conversations, empty directories and their spilled files are removed only when you ask.</span></li>
+            <li data-l="zh"><span><strong>清理是显式的。</strong>旧对话、空目录和它们散落的文件，只在你要求时才删。</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ── overview ─────────────────────────────────────────── -->
+  <section id="overview">
+    <div class="wrap split narrow-right">
+      <div class="col">
+        <p class="eyebrow" data-l="en">Usage overview</p>
+        <p class="eyebrow" data-l="zh">使用总览</p>
+        <h2 data-l="en">What you actually did in Claude Code</h2>
+        <h2 data-l="zh">你到底用 Claude Code 干了多少活</h2>
+        <p class="lede" data-l="en">Output tokens, an activity calendar, a bar per project and your longest streak — read from the transcripts already on your disk, across every account.</p>
+        <p class="lede" data-l="zh">输出 token、活跃日历、每个项目一根柱子、最长连续天数——全部来自你磁盘上已有的会话记录，跨所有账号。</p>
+        <ul class="claims">
+          <li data-l="en"><span><strong>Cache tokens are left out of the charts</strong> on purpose: they are hundreds of times larger and would swamp everything else.</span></li>
+          <li data-l="zh"><span><strong>图表刻意不算缓存 token</strong>：它们比别的大上百倍，画进去别的就全没了。</span></li>
+          <li data-l="en"><span><strong>Per directory too.</strong> Questions per day and output per session, for one project.</span></li>
+          <li data-l="zh"><span><strong>也能按目录看。</strong>某个项目的每日提问数和每次会话的输出量。</span></li>
+        </ul>
+      </div>
+      <div class="col">
+        <figure>
+          <img class="shot-plain" src="assets/img/app-overview.png" alt="Usage overview: 1.3M output tokens, 7 projects, 95 sessions, 429 questions, a 6-day streak, an activity calendar and output tokens per project." width="1410" height="1069" loading="lazy">
+          <figcaption data-l="en">Demo data from the app's own <code>--fixture</code> mode.</figcaption>
+          <figcaption data-l="zh">图中为应用自带 <code>--fixture</code> 演示数据。</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ── languages / themes ───────────────────────────────── -->
+  <section id="ui">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow" data-l="en">Interface</p>
+        <p class="eyebrow" data-l="zh">界面</p>
+        <h2 data-l="en">English or 简体中文, light or dark, without a restart</h2>
+        <h2 data-l="zh">中英文、浅色深色，切换都不用重启</h2>
+        <p class="lede" data-l="en">The main window, the cards and the status bar re-label themselves immediately; other windows pick the language up the next time they open. First launch follows the system language; after that, your choice is remembered.</p>
+        <p class="lede" data-l="zh">主窗口、卡片和状态栏立刻改写文案；其它窗口下次打开时跟上。首次启动跟随系统语言，之后记住你的选择。</p>
+      </div>
+      <div class="plate">
+        <img class="shot" src="assets/img/app-main-zh.png" alt="The same main window in Simplified Chinese: account cards, automation settings and the activity strip." width="1800" height="1389" loading="lazy">
+        <figcaption data-l="en">Catalogs are one JSON per language, embedded in the binary; a test refuses a catalog that is missing a key or a placeholder, so half-translated UI cannot ship.</figcaption>
+        <figcaption data-l="zh">每种语言一个 JSON 词表，内嵌在程序里；测试会拒绝缺键或占位符不对的词表，半截翻译发不出去。</figcaption>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── install ──────────────────────────────────────────── -->
+  <section id="install">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow" data-l="en">Install</p>
+        <p class="eyebrow" data-l="zh">安装</p>
+        <h2 data-l="en">There is no installer</h2>
+        <h2 data-l="zh">它没有安装程序</h2>
+        <p class="lede" data-l="en">A portable executable: no registry writes, no admin rights. Put it anywhere; delete it to uninstall. Launch-at-login is a checkbox in the app.</p>
+        <p class="lede" data-l="zh">一个绿色可执行文件：不写注册表，不要管理员权限。放哪儿都行，删掉就算卸载。开机自启是应用里的一个复选框。</p>
+      </div>
+
+      <div class="downloads">
+        <div class="dl primary">
+          <span class="tag" data-l="en">Recommended</span>
+          <span class="tag" data-l="zh">推荐</span>
+          <span class="file">ClaudeSwitch-0.1.0-win-x64.zip</span>
+          <span class="why" data-l="en">Unzip and run. Includes quick-start notes and the licence, and browsers warn less on a zip than on a bare exe.</span>
+          <span class="why" data-l="zh">解压即用。里面带快速上手说明和许可证；浏览器对 zip 的警告也比对裸 exe 少。</span>
+          <a class="btn btn-primary" href="https://github.com/nimeia/claude_switch/releases" target="_blank" rel="noopener" style="align-self:flex-start">
+            <span data-l="en">Get it from Releases</span><span data-l="zh">去 Releases 下载</span>
+          </a>
+        </div>
+        <div class="dl">
+          <span class="file">ClaudeSwitch-0.1.0-win-x64.exe</span>
+          <span class="why" data-l="en">Just the program. Same build as the zip — one file, ~70 MB, self-contained.</span>
+          <span class="why" data-l="zh">只有程序本体。和 zip 里是同一个构建——单文件，约 70 MB，自带运行时。</span>
+          <a class="btn btn-ghost" href="https://github.com/nimeia/claude_switch/releases" target="_blank" rel="noopener" style="align-self:flex-start">
+            <span data-l="en">Get it from Releases</span><span data-l="zh">去 Releases 下载</span>
+          </a>
+        </div>
+      </div>
+
+      <div class="notes">
+        <p data-l="en"><b>Windows SmartScreen will warn on first run.</b> This program is not code-signed — a certificate costs hundreds of dollars a year and has not been bought. Click <b>More info</b> → <b>Run anyway</b>. Files extracted from the zip carry the Mark of the Web too, so the zip does not skip that prompt.</p>
+        <p data-l="zh"><b>首次运行时 Windows SmartScreen 会拦一下。</b>程序没有做代码签名——证书一年要几百美元，暂时没买。点<b>「更多信息」→「仍要运行」</b>。从 zip 解压出来的文件同样带 Mark of the Web，所以 zip 也绕不开这个提示。</p>
+        <p data-l="en"><b>One exception to "no install":</b> the .NET single-file bundle unpacks its runtime to <code>%TEMP%\.net\ClaudeSwitch\</code> on first launch. That is normal .NET behaviour, not an installation.</p>
+        <p data-l="zh"><b>「不安装」的唯一例外：</b>.NET 单文件包会在首次启动时把运行时解压到 <code>%TEMP%\.net\ClaudeSwitch\</code>。这是 .NET 的正常行为，不是安装。</p>
+        <p data-l="en">Releases ship SHA256 checksums, so you can check what you downloaded:</p>
+        <p data-l="zh">Release 里附了 SHA256 校验值，可以核对下载到的文件：</p>
+        <pre class="code">Get-FileHash ClaudeSwitch.exe -Algorithm SHA256</pre>
+        <p data-l="en">Or build it yourself — these are the same steps CI runs. The native engine has to be built first, or the publish fails hard instead of shipping a binary that dies on launch.</p>
+        <p data-l="zh">或者自己从源码构建——CI 跑的就是这几步。必须先构建原生引擎，否则发布会直接失败，而不是产出一个一启动就死的程序。</p>
+        <pre class="code"><span class="cm"># Rust 1.80+ and the .NET 8 SDK</span>
+cargo build -p claude-switch-ffi --release
+dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
+  -c Release -p:PublishSingleFileBundle=true -o dist</pre>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ── data ─────────────────────────────────────────────── -->
+  <section id="data">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow" data-l="en">Where your data lives</p>
+        <p class="eyebrow" data-l="zh">数据放在哪里</p>
+        <h2 data-l="en">Local files you can read, and one file of Claude Code's it touches</h2>
+        <h2 data-l="zh">全是你能自己打开的本地文件；只动 Claude Code 的一个键</h2>
+        <p class="lede" data-l="en">Usage figures are fetched per account with that account's own token — expired ones are refreshed first, and the token of the account you are logged in as is never rotated, because that would kick your live session. Requests honour <code>HTTPS_PROXY</code>, <code>ALL_PROXY</code> and <code>NO_PROXY</code>, and on Windows the system proxy settings as well.</p>
+        <p class="lede" data-l="zh">用量是用每个账号自己的 token 各自拉取的——过期的会先刷新，而当前登录中的那个账号的 token 永远不轮换，否则会把你正在跑的会话踢掉。请求遵循 <code>HTTPS_PROXY</code>、<code>ALL_PROXY</code>、<code>NO_PROXY</code>，在 Windows 上还会读系统代理设置。</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th data-l="en">Location</th><th data-l="zh">位置</th>
+              <th data-l="en">Contents</th><th data-l="zh">内容</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>~/.claude-swap-backup/credentials/</td>
+                <td data-l="en">Per-slot credentials (encrypted)</td><td data-l="zh">每个槽位的凭据（加密）</td></tr>
+            <tr><td>~/.claude-swap-backup/configs/</td>
+                <td data-l="en">Per-slot <code>.claude.json</code> snapshots</td><td data-l="zh">每个槽位的 <code>.claude.json</code> 快照</td></tr>
+            <tr><td>~/.claude-swap-backup/sessions/</td>
+                <td data-l="en">Per-account session profiles, each with its own history</td><td data-l="zh">每个账号的会话配置目录，各自带历史</td></tr>
+            <tr><td>~/.claude-swap-backup/mappings.json</td>
+                <td data-l="en">Directory → account bindings (machine-local)</td><td data-l="zh">目录 → 账号的绑定（只在本机）</td></tr>
+            <tr><td>~/.claude-swap-backup/bin/</td>
+                <td data-l="en">The status-line renderer, written when you turn that on</td><td data-l="zh">状态栏渲染程序，开启该功能时写入</td></tr>
+            <tr><td>~/.claude/settings.json</td>
+                <td data-l="en">Claude Code's own file — only its <code>statusLine</code> key is ever touched, and a copy is kept as <code>settings.json.cswitch-bak</code></td>
+                <td data-l="zh">Claude Code 自己的文件——只动 <code>statusLine</code> 这一个键，并留一份 <code>settings.json.cswitch-bak</code> 备份</td></tr>
+            <tr><td>%LOCALAPPDATA%\ClaudeSwitch\</td>
+                <td data-l="en">UI preferences: theme, language, hide-email</td><td data-l="zh">界面偏好：主题、语言、是否隐藏邮箱</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="serif-note" style="margin-top:22px" data-l="en">The layout is compatible with <a href="https://github.com/realiti4/claude-swap" target="_blank" rel="noopener">claude-swap</a>, the Python CLI whose behaviour this follows — both can share one backup tree.</p>
+      <p class="serif-note" style="margin-top:22px" data-l="zh">目录结构与 <a href="https://github.com/realiti4/claude-swap" target="_blank" rel="noopener">claude-swap</a>（本项目行为所遵循的 Python CLI）兼容——两者可以共用同一份备份目录。</p>
+    </div>
+  </section>
+
+  <!-- ── closing cta ──────────────────────────────────────── -->
+  <section id="get" style="padding-top:0">
+    <div class="wrap">
+      <div class="pane after" style="align-items:flex-start;gap:18px;padding:clamp(26px,4vw,44px)">
+        <h2 data-l="en">Stop babysitting the limit</h2>
+        <h2 data-l="zh">别再盯着额度了</h2>
+        <p class="lede" data-l="en">Download it, add the accounts you already have, tick Auto-switch. That is the whole setup.</p>
+        <p class="lede" data-l="zh">下载，把你已有的账号加进去，勾上「自动切换」。设置到此为止。</p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://github.com/nimeia/claude_switch/releases" target="_blank" rel="noopener">
+            <span data-l="en">Download for Windows</span><span data-l="zh">下载 Windows 版</span>
+          </a>
+          <a class="btn btn-ghost" href="https://github.com/nimeia/claude_switch#readme" target="_blank" rel="noopener">
+            <span data-l="en">Read the docs</span><span data-l="zh">查看文档</span>
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-links">
+      <a href="https://github.com/nimeia/claude_switch" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/nimeia/claude_switch/releases" target="_blank" rel="noopener"><span data-l="en">Releases</span><span data-l="zh">下载</span></a>
+      <a href="https://github.com/nimeia/claude_switch/blob/master/docs/statusline.md" target="_blank" rel="noopener"><span data-l="en">Status line docs</span><span data-l="zh">状态栏文档</span></a>
+      <a href="https://github.com/realiti4/claude-swap" target="_blank" rel="noopener">claude-swap</a>
+    </div>
+    <p data-l="en">Claude Switch is free software under the MIT licence. Screenshots on this page come from the app's built-in demo data.</p>
+    <p data-l="zh">Claude Switch 是 MIT 许可下的自由软件。本页截图均来自应用内置的演示数据。</p>
+    <p class="disclaimer" data-l="en">An independent, community-built tool. Not affiliated with, sponsored by, or endorsed by Anthropic. “Claude” and “Claude Code” are Anthropic's trademarks, used here only to say what this tool works with.</p>
+    <p class="disclaimer" data-l="zh">这是一个独立的社区工具，与 Anthropic 无任何隶属、赞助或背书关系。“Claude”“Claude Code” 是 Anthropic 的商标，此处仅用于说明本工具的适用对象。</p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement;
+
+  /* ── theme ─────────────────────────────────────────────── */
+  var themeBtn = document.getElementById('theme-toggle');
+  function prefersDark() {
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+  function isDark() {
+    var t = root.getAttribute('data-theme');
+    return t ? t === 'dark' : prefersDark();
+  }
+  function paintThemeBtn() {
+    themeBtn.textContent = isDark() ? 'Light' : 'Dark';
+  }
+  try {
+    var savedTheme = localStorage.getItem('cs-theme');
+    if (savedTheme === 'dark' || savedTheme === 'light') root.setAttribute('data-theme', savedTheme);
+  } catch (e) {}
+  paintThemeBtn();
+  themeBtn.addEventListener('click', function () {
+    var next = isDark() ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('cs-theme', next); } catch (e) {}
+    paintThemeBtn();
+  });
+
+  /* ── language ──────────────────────────────────────────── */
+  var langBtn = document.getElementById('lang-toggle');
+  function setLang(lang) {
+    root.setAttribute('data-lang', lang);
+    root.setAttribute('lang', lang === 'zh' ? 'zh-Hans' : 'en');
+    langBtn.textContent = lang === 'zh' ? 'English' : '中文';
+  }
+  var lang = null;
+  try { lang = localStorage.getItem('cs-lang'); } catch (e) {}
+  if (lang !== 'zh' && lang !== 'en') {
+    lang = (navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
+  }
+  setLang(lang);
+  langBtn.addEventListener('click', function () {
+    var next = root.getAttribute('data-lang') === 'zh' ? 'en' : 'zh';
+    setLang(next);
+    try { localStorage.setItem('cs-lang', next); } catch (e) {}
+  });
+
+  /* ── status-line presets ───────────────────────────────── */
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+  tabs.forEach(function (tab) {
+    tab.addEventListener('click', function () {
+      tabs.forEach(function (t) {
+        var on = t === tab;
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+        document.getElementById('sl-' + t.dataset.preset).hidden = !on;
+      });
+    });
+  });
+
+  /* ── screenshot lightbox ───────────────────────────────── */
+  var box = null;
+  function close() {
+    if (box) { box.remove(); box = null; document.removeEventListener('keydown', onKey); }
+  }
+  function onKey(e) { if (e.key === 'Escape') close(); }
+  document.addEventListener('click', function (e) {
+    var img = e.target.closest ? e.target.closest('.shot, .shot-plain') : null;
+    if (!img) return;
+    close();
+    box = document.createElement('div');
+    box.className = 'lightbox';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-label', img.alt || 'Screenshot');
+    var big = document.createElement('img');
+    big.src = img.currentSrc || img.src;
+    big.alt = img.alt;
+    box.appendChild(big);
+    box.addEventListener('click', close);
+    document.body.appendChild(box);
+    document.addEventListener('keydown', onKey);
+  });
+})();
+</script>
+
+</body>
+</html>
