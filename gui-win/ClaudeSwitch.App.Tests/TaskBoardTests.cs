@@ -316,7 +316,7 @@ public class TaskBoardTests : IDisposable
         // list meant for searching and clearing out does not belong between the
         // account cards, paging.
         int opened = 0;
-        using var board = new TaskBoard(_ => "recent", () => false, _ => { }, () => opened++, "all");
+        using var board = new TaskBoard(_ => "recent", () => false, _ => { }, () => opened++, () => "all");
         board.Show(Many(TaskBoard.PageSize + 2));
         Assert.True(board.SeeAllShownForTest);
 
@@ -332,7 +332,7 @@ public class TaskBoardTests : IDisposable
     {
         // The window holds more than the band loaded, so the link is not only
         // for when rows are hidden here — but a band with nothing hides it.
-        using var board = new TaskBoard(_ => "recent", () => false, _ => { }, () => { }, "all");
+        using var board = new TaskBoard(_ => "recent", () => false, _ => { }, () => { }, () => "all");
         board.Show([Entry(TaskState.Updated, "one")]);
         Assert.True(board.SeeAllShownForTest);
 
@@ -345,7 +345,7 @@ public class TaskBoardTests : IDisposable
     {
         // The recent band refreshes on a timer. Re-creating every row for a new
         // "5 minutes ago" made the whole list blink.
-        using var board = new TaskBoard(_ => "recent", () => false, _ => { }, () => { }, "all");
+        using var board = new TaskBoard(_ => "recent", () => false, _ => { }, () => { }, () => "all");
         board.Show(Many(2));
         var before = board.RowsForTest.ToList();
 
@@ -366,7 +366,7 @@ public class TaskBoardTests : IDisposable
     [Fact]
     public void A_row_whose_actions_change_is_rebuilt()
     {
-        using var board = new TaskBoard(_ => "recent", () => false, _ => { }, () => { }, "all");
+        using var board = new TaskBoard(_ => "recent", () => false, _ => { }, () => { }, () => "all");
         board.Show([Entry(TaskState.Interrupted, "one", () => { })]);
         var before = board.RowsForTest[0];
 

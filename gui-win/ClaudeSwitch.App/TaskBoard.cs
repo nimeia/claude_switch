@@ -608,7 +608,7 @@ internal sealed class TaskBoard : Panel
     private readonly Action? _openAll;
 
     /// <summary>What the link reads when it opens a window.</summary>
-    private readonly string? _openAllText;
+    private readonly Func<string>? _openAllText;
 
     private int _page;
 
@@ -685,13 +685,16 @@ internal sealed class TaskBoard : Panel
     /// search, sort and clear out does not fit between the account cards, so a
     /// band given one never expands or pages.
     /// </param>
-    /// <param name="openAllText">The link's wording when it opens a window.</param>
+    /// <param name="openAllText">
+    /// The link's wording when it opens a window. Read on every render rather
+    /// than captured, so a language change reaches it.
+    /// </param>
     internal TaskBoard(
         Func<IReadOnlyList<TaskEntry>, string>? summary,
         Func<bool> loadExpanded,
         Action<bool> saveExpanded,
         Action? openAll = null,
-        string? openAllText = null)
+        Func<string>? openAllText = null)
     {
         _summaryText = summary ?? SummaryText;
         _saveExpanded = saveExpanded;
@@ -730,6 +733,7 @@ internal sealed class TaskBoard : Panel
 
         _prev = new LinkLabel { AutoSize = true, Font = Theme.FontSmall, Text = Loc.T("board.page.prev") };
         _next = new LinkLabel { AutoSize = true, Font = Theme.FontSmall, Text = Loc.T("board.page.next") };
+
         _pageLabel = new Label
         {
             AutoSize = true,
@@ -825,6 +829,9 @@ internal sealed class TaskBoard : Panel
     /// <summary>Whether the link was put on the band; a control off screen always reads invisible.</summary>
     internal bool SeeAllShownForTest { get; private set; }
 
+    /// <summary>The link's current wording, so a test can watch it re-label.</summary>
+    internal string SeeAllTextForTest => _seeAll.Text;
+
     /// <summary>
     /// Cap the rows shown, so the band always fits the room it is given.
     /// </summary>
@@ -857,6 +864,21 @@ internal sealed class TaskBoard : Panel
     }
 
     /// <summary>Repaint the board from the current set of tasks.</summary>
+    /// <summary>
+    /// Re-label the band after a language change, rows included.
+    /// </summary>
+    /// <remarks>
+    /// The pager links are labelled once at construction; everything else is
+    /// composed per render, so replaying the last entries is what carries the
+    /// new language into the rows without waiting for the next refresh.
+    /// </remarks>
+    public void ApplyTexts()
+    {
+        _prev.Text = Loc.T("board.page.prev");
+        _next.Text = Loc.T("board.page.next");
+        Show(_entries);
+    }
+
     public void Show(IReadOnlyList<TaskEntry> entries)
     {
         _entries = entries;
@@ -912,11 +934,12 @@ internal sealed class TaskBoard : Panel
         bool linkShown = _openAll is not null ? entries.Count > 0 : canCollapse;
         _seeAll.Visible = linkShown;
         SeeAllShownForTest = linkShown;
+        // Set below; read back so a test can prove the wording follows Loc.
         _seeAll.Text = _openAll is not null
             // The window holds every conversation, not just the rows loaded
             // here: the link shows whenever there is anything, and carries no
             // count that would undersell it.
-            ? _openAllText ?? Loc.T("board.seeAll")
+            ? _openAllText?.Invoke() ?? Loc.T("board.seeAll")
             : showAll
                 ? Loc.T("board.seeAll.collapse")
                 : Loc.T("board.seeAll.count", entries.Count);

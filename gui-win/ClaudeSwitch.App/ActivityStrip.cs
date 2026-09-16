@@ -18,7 +18,12 @@ internal sealed class ActivityStrip : Panel
     private bool _loaded;
     /// <summary>Last rendered summary, kept so a language change can re-render
     /// it without re-running the scan.</summary>
-    private string _summaryText = "";
+    /// <summary>
+    /// The figures behind the summary sentence, not the sentence itself: a
+    /// language change has to recompose it, and re-scanning transcripts to do
+    /// that would be absurd.
+    /// </summary>
+    private (string Tokens, long Sessions, long Projects, long Streak)? _summaryParts;
 
     /// <summary>Raised when the strip is clicked — the host opens the full view.</summary>
     public event EventHandler? OpenRequested;
@@ -155,6 +160,9 @@ internal sealed class ActivityStrip : Panel
     /// <summary>Whether real figures have landed, for the layout probe.</summary>
     internal bool LoadedForProbe => _loaded;
 
+    /// <summary>The summary sentence as drawn, for the retranslation test.</summary>
+    internal string SummaryForTest => _summary.Text;
+
     public void Apply(JsonNode? stats)
     {
         _loaded = true;
@@ -192,11 +200,10 @@ internal sealed class ActivityStrip : Panel
         _heatmap.SetPoints(cells);
         _hint.Visible = true;
 
-        _summaryText = Loc.T(
-            "strip.summary",
+        _summaryParts = (
             Compact(Num("outputTokens")), Num("sessions"),
             Num("projects"), Num("longestStreak"));
-        _summary.Text = _summaryText;
+        _summary.Text = SummarySentence();
 
         SyncHeight();
     }
@@ -211,8 +218,13 @@ internal sealed class ActivityStrip : Panel
     public void ApplyTexts()
     {
         _hint.Text = Loc.T("strip.open");
-        _summary.Text = _loaded ? _summaryText : Loc.T("strip.loading");
+        _summary.Text = _loaded ? SummarySentence() : Loc.T("strip.loading");
     }
+
+    private string SummarySentence() =>
+        _summaryParts is { } p
+            ? Loc.T("strip.summary", p.Tokens, p.Sessions, p.Projects, p.Streak)
+            : Loc.T("strip.loading");
 
     private static string Compact(long n) =>
         n >= 1_000_000 ? $"{n / 1_000_000.0:0.#}M"

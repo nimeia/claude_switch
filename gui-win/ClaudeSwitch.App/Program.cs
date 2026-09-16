@@ -1020,7 +1020,7 @@ sealed class MainForm : Form
         // "See all" opens the conversations window: the whole list is somewhere
         // to search, sort and clear out, which does not fit between the cards.
         _recentBoard = new TaskBoard(
-            RecentSummary, () => false, _ => { }, ShowSessionsWindow, Loc.T("recent.seeAll"))
+            RecentSummary, () => false, _ => { }, ShowSessionsWindow, () => Loc.T("recent.seeAll"))
         {
             Dock = DockStyle.Bottom,
             Visible = false,
@@ -1574,6 +1574,11 @@ sealed class MainForm : Form
         _btnOverview.ToolTipText = Loc.T("toolbar.overview.tip");
         _btnTheme.Text = ThemeToggleText();
         _btnTheme.ToolTipText = Loc.T("toolbar.theme.tip");
+        // Both of these carry live state in their label, so they are written by
+        // their own updaters rather than here — call those instead of a literal.
+        _btnRuns.ToolTipText = Loc.T("toolbar.runs.tip");
+        UpdateRunsButton();
+        UpdateSwitchEnabled();
         _search.ToolTipText = Loc.T("toolbar.search.tip");
         SearchBox.AttachCueBanner(_search.TextBox, SearchHint);
 
@@ -1599,6 +1604,13 @@ sealed class MainForm : Form
         // previous language would otherwise sit there until the next poll.
         _baseStatus = "";
         _activityStrip.ApplyTexts();
+        _taskBoard?.ApplyTexts();
+        _recentBoard.ApplyTexts();
+        // Built once at startup, and the tray is where someone looks when the
+        // window is closed — the one surface a stale language would outlive.
+        var staleTrayMenu = _tray.ContextMenuStrip;
+        _tray.ContextMenuStrip = BuildTrayMenu();
+        staleTrayMenu?.Dispose();
         // Card geometry is measured from translated labels, so the cache from
         // the previous language would size the meter column wrong.
         AccountCard.InvalidateMetrics();
