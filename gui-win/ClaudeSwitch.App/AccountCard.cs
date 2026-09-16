@@ -167,6 +167,8 @@ internal sealed class AccountCard : Control
 
     private static int s_row1H;
     private static int s_row2H;
+    /// <summary>Third meter row: when each window resets.</summary>
+    private static int s_row3H;
     private static int s_cardH;
     private static int s_statusW;
     private static int s_meterValueW;
@@ -304,7 +306,9 @@ internal sealed class AccountCard : Control
         s_meterValueW = Math.Max(
             Sc(52), TextW(Loc.T("usage.remain", "100"), Theme.FontSmall) + Sc(4));
 
-        s_cardH = Math.Max(Sc(62), s_row1H + Sc(3) + s_row2H + Sc(PadY) * 2);
+        s_row3H = Math.Max(Sc(14), Theme.FontSmall.Height + Sc(1));
+        s_cardH = Math.Max(
+            Sc(62), s_row1H + Sc(3) + s_row2H + Sc(2) + s_row3H + Sc(PadY) * 2);
         s_metricsReady = true;
     }
 
@@ -687,6 +691,12 @@ internal sealed class AccountCard : Control
         var col = Resolve(bounds);
         int row1Y = bounds.Y + Sc(PadY);
         int row2Y = row1Y + s_row1H + Sc(3);
+        int row3Y = row2Y + s_row2H + Sc(2);
+        // Identity is two rows against the meters' three, so it centres on the
+        // card instead of leaving the name hanging at the top.
+        int identityH = s_row1H + Sc(3) + s_row2H;
+        int idRow1Y = bounds.Y + Math.Max(Sc(PadY), (bounds.Height - identityH) / 2);
+        int idRow2Y = idRow1Y + s_row1H + Sc(3);
 
         int avatarD = Sc(AvatarD);
         DrawAvatar(
@@ -705,11 +715,11 @@ internal sealed class AccountCard : Control
         // the identity line rather than disappearing. Dropping it would take the
         // amber "needs you" with it — the one thing on the card that must never
         // be the casualty of a narrow window.
-        DrawIdentity(g, col, row1Y, row2Y, m, inlineState: col.StatusW == 0);
+        DrawIdentity(g, col, idRow1Y, idRow2Y, m, inlineState: col.StatusW == 0);
         _fixRect = col.StatusW > 0
-            ? DrawStatusColumn(g, col, row1Y, row2Y, m)
+            ? DrawStatusColumn(g, col, idRow1Y, idRow2Y, m)
             : Rectangle.Empty;
-        DrawMeters(g, col, row1Y, row2Y, m);
+        DrawMeters(g, col, row1Y, row2Y, row3Y, m);
 
         DrawDropIndicator(g, bounds);
     }
@@ -849,11 +859,15 @@ internal sealed class AccountCard : Control
     }
 
     private static void DrawMeters(
-        Graphics g, Columns col, int row1Y, int row2Y, AccountCardModel m)
+        Graphics g, Columns col, int row1Y, int row2Y, int row3Y, AccountCardModel m)
     {
         if (col.MeterW < Sc(60)) return;
-        DrawMeter(g, col.Meter5Left, row1Y, row2Y, col, Loc.T("card.window.5h"), m.FiveHour, m);
-        DrawMeter(g, col.Meter7Left, row1Y, row2Y, col, Loc.T("card.window.7d"), m.SevenDay, m);
+        DrawMeter(
+            g, col.Meter5Left, row1Y, row2Y, row3Y, col,
+            Loc.T("card.window.5h"), m.FiveHour, m.FiveHourResetsAt, m);
+        DrawMeter(
+            g, col.Meter7Left, row1Y, row2Y, row3Y, col,
+            Loc.T("card.window.7d"), m.SevenDay, m.SevenDayResetsAt, m);
     }
 
     /// <summary>
@@ -924,8 +938,8 @@ internal sealed class AccountCard : Control
     /// both numbers made the pair read as two different measurements.
     /// </summary>
     private static void DrawMeter(
-        Graphics g, int x, int row1Y, int row2Y, Columns col,
-        string window, double? pct, AccountCardModel m)
+        Graphics g, int x, int row1Y, int row2Y, int row3Y, Columns col,
+        string window, double? pct, string? resetsAt, AccountCardModel m)
     {
         int w = col.MeterW;
         TextRenderer.DrawText(
@@ -990,6 +1004,23 @@ internal sealed class AccountCard : Control
         TextRenderer.DrawText(
             g, Theme.UsageLabelRemain(pct), Theme.FontSmall, valueRect,
             m.Disabled ? Theme.TextMuted : vc, TfLeft);
+
+        DrawResetLine(g, x, row3Y, col.MeterW, resetsAt, m);
+    }
+
+    /// <summary>
+    /// When this window resets, under its bar. Muted and absolute: it answers
+    /// "when do I get quota back" at a glance, without competing with the
+    /// figure above it.
+    /// </summary>
+    private static void DrawResetLine(
+        Graphics g, int x, int row3Y, int w, string? resetsAt, AccountCardModel m)
+    {
+        if (Theme.FormatResetsAt(resetsAt) is not { } at) return;
+        TextRenderer.DrawText(
+            g, Loc.T("card.reset.at", at), Theme.FontSmall,
+            new Rectangle(x, row3Y, w, s_row3H),
+            m.Disabled ? Theme.TextDisabled : Theme.TextMuted, TfLeft);
     }
 
     /// <summary>Standard six-dot drag handle, clearly apart from the ⋮ menu.</summary>

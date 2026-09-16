@@ -331,6 +331,32 @@ public static class Theme
     }
 
     /// <summary>
+    /// Clock time a window resets, for the card: "11:15" today, "明天 6:00",
+    /// "9/20 14:00" further out. Null when unknown.
+    /// </summary>
+    /// <remarks>
+    /// Absolute, where the drawer's <see cref="FormatResetsIn"/> counts down:
+    /// a card repaints on poll ticks, and a countdown drawn there would sit
+    /// going stale between them.
+    /// </remarks>
+    public static string? FormatResetsAt(string? isoUtcOrOffset) =>
+        FormatResetsAt(isoUtcOrOffset, DateTimeOffset.Now);
+
+    /// <summary>Testable half: "now" is passed in rather than read.</summary>
+    internal static string? FormatResetsAt(string? isoUtcOrOffset, DateTimeOffset now)
+    {
+        if (string.IsNullOrWhiteSpace(isoUtcOrOffset)) return null;
+        if (!DateTimeOffset.TryParse(isoUtcOrOffset, out var when)) return null;
+        var local = when.ToLocalTime();
+        if (local <= now) return Loc.T("resets.soon");
+        string clock = $"{local.Hour}:{local.Minute:D2}";
+        var today = now.ToLocalTime().Date;
+        if (local.Date == today) return clock;
+        if (local.Date == today.AddDays(1)) return Loc.T("card.reset.tomorrow", clock);
+        return Loc.T("card.reset.date", local.Month, local.Day, clock);
+    }
+
+    /// <summary>
     /// Warmup plan label: "now", "today 06:00", or "tomorrow 06:00". Null if unparseable.
     /// </summary>
     public static string? FormatWarmupAnchor(string? isoLocalOrOffset)
