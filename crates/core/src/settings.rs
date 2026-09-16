@@ -125,6 +125,52 @@ pub struct WarmupSettings {
     /// Model for the warmup request (default Haiku).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Cloud routines that open the window with this PC off.
+    ///
+    /// Owned by `warmup_cloud_sync`: [`crate::engine::Engine::set_warmup`]
+    /// keeps the stored value, so a shell saving work hours cannot wipe it.
+    #[serde(default)]
+    pub cloud: CloudWarmup,
+}
+
+/// Cloud warmup state (see [`crate::warmup_cloud`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWarmup {
+    /// The user asked for cloud routines and at least one account has them.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Last known routines per account, as reported by the setup session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<CloudAccount>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudAccount {
+    pub number: u32,
+    pub email: String,
+    /// Enabled routines on the account; empty once paused.
+    #[serde(default)]
+    pub routines: Vec<CloudRoutine>,
+    /// Why the last sync for this account failed, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// RFC3339 time of the last successful sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudRoutine {
+    pub name: String,
+    #[serde(default)]
+    pub id: String,
+    /// Daily cron in UTC.
+    pub cron_expression: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_at: Option<String>,
 }
 
 fn default_work_start() -> String {
@@ -142,6 +188,7 @@ impl Default for WarmupSettings {
             work_end: default_work_end(),
             accounts: Vec::new(),
             model: None,
+            cloud: CloudWarmup::default(),
         }
     }
 }

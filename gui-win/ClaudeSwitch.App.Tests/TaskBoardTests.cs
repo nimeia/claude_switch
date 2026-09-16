@@ -340,6 +340,44 @@ public class TaskBoardTests : IDisposable
         Assert.False(board.SeeAllShownForTest);
     }
 
+    [Fact]
+    public void A_refresh_that_only_moves_the_clock_keeps_the_rows_it_has()
+    {
+        // The recent band refreshes on a timer. Re-creating every row for a new
+        // "5 minutes ago" made the whole list blink.
+        using var board = new TaskBoard(_ => "recent", () => false, _ => { }, () => { }, "all");
+        board.Show(Many(2));
+        var before = board.RowsForTest.ToList();
+
+        int clicked = 0;
+        board.Show([
+            new(TaskState.Interrupted, "t0", "acct", "D:/work", "2m", () => clicked++, "go", Ignore: () => { }),
+            new(TaskState.Interrupted, "renamed", "acct", "D:/work", "2m", () => { }, "go", Ignore: () => { }),
+        ]);
+
+        Assert.Equal(before, board.RowsForTest);
+        Assert.Equal("renamed", board.RowsForTest[1].Entry.Title);
+
+        // The reused row acts on the refreshed entry, not the one it was built from.
+        board.RowsForTest[0].Entry.Primary();
+        Assert.Equal(1, clicked);
+    }
+
+    [Fact]
+    public void A_row_whose_actions_change_is_rebuilt()
+    {
+        using var board = new TaskBoard(_ => "recent", () => false, _ => { }, () => { }, "all");
+        board.Show([Entry(TaskState.Interrupted, "one", () => { })]);
+        var before = board.RowsForTest[0];
+
+        // No dismiss any more: the pills differ, so the old row cannot stand in.
+        board.Show([Entry(TaskState.Running, "one")]);
+
+        Assert.NotSame(before, board.RowsForTest[0]);
+        Assert.True(before.IsDisposed);
+        Assert.Single(TaskRow.Descendants(board).OfType<TaskRow>());
+    }
+
     [Theory]
     [InlineData(@"C:\Users\huang\AppData\Local\Temp\cswitch-acp-e2e\restart", @"…\cswitch-acp-e2e\restart")]
     [InlineData(@"D:\work\payments-service", @"…\work\payments-service")]

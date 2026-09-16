@@ -17,12 +17,15 @@ namespace ClaudeSwitch.App;
 /// </remarks>
 internal sealed class TaskRow : Panel
 {
-    private readonly TaskEntry _entry;
-    private readonly Color _accent;
+    private TaskEntry _entry;
+    private Color _accent;
     private bool _hover;
 
     /// <summary>Design-px width of the coloured edge that marks the state.</summary>
     private const int AccentWidth = 3;
+
+    /// <summary>The task this row currently stands for; its actions read from here.</summary>
+    public TaskEntry Entry => _entry;
 
     public TaskRow(TaskEntry entry, Color accent)
     {
@@ -222,7 +225,25 @@ internal sealed class TaskRow : Panel
     public int ActionsWidth { get; set; }
 
     /// <summary>Second line: account, where, state, and how long.</summary>
-    public string Detail { get; init; } = "";
+    public string Detail { get; set; } = "";
+
+    /// <summary>
+    /// Point the row at a refreshed copy of its task, repainting only if it reads differently.
+    /// </summary>
+    /// <remarks>
+    /// The bands refresh on a timer, and most refreshes change nothing but an
+    /// elapsed time. Rebuilding the row for that tore down and re-created every
+    /// window in the band, which showed as the whole list blinking.
+    /// </remarks>
+    public void Update(TaskEntry entry, Color accent, string detail)
+    {
+        bool changed = entry.Title != _entry.Title || accent != _accent || detail != Detail;
+        _entry = entry;
+        _accent = accent;
+        Detail = detail;
+        AccessibleName = entry.Title;
+        if (changed) Invalidate();
+    }
 
     /// <summary>Local name for the shared shape; the pills reach it through here.</summary>
     internal static GraphicsPath Rounded(Rectangle r, int radius) => Shapes.Rounded(r, radius);
@@ -844,12 +865,21 @@ internal sealed class TaskBoard : Panel
         Render();
     }
 
+    /// <summary>The painted rows on screen, top to bottom.</summary>
+    private readonly List<TaskRow> _shownRows = [];
+
+    /// <summary>Test seam: the row controls currently shown, top to bottom.</summary>
+    internal IReadOnlyList<TaskRow> RowsForTest => _shownRows;
+
+    /// <summary>
+    /// What decides a row's child controls; rows that agree on this can be reused.
+    /// </summary>
+    private static (string, bool, bool, bool) Shape(TaskEntry e) =>
+        (e.PrimaryLabel, e.Stop is not null, e.OpenFolder is not null, e.Ignore is not null);
+
     private void Render()
     {
         var entries = _entries;
-        _rows.SuspendLayout();
-        foreach (Control c in _rows.Controls) c.Dispose();
-        _rows.Controls.Clear();
 
         // Collapsing only means something when it would hide something. Below
         // the cap both views show the same rows, so the link goes away rather
@@ -864,24 +894,18 @@ internal sealed class TaskBoard : Panel
             : entries.Take(Math.Min(MaxRows, _maxVisibleRows)).ToList();
         RowCount = shown.Count;
 
-        // Docked top-down, so added in reverse: the last control docked to the
-        // top ends up highest.
-        foreach (var entry in Enumerable.Reverse(shown))
+        // The common refresh brings back the same rows with a newer time on
+        // them. Those are updated where they stand: re-creating them made the
+        // band blink every time a timer fired, and dropped hover and focus.
+        bool reuse = _shownRows.Count == shown.Count
+            && _shownRows.Zip(shown).All(p => Shape(p.First.Entry) == Shape(p.Second));
+        if (reuse)
         {
-            // Each row sits in a holder whose bottom padding shows the page
-            // background through: docked rows stack flush, and three surfaces
-            // touching edge to edge read as one block rather than three tasks.
-            var holder = new Panel
-            {
-                Dock = DockStyle.Top,
-                Height = (int)Scaled(RowHeight + RowGap),
-                Padding = new Padding(0, 0, 0, (int)Scaled(RowGap)),
-                Margin = new Padding(0),
-            };
-            var row = BuildRow(entry);
-            row.Dock = DockStyle.Fill;
-            holder.Controls.Add(row);
-            _rows.Controls.Add(holder);
+            for (int i = 0; i < shown.Count; i++) UpdateRow(_shownRows[i], shown[i]);
+        }
+        else
+        {
+            RebuildRows(shown);
         }
 
         _summary.Text = _summaryText(entries);
@@ -908,8 +932,98 @@ internal sealed class TaskBoard : Panel
             _next.Enabled = _page < pages - 1;
         }
 
-        _rows.ResumeLayout();
-        ApplyTheme();
+        if (!reuse) ApplyTheme();
+    }
+
+    private const int WmSetRedraw = 0x000B;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    /// <summary>
+    /// Replace the row controls, painting the band once when they are all in place.
+    /// </summary>
+    /// <remarks>
+    /// Each new holder erases to the page colour before its row paints over it,
+    /// so a rebuild drawn as it happens flashes the band empty. Redraw is held
+    /// off until the new rows are laid out.
+    /// </remarks>
+    private void RebuildRows(List<TaskEntry> shown)
+    {
+        bool hold = _rows.IsHandleCreated && _rows.Visible;
+        if (hold) SendMessage(_rows.Handle, WmSetRedraw, IntPtr.Zero, IntPtr.Zero);
+        _rows.SuspendLayout();
+        try
+        {
+            foreach (Control c in _rows.Controls.Cast<Control>().ToList()) c.Dispose();
+            _rows.Controls.Clear();
+            _shownRows.Clear();
+
+            // Docked top-down, so added in reverse: the last control docked to the
+            // top ends up highest.
+            foreach (var entry in Enumerable.Reverse(shown))
+            {
+                // Each row sits in a holder whose bottom padding shows the page
+                // background through: docked rows stack flush, and three surfaces
+                // touching edge to edge read as one block rather than three tasks.
+                var holder = new Panel
+                {
+                    Dock = DockStyle.Top,
+                    Height = (int)Scaled(RowHeight + RowGap),
+                    Padding = new Padding(0, 0, 0, (int)Scaled(RowGap)),
+                    Margin = new Padding(0),
+                    BackColor = Theme.BgApp,
+                };
+                var row = BuildRow(entry);
+                row.Dock = DockStyle.Fill;
+                holder.Controls.Add(row);
+                _rows.Controls.Add(holder);
+                _shownRows.Insert(0, row);
+            }
+        }
+        finally
+        {
+            _rows.ResumeLayout();
+            if (hold)
+            {
+                SendMessage(_rows.Handle, WmSetRedraw, new IntPtr(1), IntPtr.Zero);
+                _rows.Invalidate(true);
+            }
+        }
+    }
+
+    /// <summary>Second line of a row: who is paying, where, and how it is going.</summary>
+    private static string DetailOf(TaskEntry entry)
+    {
+        var context = new List<string>();
+        if (entry.Account is { Length: > 0 }) context.Add(entry.Account);
+        if (entry.Cwd.Length > 0) context.Add(ShortPath(entry.Cwd));
+        context.Add(entry.Elapsed.Length > 0
+            ? $"{Label(entry.State)} · {entry.Elapsed}"
+            : Label(entry.State));
+        if (entry.Note is { Length: > 0 } note)
+        {
+            context.Add(note.Length <= MaxNoteChars
+                ? note
+                : string.Concat(note.AsSpan(0, MaxNoteChars - 1), "…"));
+        }
+        return string.Join("  ·  ", context);
+    }
+
+    /// <summary>The full path and note, which the row itself can only abbreviate.</summary>
+    private static string? TipOf(TaskEntry entry)
+    {
+        var full = new List<string>();
+        if (entry.Cwd.Length > 0) full.Add(entry.Cwd);
+        if (entry.Note is { Length: > 0 } note) full.Add(note);
+        return full.Count > 0 ? string.Join(Environment.NewLine, full) : null;
+    }
+
+    private void UpdateRow(TaskRow row, TaskEntry entry)
+    {
+        string? tip = TipOf(entry);
+        if (_tips.GetToolTip(row) != (tip ?? "")) _tips.SetToolTip(row, tip);
+        row.Update(entry, StateColor(entry.State), DetailOf(entry));
     }
 
     /// <summary>
@@ -953,35 +1067,20 @@ internal sealed class TaskBoard : Panel
         return "…\\" + string.Join('\\', parts[^2..]);
     }
 
-    private Control BuildRow(TaskEntry entry)
+    private TaskRow BuildRow(TaskEntry entry)
     {
-        // Second line: who is paying for it, where it is, and how it is going.
-        var context = new List<string>();
-        if (entry.Account is { Length: > 0 }) context.Add(entry.Account);
-        if (entry.Cwd.Length > 0) context.Add(ShortPath(entry.Cwd));
-        context.Add(entry.Elapsed.Length > 0
-            ? $"{Label(entry.State)} · {entry.Elapsed}"
-            : Label(entry.State));
-        if (entry.Note is { Length: > 0 } note)
-        {
-            context.Add(note.Length <= MaxNoteChars
-                ? note
-                : string.Concat(note.AsSpan(0, MaxNoteChars - 1), "…"));
-        }
-
         var row = new TaskRow(entry, StateColor(entry.State))
         {
-            Detail = string.Join("  ·  ", context),
+            Detail = DetailOf(entry),
             Tag = entry.State,
         };
-        row.Click += (_, _) => entry.Primary();
+        // Actions go through the row's current entry, not this one: a refresh
+        // updates the row in place and hands it fresh callbacks.
+        row.Click += (_, _) => row.Entry.Primary();
 
         // The row shows a shortened path and a clipped note; the tooltip is
         // where the full versions stay reachable without leaving the page.
-        var full = new List<string>();
-        if (entry.Cwd.Length > 0) full.Add(entry.Cwd);
-        if (entry.Note is { Length: > 0 } fullNote) full.Add(fullNote);
-        if (full.Count > 0) _tips.SetToolTip(row, string.Join(Environment.NewLine, full));
+        if (TipOf(entry) is { } tip) _tips.SetToolTip(row, tip);
 
         var actions = new FlowLayoutPanel
         {
@@ -997,16 +1096,16 @@ internal sealed class TaskBoard : Panel
         void Add(Control c) => actions.Controls.Add(c);
 
         var primary = new PillButton(entry.PrimaryLabel) { Emphasis = true, Margin = new Padding(0) };
-        primary.Click += (_, _) => entry.Primary();
+        primary.Click += (_, _) => row.Entry.Primary();
         Add(primary);
 
-        if (entry.Stop is { } stop)
+        if (entry.Stop is not null)
         {
             var stopButton = new PillButton(Loc.T("board.stop"))
             {
                 Margin = new Padding(Theme.Space1, 0, 0, 0),
             };
-            stopButton.Click += (_, _) => stop();
+            stopButton.Click += (_, _) => row.Entry.Stop?.Invoke();
             _tips.SetToolTip(stopButton, Loc.T("board.stop.tip"));
             Add(stopButton);
         }
@@ -1014,22 +1113,22 @@ internal sealed class TaskBoard : Panel
         // Laid out rather than hidden behind an overflow: there are at most two
         // of them, the row has the width, and a menu that has to be opened to
         // find out what is in it is worse than two visible words.
-        if (entry.OpenFolder is { } openFolder)
+        if (entry.OpenFolder is not null)
         {
             var b = new PillButton(Loc.T("board.action.folder"))
             {
                 Margin = new Padding(Theme.Space1, 0, 0, 0),
             };
-            b.Click += (_, _) => openFolder();
+            b.Click += (_, _) => row.Entry.OpenFolder?.Invoke();
             Add(b);
         }
-        if (entry.Ignore is { } ignore)
+        if (entry.Ignore is not null)
         {
             var b = new PillButton(Loc.T("board.action.remove"))
             {
                 Margin = new Padding(Theme.Space1, 0, 0, 0),
             };
-            b.Click += (_, _) => ignore();
+            b.Click += (_, _) => row.Entry.Ignore?.Invoke();
             _tips.SetToolTip(b, Loc.T("board.ignore.tip"));
             Add(b);
         }

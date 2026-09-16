@@ -21,7 +21,7 @@ use crate::paths::{PathEnv, Paths};
 use crate::plan::{plan_for_slot, PlanInfo};
 use crate::sequence::SequenceData;
 use crate::session;
-use crate::settings::{AutoSwitchSettings, Settings, WarmupSettings};
+use crate::settings::{AutoSwitchSettings, CloudAccount, Settings, WarmupSettings};
 use crate::stalled;
 use crate::switcher::{AccountRef, SwitchResult, Switcher};
 use crate::usage::{
@@ -31,12 +31,22 @@ use crate::warmup::{
     self, WarmupDecision, WarmupFireResult, WarmupMode, WarmupSkipEntry, WarmupState,
     WarmupTickResult, ATTEMPT_COOLDOWN, DEFAULT_WARMUP_MODEL,
 };
+use crate::warmup_cloud::{self, CloudSyncReport, RoutineSpec};
 use chrono::Local;
 use std::time::{Duration, Instant};
 
 /// Bumped to 3 when `accounts[].liveSessions` was added (additive; older readers ignore it).
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 pub const FFI_SCHEMA_VERSION: u32 = 1;
+
+/// One account a cloud warmup sync touches, and the routines it should end
+/// up with (empty → pause the ones this app created).
+struct CloudTarget {
+    number: u32,
+    email: String,
+    org_uuid: String,
+    plan: Vec<RoutineSpec>,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1224,7 +1234,10 @@ impl Engine {
 
     pub fn set_warmup(&self, warmup: WarmupSettings) -> Result<()> {
         let mut s = self.settings.lock();
+        // Cloud state reflects what exists on the accounts; only a sync changes it.
+        let cloud = std::mem::take(&mut s.warmup.cloud);
         s.warmup = warmup.clamp();
+        s.warmup.cloud = cloud;
         s.save(&self.paths.settings_file)?;
         Ok(())
     }
@@ -1466,6 +1479,232 @@ impl Engine {
                 config_dir: Some(profile.to_string_lossy().into_owned()),
             },
         }
+    }
+
+    /// Which accounts a sync touches, and what each should end up with.
+    ///
+    /// Enabling: eligible accounts get their staggered plan. Pausing: every
+    /// account set up earlier gets an empty plan. An account set up earlier
+    /// but not eligible right now is left out of an enable — its usage may
+    /// simply not be fetched yet, and pausing it then would stop a working
+    /// routine because of a slow network.
+    fn warmup_cloud_targets(
+        &self,
+        settings: &WarmupSettings,
+        enable: bool,
+    ) -> Result<Vec<CloudTarget>> {
+        let seq = self.switcher.load_sequence()?;
+        let today = Local::now().date_naive();
+        let mut targets = Vec::new();
+        if enable {
+            let eligible = self.warmup_eligible(&seq, settings);
+            let count = eligible.len();
+            for (index, (number, email, org_uuid)) in eligible.into_iter().enumerate() {
+                targets.push(CloudTarget {
+                    number,
+                    email,
+                    org_uuid,
+                    plan: warmup_cloud::plan_routines(settings, index, count, today),
+                });
+            }
+        }
+        for prev in settings.cloud.accounts.iter().filter(|_| !enable) {
+            let known = targets
+                .iter()
+                .any(|t| t.number == prev.number && t.email == prev.email);
+            if known || prev.routines.is_empty() {
+                continue;
+            }
+            // A slot now holding a different email is not the account we set up.
+            let Some(rec) = seq.account(prev.number).filter(|r| r.email == prev.email) else {
+                continue;
+            };
+            targets.push(CloudTarget {
+                number: prev.number,
+                email: prev.email.clone(),
+                org_uuid: rec.org_uuid.clone(),
+                plan: Vec::new(),
+            });
+        }
+        Ok(targets)
+    }
+
+    /// Run one `/schedule` session per target, in parallel, and read back what
+    /// each account now has. A session that fails keeps the account's last
+    /// known routines: they are still on the account, whatever this run saw.
+    fn warmup_cloud_apply(
+        &self,
+        targets: Vec<CloudTarget>,
+        settings: &WarmupSettings,
+    ) -> Result<Vec<CloudAccount>> {
+        let previous = |num: u32, email: &str| {
+            settings
+                .cloud
+                .accounts
+                .iter()
+                .find(|a| a.number == num && a.email == email)
+                .map(|a| a.routines.clone())
+                .unwrap_or_default()
+        };
+        let claude = warmup::find_claude_executable().ok_or_else(|| {
+            Error::Validation("claude CLI not found on PATH or ~/.local/bin".into())
+        })?;
+
+        let mut accounts: Vec<CloudAccount> = Vec::new();
+        let mut jobs = Vec::new();
+        for target in targets {
+            match self.warmup_ensure_profile(target.number, &target.email, &target.org_uuid) {
+                Ok(dir) => jobs.push((target, dir)),
+                Err(e) => accounts.push(CloudAccount {
+                    routines: previous(target.number, &target.email),
+                    number: target.number,
+                    email: target.email,
+                    error: Some(e.message()),
+                    synced_at: None,
+                }),
+            }
+        }
+
+        let model = settings.model.as_deref();
+        let outcomes: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = jobs
+                .into_iter()
+                .map(|(target, dir)| {
+                    let claude = &claude;
+                    scope.spawn(move || {
+                        let work =
+                            std::env::temp_dir().join(format!("cswitch-cloud-{}", target.number));
+                        let prompt = warmup_cloud::sync_prompt(&target.plan, model);
+                        let outcome = warmup_cloud::run_sync(
+                            claude,
+                            &dir,
+                            &work,
+                            &prompt,
+                            warmup_cloud::SYNC_TIMEOUT,
+                        )
+                        .and_then(|out| warmup_cloud::verify_report(&out, &target.plan));
+                        (target.number, target.email, outcome)
+                    })
+                })
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+
+        let now = Local::now().to_rfc3339();
+        for (num, email, outcome) in outcomes {
+            accounts.push(match outcome {
+                Ok(routines) => CloudAccount {
+                    number: num,
+                    email,
+                    routines,
+                    error: None,
+                    synced_at: Some(now.clone()),
+                },
+                Err(detail) => {
+                    self.emit(CoreEvent::Error {
+                        message: format!("cloud warmup Account-{num} ({email}): {detail}"),
+                        retryable: true,
+                    });
+                    CloudAccount {
+                        routines: previous(num, &email),
+                        number: num,
+                        email,
+                        error: Some(detail),
+                        synced_at: None,
+                    }
+                }
+            });
+        }
+        Ok(accounts)
+    }
+
+    /// Create, update or pause the cloud warmup routines on every account.
+    ///
+    /// Blocking: one `claude -p "/schedule …"` session per account, run in
+    /// parallel, each bounded by [`warmup_cloud::SYNC_TIMEOUT`]. Call it off
+    /// the UI thread. Routines cannot be deleted through the API, so
+    /// `enable = false` pauses the ones this app created.
+    pub fn warmup_cloud_sync(&self, enable: bool) -> Result<CloudSyncReport> {
+        let settings = self.settings.lock().warmup.clone();
+        let targets = self.warmup_cloud_targets(&settings, enable)?;
+        let mut accounts = if targets.is_empty() {
+            Vec::new()
+        } else {
+            self.warmup_cloud_apply(targets, &settings)?
+        };
+        if enable {
+            // Accounts this enable did not reach keep their last known routines.
+            for prev in &settings.cloud.accounts {
+                if !accounts
+                    .iter()
+                    .any(|a| a.number == prev.number && a.email == prev.email)
+                {
+                    accounts.push(prev.clone());
+                }
+            }
+        }
+        accounts.sort_by_key(|a| a.number);
+
+        let enabled = enable
+            && accounts
+                .iter()
+                .any(|a| a.error.is_none() && !a.routines.is_empty());
+        let report = CloudSyncReport {
+            enabled,
+            stale: false,
+            accounts: accounts.clone(),
+        };
+        let mut s = self.settings.lock();
+        s.warmup.cloud.enabled = enabled;
+        // Keep failed rows (their routines may still fire); drop paused, clean ones.
+        s.warmup.cloud.accounts = accounts
+            .into_iter()
+            .filter(|a| a.error.is_some() || !a.routines.is_empty())
+            .collect();
+        s.save(&self.paths.settings_file)?;
+        Ok(report)
+    }
+
+    /// Stored cloud state, and whether a sync would change the routines.
+    ///
+    /// Cheap: no process is spawned. `stale` catches plans that moved on
+    /// their own — a DST change, or a different number of eligible accounts.
+    ///
+    /// Never stale while any enabled slot's usage is unknown or unavailable:
+    /// that slot's eligibility, and so every account's stagger, is not
+    /// settled yet, and a resync then would move routines for nothing.
+    pub fn warmup_cloud_status(&self) -> Result<CloudSyncReport> {
+        let settings = self.settings.lock().warmup.clone();
+        let cloud = &settings.cloud;
+        let seq = self.switcher.load_sequence()?;
+        let undecided = seq.sequence.iter().any(|&num| {
+            seq.account(num).is_some_and(|rec| !rec.disabled)
+                && matches!(
+                    self.usage.status(num),
+                    UsageStatus::Unknown | UsageStatus::Unavailable
+                )
+        });
+        let stale = cloud.enabled
+            && !undecided
+            && self
+                .warmup_cloud_targets(&settings, true)?
+                .iter()
+                .any(|target| {
+                    let stored = cloud
+                        .accounts
+                        .iter()
+                        .find(|a| a.number == target.number && a.email == target.email);
+                    // An error alone is not stale: a lasting failure (routines
+                    // turned off by the org, say) would otherwise retry forever.
+                    stored.map_or(true, |a| {
+                        !warmup_cloud::routines_match(&a.routines, &target.plan)
+                    })
+                });
+        Ok(CloudSyncReport {
+            enabled: cloud.enabled,
+            stale,
+            accounts: cloud.accounts.clone(),
+        })
     }
 
     /// What an autoswitch tick *would* do, without doing it.
@@ -2405,6 +2644,18 @@ impl Engine {
                             .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
                     });
                 let r = self.warmup_now(only)?;
+                Ok(serde_json::to_value(r).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "warmup_cloud_sync" => {
+                let enabled = params
+                    .get("enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
+                let r = self.warmup_cloud_sync(enabled)?;
+                Ok(serde_json::to_value(r).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "warmup_cloud_status" => {
+                let r = self.warmup_cloud_status()?;
                 Ok(serde_json::to_value(r).map_err(|e| Error::Internal(e.to_string()))?)
             }
             "autoswitch_tick" => self.autoswitch_tick(),
@@ -3428,8 +3679,7 @@ mod tests {
             enabled: true,
             work_start: "09:00".into(),
             work_end: "18:00".into(),
-            accounts: vec![],
-            model: None,
+            ..Default::default()
         })
         .unwrap();
         let snap = eng.snapshot().unwrap();
@@ -3443,6 +3693,50 @@ mod tests {
             .skipped
             .iter()
             .any(|s| s.reason == "no-eligible-account"));
+    }
+
+    #[test]
+    fn saving_work_hours_keeps_the_cloud_routines() {
+        use crate::settings::{CloudRoutine, CloudWarmup};
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+        let cloud = CloudWarmup {
+            enabled: true,
+            accounts: vec![CloudAccount {
+                number: 1,
+                email: "a@example.com".into(),
+                routines: vec![CloudRoutine {
+                    name: "claude-switch-warmup-1".into(),
+                    id: "trig_1".into(),
+                    cron_expression: "0 22 * * *".into(),
+                    next_run_at: None,
+                }],
+                error: None,
+                synced_at: None,
+            }],
+        };
+        eng.settings.lock().warmup.cloud = cloud.clone();
+        // The shell only knows the hours; the cloud rows must survive the save.
+        eng.set_warmup(WarmupSettings {
+            enabled: true,
+            work_start: "08:00".into(),
+            work_end: "17:00".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let s = eng.get_settings();
+        assert_eq!(s.warmup.work_start, "08:00");
+        assert_eq!(s.warmup.cloud, cloud);
+    }
+
+    #[test]
+    fn pausing_cloud_warmup_that_was_never_set_up_spawns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng = Engine::init_isolated_demo(dir.path().to_path_buf()).unwrap();
+        let r = eng.warmup_cloud_sync(false).unwrap();
+        assert!(!r.enabled);
+        assert!(r.accounts.is_empty());
+        assert!(!eng.warmup_cloud_status().unwrap().stale);
     }
 
     #[test]

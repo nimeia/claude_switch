@@ -25,6 +25,7 @@ pub mod stalled;
 pub mod switcher;
 pub mod usage;
 pub mod warmup;
+pub mod warmup_cloud;
 
 /// Package version from Cargo (kept in sync with root `VERSION` via CI / workspace).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

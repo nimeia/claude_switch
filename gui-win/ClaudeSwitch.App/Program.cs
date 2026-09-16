@@ -172,6 +172,7 @@ sealed class MainForm : Form
     private readonly CheckBox _startupEnabled;
     private readonly CheckBox _warmupEnabled;
     private readonly CheckBox _warmupTask;
+    private readonly CheckBox _warmupCloud;
     private readonly Button _warmupNowBtn;
     private readonly NumericUpDown _threshold;
     private readonly Label _thrLabel;
@@ -812,6 +813,8 @@ sealed class MainForm : Form
         // setting — it lives on the "other" row with the rest of the plumbing.
         _warmupTask = OptionBox(Loc.T("settings.warmup.task"));
         _warmupTask.Checked = WarmupTaskHelper.IsEnabled();
+        // The same schedule as claude.ai routines, so the PC can stay off.
+        _warmupCloud = OptionBox(Loc.T("settings.warmup.cloud"));
 
         _autoEnabled.CheckedChanged += (_, _) =>
         {
@@ -845,8 +848,25 @@ sealed class MainForm : Form
                 try { WarmupTaskHelper.SetEnabled(false, 0, 0); }
                 catch { /* delete is best-effort; next load re-syncs from schtasks */ }
             }
+            // Same for the cloud routines: they would keep opening windows.
+            if (!_settingsLoading && !_warmupEnabled.Checked && _warmupCloud.Checked)
+            {
+                _settingsLoading = true;
+                _warmupCloud.Checked = false;
+                _settingsLoading = false;
+                RequestCloudSync(enable: false);
+            }
             SyncWarmupUiEnabled();
             if (!_settingsLoading) SaveSettings(auto: true);
+        };
+        _warmupCloud.CheckedChanged += (_, _) =>
+        {
+            if (_settingsLoading) return;
+            // The routines follow the work hours, which only mean something
+            // with the guardian on; turning it on first also saves the hours.
+            if (_warmupCloud.Checked && !_warmupEnabled.Checked)
+                _warmupEnabled.Checked = true;
+            RequestCloudSync(_warmupCloud.Checked);
         };
         _warmupTask.CheckedChanged += (_, _) =>
         {
@@ -884,6 +904,7 @@ sealed class MainForm : Form
             if (_workEndHour.Value <= _workStartHour.Value)
                 _workEndHour.Value = Math.Min(23, _workStartHour.Value + 1);
             SaveSettings(auto: true);
+            if (_warmupCloud.Checked) ScheduleCloudResync();
         }
         _workStartHour.ValueChanged += OnWorkHoursChanged;
         _workEndHour.ValueChanged += OnWorkHoursChanged;
@@ -913,6 +934,7 @@ sealed class MainForm : Form
         advancedFlow.Controls.Add(_startupEnabled);
         advancedFlow.Controls.Add(_hideEmail);
         advancedFlow.Controls.Add(_warmupTask);
+        advancedFlow.Controls.Add(_warmupCloud);
 
         _settingsBody.Controls.Add(settingsFlow, 0, 0);
         _settingsBody.Controls.Add(warmupFlow, 0, 1);
@@ -1568,6 +1590,7 @@ sealed class MainForm : Form
         _workHoursLabel.Text = Loc.T("settings.warmup.hours");
         _warmupNowBtn.Text = Loc.T("settings.warmup.now");
         _warmupTask.Text = Loc.T("settings.warmup.task");
+        _warmupCloud.Text = Loc.T("settings.warmup.cloud");
         // Plan line and tooltips are composed from translated pieces.
         SyncWarmupUiEnabled();
         ApplySettingsExpansion(UiPrefs.SettingsExpanded, save: false);
@@ -1853,6 +1876,7 @@ sealed class MainForm : Form
         _hideEmail.ForeColor = Theme.TextPrimary;
         _warmupEnabled.ForeColor = Theme.TextPrimary;
         _warmupTask.ForeColor = Theme.TextPrimary;
+        _warmupCloud.ForeColor = Theme.TextPrimary;
         _settingsSaved.ForeColor = Theme.TextMuted;
         _settingsToggle.ForeColor = Theme.TextPrimary;
         _settingsSummary.ForeColor = Theme.TextMuted;
@@ -1929,6 +1953,8 @@ sealed class MainForm : Form
         // off (force path); grey them only when there is nothing useful to do.
         _warmupNowBtn.Enabled = true;
         _warmupTask.Enabled = true;
+        // Greyed while a sync runs: its outcome decides the tick.
+        _warmupCloud.Enabled = !_cloudSyncBusy;
         _workHoursLabel.ForeColor = CaptionColor(on);
         _workHoursSep.ForeColor = ValueColor(on);
         _workStartHour.BackColor = on ? Theme.BgSurface : Theme.BgDisabled;
@@ -1936,6 +1962,7 @@ sealed class MainForm : Form
         _workStartHour.ForeColor = ValueColor(on);
         _workEndHour.ForeColor = ValueColor(on);
         _warmupTask.ForeColor = Theme.TextPrimary;
+        _warmupCloud.ForeColor = Theme.TextPrimary;
         // Disabled with the rest of the row, not just recoloured: the system
         // draws disabled text lighter than TextDisabled, so a recoloured label
         // stood out darker than its greyed neighbours. The checkbox keeps the
@@ -1953,6 +1980,7 @@ sealed class MainForm : Form
         _toolTipWarmup.SetToolTip(_warmupEnabled, why);
         _toolTipWarmup.SetToolTip(_warmupPlan, why);
         _toolTipWarmup.SetToolTip(_warmupTask, Loc.T("settings.warmup.task.tip", start));
+        _toolTipWarmup.SetToolTip(_warmupCloud, Loc.T("settings.warmup.cloud.tip", start));
         _toolTipWarmup.SetToolTip(_warmupNowBtn, Loc.T("settings.warmup.now.tip"));
     }
 
@@ -1972,6 +2000,155 @@ sealed class MainForm : Form
         }
         var (h, m) = WarmupTaskHelper.BaseAnchor((int)_workStartHour.Value, (int)_workEndHour.Value);
         WarmupTaskHelper.SetEnabled(true, h, m);
+    }
+
+    private bool _cloudSyncBusy;
+    /// <summary>The wish that arrived while a sync was running; replayed after it.</summary>
+    private bool? _cloudSyncQueued;
+    private DateTime _cloudSyncStartedAt = DateTime.MinValue;
+    private System.Windows.Forms.Timer? _cloudResyncTimer;
+
+    /// <summary>Least time between automatic (stale-plan) cloud syncs.</summary>
+    /// <remarks>
+    /// Each sync runs a Sonnet session per account; a failure that keeps the
+    /// plan stale must not turn every poll into another one.
+    /// </remarks>
+    private static readonly TimeSpan CloudAutoSyncGap = TimeSpan.FromHours(6);
+
+    /// <summary>
+    /// Bring each account's claude.ai routines in line with the checkbox, off
+    /// the UI thread.
+    /// </summary>
+    /// <remarks>
+    /// Core runs one <c>claude -p "/schedule …"</c> session per account, which
+    /// takes tens of seconds. A change that arrives meanwhile is queued, so the
+    /// last click or hours edit always wins.
+    /// </remarks>
+    private void RequestCloudSync(bool enable, bool quiet = false)
+    {
+        if (_cloudSyncBusy)
+        {
+            _cloudSyncQueued = enable;
+            return;
+        }
+        _cloudSyncBusy = true;
+        _cloudSyncStartedAt = DateTime.UtcNow;
+        SyncWarmupUiEnabled();
+        FlashSettingsSaved(Loc.T(enable ? "settings.warmup.cloud.busy" : "settings.warmup.cloud.pausing"));
+        _ = Task.Run(() =>
+        {
+            JsonNode? result = null;
+            string? failure = null;
+            try
+            {
+                result = _engine.Call("warmup_cloud_sync", new { enabled = enable });
+            }
+            catch (Exception ex)
+            {
+                // Must reach FinishCloudSync whatever happened, or the box stays grey.
+                failure = ex.Message;
+            }
+            if (IsDisposed || Disposing) return;
+            try
+            {
+                BeginInvoke(() => FinishCloudSync(enable, result, failure, quiet));
+            }
+            catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
+            {
+                // Shutting down mid-sync.
+            }
+        });
+    }
+
+    private void FinishCloudSync(bool wanted, JsonNode? result, string? failure, bool quiet)
+    {
+        _cloudSyncBusy = false;
+        if (_cloudSyncQueued is { } next)
+        {
+            // A later wish supersedes this outcome; report that one instead.
+            _cloudSyncQueued = null;
+            RequestCloudSync(next, quiet);
+            return;
+        }
+        // The tick shows what the accounts have, not what was asked for.
+        _settingsLoading = true;
+        _warmupCloud.Checked = result?["enabled"]?.GetValue<bool>() ?? false;
+        _settingsLoading = false;
+        SyncWarmupUiEnabled();
+
+        if (failure is not null)
+        {
+            ReportCloudProblem(Loc.T("settings.warmup.cloud.failed", failure), quiet);
+            return;
+        }
+        var accounts = result?["accounts"]?.AsArray() ?? new JsonArray();
+        var failed = accounts
+            .Where(a => a?["error"] is not null)
+            .Select(a => Loc.T("settings.warmup.cloud.failedRow",
+                a!["number"]?.GetValue<int>() ?? 0,
+                Pii.MaskAccountLabel(null, a["email"]?.GetValue<string>() ?? ""),
+                a["error"]!.GetValue<string>()))
+            .ToList();
+        int total = accounts.Count;
+        FlashSettingsSaved(!wanted
+            ? Loc.T("settings.warmup.cloud.off")
+            : total == 0
+                ? Loc.T("settings.warmup.cloud.none")
+                : Loc.T("settings.warmup.cloud.on", total - failed.Count, total));
+        if (failed.Count > 0)
+            ReportCloudProblem(Loc.T("settings.warmup.cloud.failed", string.Join("\n", failed)), quiet);
+    }
+
+    /// <summary>A dialog for a sync the user asked for; a status line for an automatic one.</summary>
+    private void ReportCloudProblem(string message, bool quiet)
+    {
+        if (quiet)
+        {
+            FlashSettingsSaved(message);
+            return;
+        }
+        MessageBox.Show(this, message, Loc.T("settings.warmup.cloud"),
+            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    /// <summary>
+    /// Resync after the work hours settle; each arrow click is its own change.
+    /// </summary>
+    private void ScheduleCloudResync()
+    {
+        if (_cloudResyncTimer is null)
+        {
+            _cloudResyncTimer = new System.Windows.Forms.Timer { Interval = 3000 };
+            _cloudResyncTimer.Tick += (_, _) =>
+            {
+                _cloudResyncTimer.Stop();
+                if (_warmupCloud.Checked) RequestCloudSync(enable: true);
+            };
+        }
+        _cloudResyncTimer.Stop();
+        _cloudResyncTimer.Start();
+    }
+
+    /// <summary>
+    /// Resync quietly when the plan moved on its own (DST, accounts added or
+    /// dropping out). Called after each poll, once usage statuses are known.
+    /// </summary>
+    private void ResyncCloudIfStale()
+    {
+        if (!_warmupCloud.Checked || _cloudSyncBusy) return;
+        if (DateTime.UtcNow - _cloudSyncStartedAt < CloudAutoSyncGap) return;
+        JsonNode? status;
+        try
+        {
+            status = _engine.Call("warmup_cloud_status");
+        }
+        catch (Exception ex) when (ex is EngineException or ObjectDisposedException
+                                      or IOException or InvalidOperationException)
+        {
+            return;
+        }
+        if (status?["stale"]?.GetValue<bool>() == true)
+            RequestCloudSync(enable: true, quiet: true);
     }
 
     /// <param name="onlyNumber">
@@ -2695,9 +2872,14 @@ sealed class MainForm : Form
                     () => ResumeSession(captured), Loc.T("recent.action.resume"),
                     OpenFolder: FolderAction(captured.Path)));
         }
+        bool wasVisible = _recentBoard.Visible;
+        float wasHeight = _recentBoard.DesiredHeight;
         _recentBoard.Show(entries);
         _recentBoard.Visible = entries.Count > 0;
-        ApplyBandHeights();
+        // Re-laying out the whole window for a refresh that only moved a
+        // timestamp shook the account list along with the band.
+        if (wasVisible != _recentBoard.Visible || wasHeight != _recentBoard.DesiredHeight)
+            ApplyBandHeights();
     }
 
     /// <summary>The recent band's heading: what it lists, and how much is still open.</summary>
@@ -3656,6 +3838,9 @@ sealed class MainForm : Form
             ApplyThresholdMarker();
             _hideEmail.Checked = UiPrefs.HideEmail;
             _warmupTask.Checked = WarmupTaskHelper.IsEnabled();
+            // A running sync owns the box until it reports.
+            if (!_cloudSyncBusy)
+                _warmupCloud.Checked = warmup?["cloud"]?["enabled"]?.GetValue<bool>() ?? false;
             SyncAutoSwitchUiEnabled();
             SyncWarmupUiEnabled();
         }
@@ -3831,6 +4016,7 @@ sealed class MainForm : Form
             // them the same way as a manual Warm now so a closed main window still
             // explains the morning open.
             NotifyIfWarmed(result);
+            ResyncCloudIfStale();
         }
         catch (Exception ex)
         {
