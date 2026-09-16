@@ -57,8 +57,8 @@ jobs:
       - name: test (Rust)
         run: cargo test --workspace --all-targets
 
-      - name: Build native engine
-        run: cargo build -p claude-switch-ffi --release
+      - name: Build native engine + status line
+        run: cargo build -p claude-switch-ffi -p claude-switch-statusline --release
 
       - name: test (GUI)
         run: dotnet test gui-win/ClaudeSwitch.App.Tests/ClaudeSwitch.App.Tests.csproj -c Release --nologo
@@ -127,3 +127,42 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14
+
+  # Releasing is "merge a VERSION bump". The gate is the *absence of the tag*,
+  # not the diff of this push: a rerun, a squash, a revert and a force push all
+  # have to converge on one release per version, and a diff-based check does not.
+  gate:
+    name: unreleased version?
+    needs: windows
+    if: >-
+      github.event_name == 'push'
+      && (github.ref_name == 'master' || github.ref_name == 'main')
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v$(tr -d '[:space:]' < VERSION)"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag is already released — nothing to cut"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          else
+            echo "$tag has no tag yet — cutting it"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Same build, same smoke, same packaging as a tag push — the release workflow
+  # is called, not duplicated, so the shippable path has exactly one definition.
+  release:
+    needs: gate
+    if: needs.gate.outputs.tag != ''
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.gate.outputs.tag }}

@@ -82,6 +82,24 @@ Each account gets its own config directory (`<backup root>/sessions/<slot>-<emai
 - Aggregate token stats run on demand (reads all transcripts, typically a few hundred ms) with visualization
 - **Directories themselves are account-agnostic** — Claude Code does not record which account owned a conversation. The **Account** column is the binding you set for that directory (which account opens from there), not something read from the transcript
 
+### Terminal status line
+
+A line at the bottom of every Claude Code terminal, answering what Claude Code's own status line cannot: **which account this terminal is on, and how much of its quota is left.**
+
+```
+#2 work · 5h ████░░░░░░ 38% · 7d 12% · ctx 24% · Sonnet 5 high · my-project (main)
+5h resets 14:30 · 7d resets Fri 09:00 · spare #3 ops 8% · auto 90% · $1.24 42m
+```
+
+- **Three presets, no widget editor** — Lean / Standard / Full, from a checkbox in **Automation**. The settings row previews the real line, rendered by the same code that draws it in the terminal
+- **Model, thinking effort, context, cost** come from Claude Code's own payload; the account, the windows and the spare come from this app
+- **Per terminal, not per machine** — a terminal opened for one account names *that* account, not the default login
+- **No Node, no runtime** — a ~750 KB native binary, written to `~/.claude-swap-backup/bin/` when you turn the feature on. No network, no `git` subprocess: it reads three local files and exits
+- **Your own `settings.json` is respected** — the `statusLine` key is merged in, everything else is kept, and a file that does not parse is left untouched. If another status line (e.g. ccstatusline) is configured, it is never replaced without asking, and turning this off puts it back
+- Enabling it once covers every per-account terminal: session profiles re-sync `~/.claude/settings.json` on launch
+
+Details and the data sources are in [docs/statusline.md](docs/statusline.md).
+
 ### UI language
 
 English / Simplified Chinese via the language button on the right of the toolbar — **no restart**. Main window, cards, and status bar update immediately; other windows pick it up the next time they open. First launch follows the system language; after you pick one, that choice is remembered.
@@ -114,6 +132,9 @@ Requests honor `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, and on Windows also rea
 | `~/.claude-swap-backup/sessions/` | Per-account session profiles (including their own transcript history) |
 | `~/.claude-swap-backup/mappings.json` | Directory → account bindings (machine-local) |
 | `~/.claude-swap-backup/cache/` | Usage-overview cache (safe to delete) |
+| `~/.claude-swap-backup/bin/` | The status-line renderer, written when that feature is enabled |
+| `~/.claude-swap-backup/statusline.json` | What the status line reads (no credentials) |
+| `~/.claude/settings.json` | Claude Code's own file; only its `statusLine` key is ever touched, and a copy is kept as `settings.json.cswitch-bak` |
 | `%LOCALAPPDATA%\ClaudeSwitch\ui-prefs.ini` | UI prefs (theme, language, hide email, etc.) |
 | `%TEMP%\.net\ClaudeSwitch\` | Self-extracted single-file runtime |
 
@@ -152,8 +173,10 @@ dotnet run --project gui-win/ClaudeSwitch.App -c Release -- --fixture %TEMP%\csw
 ```
 crates/core     claude-switch-core   locks, credentials, switch, usage, autoswitch, session mode, Engine
 crates/ffi      claude_switch.dll    C ABI (cs_engine_*)
+crates/statusline cs-statusline.exe  the status line Claude Code runs on every repaint
 gui-win/        Windows tray GUI (WinForms) + FfiSmoke + P/Invoke
 gui-win/ClaudeSwitch.App/Strings/    UI catalogs (one JSON per language, embedded)
+site/           the product page: one static HTML file + app screenshots
 ```
 
 - [docs/design-claude-switch.md](docs/design-claude-switch.md) — architecture, FFI, UI design
@@ -166,18 +189,20 @@ Version is the root `VERSION` file and must match `Cargo.toml` `[workspace.packa
 
 Every push / PR runs a full Windows gate: Rust (fmt / clippy / test) → GUI tests → single-file publish → package (exe + zip + SHA256) → launch smoke. Artifacts are kept as workflow artifacts for 14 days.
 
-To cut a release (maintainers):
+**A release is a version bump that reached master.** Bump `VERSION` and the matching `Cargo.toml` `[workspace.package].version`, commit, merge. Once the gate passes, CI asks whether that version already has a tag; if it does not, it calls the [release](.github/workflows/release.yml) workflow, which rebuilds, smokes, creates `v<VERSION>` and publishes a GitHub Release with `ClaudeSwitch-<version>-win-x64.zip` / `.exe` / `SHA256SUMS.txt`.
+
+The gate is **the absence of the tag**, not the diff of the push — a rerun, a squash, a revert or a force push all converge on one release per version, which a diff-based check does not.
+
+Pushing a `v*` tag by hand still does the same thing, for a release cut off-schedule:
 
 ```powershell
-# 1. Bump VERSION and the matching Cargo.toml workspace.package.version
-# 2. Commit, then tag and push (tag without the leading v must equal VERSION)
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0    # tag without the leading v must equal VERSION
+git push origin v0.2.0
 ```
 
-Pushing a `v*` tag runs the [release](.github/workflows/release.yml) workflow: build → smoke → create a GitHub Release and upload `ClaudeSwitch-<version>-win-x64.zip` / `.exe` / `SHA256SUMS.txt`.
+CI calls the release workflow instead of pushing a tag itself, because a tag pushed with `GITHUB_TOKEN` does not start another workflow — the release would build nothing.
 
-Dry run (no publish): Actions → **release** → Run workflow, leave `dry_run=true`.
+Dry run (no publish): Actions → **release** → Run workflow, leave `dry_run=true`. That builds and packages the artifacts without creating a Release.
 
 ## Platforms
 

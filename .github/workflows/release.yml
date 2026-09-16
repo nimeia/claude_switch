@@ -1,11 +1,26 @@
-# Tag vX.Y.Z → build shippable artifacts → GitHub Release.
-# workflow_dispatch dry_run builds without publishing (good for a pre-flight).
+# Build shippable artifacts → GitHub Release.
+#
+# Three ways in, one publishing rule — the run publishes exactly what the
+# "Decide what this run publishes" step resolves, and nothing else:
+#   push v*                 tag exists already; publish it
+#   workflow_call (ci.yml)  master carries a VERSION with no tag; create it
+#   workflow_dispatch       a pre-flight; dry_run=true builds without publishing
+#
+# ci.yml calls this rather than pushing a tag of its own, because a tag pushed
+# with GITHUB_TOKEN does not start another workflow — the release would never
+# run.
 
 name: release
 
 on:
   push:
     tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to create and publish, e.g. v0.1.1"
+        type: string
+        required: true
   workflow_dispatch:
     inputs:
       dry_run:
@@ -30,15 +45,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Decide what this run publishes
+        shell: bash
+        env:
+          CALL_TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ -n "${CALL_TAG:-}" ]; then
+            tag="$CALL_TAG"                       # called by ci.yml
+          elif [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            tag=""                                # dispatched off a branch
+          elif [ "${DRY_RUN:-false}" = "true" ]; then
+            tag=""                                # pre-flight
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "${tag:-nothing} will be published"
+
+      # Both paths land here: a pushed tag can disagree with VERSION, and a
+      # caller could pass anything. The version in the file is the one truth.
       - name: Tag must match VERSION
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE_TAG != ''
         shell: bash
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
           file_ver=$(tr -d '[:space:]' < VERSION)
-          echo "tag=$tag VERSION=$file_ver"
-          test "$tag" = "$file_ver"
+          echo "tag=${RELEASE_TAG#v} VERSION=$file_ver"
+          test "${RELEASE_TAG#v}" = "$file_ver"
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -46,8 +81,8 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - name: Build native engine
-        run: cargo build -p claude-switch-ffi --release
+      - name: Build native engine + status line
+        run: cargo build -p claude-switch-ffi -p claude-switch-statusline --release
 
       - name: Publish single-file
         run: >
@@ -111,9 +146,12 @@ jobs:
           retention-days: 30
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
         with:
+          # Creates the tag at this commit when it does not exist yet, which is
+          # the ci.yml path; on a tag push it is the tag already checked out.
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             artifacts/ClaudeSwitch-*-win-x64.zip
             artifacts/ClaudeSwitch-*-win-x64.exe
