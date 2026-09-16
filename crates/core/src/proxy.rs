@@ -47,8 +47,13 @@ pub fn child_env(host: &str) -> Vec<(&'static str, String)> {
 /// touching the process environment.
 #[must_use]
 pub fn child_env_pairs(url: Option<&str>) -> Vec<(&'static str, String)> {
-    url.map(|u| vec![("HTTPS_PROXY", u.to_string()), ("HTTP_PROXY", u.to_string())])
-        .unwrap_or_default()
+    url.map(|u| {
+        vec![
+            ("HTTPS_PROXY", u.to_string()),
+            ("HTTP_PROXY", u.to_string()),
+        ]
+    })
+    .unwrap_or_default()
 }
 
 fn env_any(keys: &[&str]) -> Option<String> {

@@ -292,11 +292,10 @@ impl Live {
 /// Whatever string arrives is shown, so a level added upstream appears without a
 /// release here; only the two that mean "nothing to say" are dropped.
 fn effort_level(v: &Value) -> Option<String> {
-    let level = v
-        .pointer("/effort/level")
-        .and_then(Value::as_str)?
-        .trim();
-    if level.is_empty() || level.eq_ignore_ascii_case("none") || level.eq_ignore_ascii_case("default")
+    let level = v.pointer("/effort/level").and_then(Value::as_str)?.trim();
+    if level.is_empty()
+        || level.eq_ignore_ascii_case("none")
+        || level.eq_ignore_ascii_case("default")
     {
         return None;
     }
@@ -847,7 +846,10 @@ mod tests {
 
     #[test]
     fn lean_says_who_how_much_and_which_model() {
-        assert_eq!(render(&frame(Preset::Lean)), "#2 work · 5h 38% · Sonnet 5 high");
+        assert_eq!(
+            render(&frame(Preset::Lean)),
+            "#2 work · 5h 38% · Sonnet 5 high"
+        );
     }
 
     #[test]
@@ -983,11 +985,20 @@ mod tests {
     #[test]
     fn thinking_effort_is_taken_from_the_payload_and_nowhere_else() {
         let live = |json: &str| Live::parse(json).effort;
-        assert_eq!(live(r#"{"effort":{"level":"xhigh"}}"#).as_deref(), Some("xhigh"));
-        assert_eq!(live(r#"{"effort":{"level":" high "}}"#).as_deref(), Some("high"));
+        assert_eq!(
+            live(r#"{"effort":{"level":"xhigh"}}"#).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            live(r#"{"effort":{"level":" high "}}"#).as_deref(),
+            Some("high")
+        );
         // A level we have never heard of still reaches the line: Claude Code is
         // free to add one without a release here.
-        assert_eq!(live(r#"{"effort":{"level":"ludicrous"}}"#).as_deref(), Some("ludicrous"));
+        assert_eq!(
+            live(r#"{"effort":{"level":"ludicrous"}}"#).as_deref(),
+            Some("ludicrous")
+        );
         // The ways it can say "nothing to report" cost a segment, not a word.
         assert_eq!(live(r#"{"effort":{"level":"none"}}"#), None);
         assert_eq!(live(r#"{"effort":{"level":"default"}}"#), None);

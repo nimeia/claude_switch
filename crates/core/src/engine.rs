@@ -1662,9 +1662,7 @@ impl Engine {
         };
         let work = std::env::temp_dir().join(format!("cswitch-warm-{num}"));
         // None → the default login, and no config dir to report.
-        let shown = profile
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned());
+        let shown = profile.as_ref().map(|p| p.to_string_lossy().into_owned());
         match warmup::spawn_warmup(claude, profile.as_deref(), model, &work) {
             Ok(()) => WarmupFireResult {
                 number: num,
@@ -2836,10 +2834,8 @@ impl Engine {
             // Status line. `binaryPath` is where this build keeps the renderer
             // (the .NET bundle unpacks it beside the app); the engine cannot
             // work that out from inside a DLL, so the host says.
-            "statusline_status" => {
-                Ok(serde_json::to_value(self.statusline_status())
-                    .map_err(|e| Error::Internal(e.to_string()))?)
-            }
+            "statusline_status" => Ok(serde_json::to_value(self.statusline_status())
+                .map_err(|e| Error::Internal(e.to_string()))?),
             "statusline_set" => {
                 let enabled = params
                     .get("enabled")
@@ -3252,7 +3248,10 @@ mod tests {
             .unwrap();
         let line = line["line"].as_str().unwrap();
         assert!(line.contains("Sonnet 5"), "{line}");
-        assert!(!line.contains('\u{1b}'), "the preview is plain text: {line}");
+        assert!(
+            !line.contains('\u{1b}'),
+            "the preview is plain text: {line}"
+        );
 
         eng.call_json("statusline_set", &json!({ "enabled": false }))
             .unwrap();
