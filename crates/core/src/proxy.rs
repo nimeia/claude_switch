@@ -25,6 +25,32 @@ pub fn resolve_for(host: &str) -> Option<String> {
     system_proxy(host)
 }
 
+/// Proxy env a child CLI needs to reach `host` the way this app does.
+///
+/// Claude Code reads `HTTPS_PROXY` / `HTTP_PROXY` from its environment and
+/// never looks at Windows Internet Settings. So a child that inherits only
+/// our environment connects directly whenever the proxy came from the
+/// registry — and Anthropic answers a blocked network with
+/// `403 "Request not allowed"`, which reads like an auth failure.
+///
+/// Empty when `HTTPS_PROXY` is already set (inherited as is), when the host
+/// is bypassed, or when there is no proxy at all.
+#[must_use]
+pub fn child_env(host: &str) -> Vec<(&'static str, String)> {
+    if env_any(&["HTTPS_PROXY", "https_proxy"]).is_some() {
+        return Vec::new();
+    }
+    child_env_pairs(resolve_for(host).as_deref())
+}
+
+/// The pairs themselves, split out so the mapping is testable without
+/// touching the process environment.
+#[must_use]
+pub fn child_env_pairs(url: Option<&str>) -> Vec<(&'static str, String)> {
+    url.map(|u| vec![("HTTPS_PROXY", u.to_string()), ("HTTP_PROXY", u.to_string())])
+        .unwrap_or_default()
+}
+
 fn env_any(keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|k| {
         std::env::var(k)
@@ -172,6 +198,18 @@ mod tests {
         // Bare form applies to everything.
         assert_eq!(pick_protocol("p:7897", "https").as_deref(), Some("p:7897"));
         assert_eq!(pick_protocol("", "https"), None);
+    }
+
+    #[test]
+    fn child_env_carries_the_proxy_or_nothing() {
+        assert_eq!(
+            child_env_pairs(Some("http://192.168.1.54:7897")),
+            vec![
+                ("HTTPS_PROXY", "http://192.168.1.54:7897".to_string()),
+                ("HTTP_PROXY", "http://192.168.1.54:7897".to_string()),
+            ]
+        );
+        assert!(child_env_pairs(None).is_empty());
     }
 
     #[test]

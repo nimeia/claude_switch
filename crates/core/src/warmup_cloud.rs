@@ -54,6 +54,9 @@ pub const SYNC_TIMEOUT: Duration = Duration::from_secs(6 * 60);
 pub const RUN_PROMPT: &str =
     "Scheduled keep-alive from Claude Switch. Reply with the single word ok. Do not use any tools.";
 
+/// Host every warmup request goes to; also what proxy rules are matched on.
+pub const API_HOST: &str = "api.anthropic.com";
+
 /// Env vars a Claude Code parent leaves behind. A child that inherits them
 /// behaves as a nested session, which the API refuses.
 const NESTED_SESSION_ENV_VARS: &[&str] = &[
@@ -361,6 +364,11 @@ pub fn run_sync(
         .chain(NESTED_SESSION_ENV_VARS)
     {
         cmd.env_remove(key);
+    }
+    // Without this a machine whose proxy lives in Windows Internet Settings
+    // sends the session straight out, and Anthropic answers 403.
+    for (key, value) in crate::proxy::child_env(API_HOST) {
+        cmd.env(key, value);
     }
     #[cfg(windows)]
     {

@@ -438,6 +438,11 @@ pub fn spawn_warmup(
     for key in session::AUTH_OVERRIDE_ENV_VARS {
         cmd.env_remove(key);
     }
+    // A registry-only proxy never reaches a child on its own, and the direct
+    // connection comes back as a 403 that looks like a dead login.
+    for (key, value) in crate::proxy::child_env(crate::warmup_cloud::API_HOST) {
+        cmd.env(key, value);
+    }
 
     // Detached enough that a slow Haiku reply does not block the poll thread.
     #[cfg(windows)]
