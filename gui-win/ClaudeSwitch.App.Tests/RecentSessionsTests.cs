@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Text.Json.Nodes;
 using ClaudeSwitch.App;
 using Xunit;
@@ -204,6 +205,19 @@ public class ClaudeCliTests
         Assert.NotNull(found);
         Assert.True(File.Exists(found), found);
         Assert.EndsWith(".exe", found, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void The_cmd_script_sets_proxy_env_before_launching()
+    {
+        string script = ClaudeCli.BuildCmdEnvScript(
+            @"C:\claude.exe",
+            sessionId: null,
+            configDir: null,
+            scrubEnv: [],
+            extraEnv: new Dictionary<string, string> { ["HTTPS_PROXY"] = "http://127.0.0.1:7897" });
+        Assert.Contains("HTTPS_PROXY=http://127.0.0.1:7897", script);
+        Assert.Contains(@"C:\claude.exe", script);
     }
 
     [Fact]

@@ -424,6 +424,40 @@ internal sealed class DialogLayout
         return label;
     }
 
+    /// <summary>
+    /// Places a wrapping radio at the current y and advances past it.
+    /// </summary>
+    /// <remarks>
+    /// RadioButton AutoSize plus MaximumSize (width, 0) collapses Height to 0
+    /// until the control is parented, so Advance(c.Bottom) stacks every option
+    /// on the same row. Measure the caption and size explicitly, same as
+    /// <see cref="Text"/>.
+    /// </remarks>
+    public RadioButton Radio(RadioButton r, string text)
+    {
+        r.Text = text;
+        r.Font = _form.Font;
+        r.AutoSize = false;
+        r.BackColor = Theme.BgSurface;
+        r.ForeColor = Theme.TextPrimary;
+        r.UseVisualStyleBackColor = false;
+        r.CheckAlign = ContentAlignment.MiddleLeft;
+        r.TextAlign = ContentAlignment.MiddleLeft;
+        r.Location = new Point(_pad, _y);
+
+        // Glyph + padding sits to the left of the caption (~16px circle at 96 DPI).
+        int glyph = Scale(22);
+        var textSize = TextRenderer.MeasureText(
+            text,
+            r.Font,
+            new Size(Math.Max(1, _textW - glyph), int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
+        int h = Math.Max(Scale(Theme.ControlHeight), textSize.Height + Scale(6));
+        r.Size = new Size(_textW, h);
+        Advance(r);
+        return r;
+    }
+
     /// <summary>Advances past a control the caller positioned itself.</summary>
     public void Advance(Control c) => _y = c.Bottom + _gap;
 

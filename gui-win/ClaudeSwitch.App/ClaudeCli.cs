@@ -186,7 +186,8 @@ internal static class ClaudeCli
         string workingDirectory,
         string? sessionId = null,
         string? configDir = null,
-        IEnumerable<string>? scrubEnv = null)
+        IEnumerable<string>? scrubEnv = null,
+        IReadOnlyDictionary<string, string>? extraEnv = null)
     {
         if (!Directory.Exists(workingDirectory))
         {
@@ -198,18 +199,19 @@ internal static class ClaudeCli
         }
 
         var scrub = (scrubEnv ?? []).Where(s => !string.IsNullOrEmpty(s)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var extra = extraEnv ?? new Dictionary<string, string>();
 
         try
         {
             // Prefer Windows Terminal: full colour profile + ConPTY truecolor.
             if (FindWindowsTerminal() is { } wt)
             {
-                if (TryStartViaWindowsTerminal(wt, claudeExe, workingDirectory, sessionId, configDir, scrub))
+                if (TryStartViaWindowsTerminal(wt, claudeExe, workingDirectory, sessionId, configDir, scrub, extra))
                     return null;
             }
 
             // Fallback: direct spawn (default-terminal handoff) with colour env.
-            StartDirect(claudeExe, workingDirectory, sessionId, configDir, scrub);
+            StartDirect(claudeExe, workingDirectory, sessionId, configDir, scrub, extra);
             return null;
         }
         catch (Exception ex)
@@ -228,11 +230,12 @@ internal static class ClaudeCli
         string workingDirectory,
         string? sessionId,
         string? configDir,
-        IReadOnlyList<string> scrubEnv)
+        IReadOnlyList<string> scrubEnv,
+        IReadOnlyDictionary<string, string> extraEnv)
     {
         try
         {
-            string script = BuildCmdEnvScript(claudeExe, sessionId, configDir, scrubEnv);
+            string script = BuildCmdEnvScript(claudeExe, sessionId, configDir, scrubEnv, extraEnv);
             var psi = new ProcessStartInfo(wtExe)
             {
                 UseShellExecute = false,
@@ -266,7 +269,8 @@ internal static class ClaudeCli
         string workingDirectory,
         string? sessionId,
         string? configDir,
-        IReadOnlyList<string> scrubEnv)
+        IReadOnlyList<string> scrubEnv,
+        IReadOnlyDictionary<string, string> extraEnv)
     {
         var psi = new ProcessStartInfo(claudeExe)
         {
@@ -282,10 +286,7 @@ internal static class ClaudeCli
         {
             psi.Environment["CLAUDE_CONFIG_DIR"] = configDir;
         }
-        foreach (var name in scrubEnv)
-        {
-            psi.Environment.Remove(name);
-        }
+        ApplyLaunchEnv(psi, extraEnv, scrubEnv);
         ApplyColorEnv(psi);
         Process.Start(psi);
     }
@@ -293,11 +294,15 @@ internal static class ClaudeCli
     /// <summary>
     /// cmd.exe script: set colour + session env, clear scrubbed keys, run claude.
     /// </summary>
-    private static string BuildCmdEnvScript(
+    /// <summary>
+    /// cmd.exe script: set colour + session + proxy env, clear scrubbed keys, run claude.
+    /// </summary>
+    internal static string BuildCmdEnvScript(
         string claudeExe,
         string? sessionId,
         string? configDir,
-        IReadOnlyList<string> scrubEnv)
+        IReadOnlyList<string> scrubEnv,
+        IReadOnlyDictionary<string, string>? extraEnv = null)
     {
         var sb = new StringBuilder();
         // /s /c expects one command string; chain with &&.
@@ -323,6 +328,12 @@ internal static class ClaudeCli
         if (configDir is not null)
             Set("CLAUDE_CONFIG_DIR", configDir);
 
+        if (extraEnv is not null)
+        {
+            foreach (var (name, value) in extraEnv)
+                Set(name, value);
+        }
+
         foreach (var name in scrubEnv)
             Clear(name);
 
@@ -346,5 +357,24 @@ internal static class ClaudeCli
         foreach (var (name, value) in ColorEnv)
             psi.Environment[name] = value;
         psi.Environment.Remove("NO_COLOR");
+    }
+
+    /// <summary>Set extra vars then drop scrubbed keys (scrub wins on overlap).</summary>
+    internal static void ApplyLaunchEnv(
+        ProcessStartInfo psi,
+        IReadOnlyDictionary<string, string>? extraEnv,
+        IEnumerable<string>? scrubEnv)
+    {
+        if (extraEnv is not null)
+        {
+            foreach (var (name, value) in extraEnv)
+                psi.Environment[name] = value;
+        }
+        if (scrubEnv is null) return;
+        foreach (var name in scrubEnv)
+        {
+            if (!string.IsNullOrEmpty(name))
+                psi.Environment.Remove(name);
+        }
     }
 }

@@ -677,7 +677,7 @@ internal sealed class ProjectsWindow : Form
             return;
         }
 
-        if (ClaudeCli.Resume(project.Path, session.Id) is { } problem)
+        if (SessionMode.ResumeDefault(_engine, project.Path, session.Id) is { } problem)
         {
             MessageBox.Show(this, problem, Loc.T("resume.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
@@ -1021,7 +1021,7 @@ internal sealed class ProjectsWindow : Form
         }
 
         // Unbound: exactly what typing `claude` here would do.
-        if (ClaudeCli.Resume(project.Path) is { } problem)
+        if (SessionMode.ResumeDefault(_engine, project.Path) is { } problem)
         {
             MessageBox.Show(this, problem, Loc.T("session.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;

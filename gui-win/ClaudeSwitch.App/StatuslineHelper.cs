@@ -30,9 +30,10 @@ internal static class StatuslineHelper
     /// Fit a rendered status line into the one row the settings strip has.
     /// </summary>
     /// <remarks>
-    /// The <c>full</c> preset is two lines. A label would draw the break, push
-    /// the row's neighbours down and leave the strip a line taller than it
-    /// reserved, so the second line is folded onto the first for the preview.
+    /// The preview asks the engine for the shape a wide terminal gets, so
+    /// <c>full</c> already arrives folded onto one line. This is the backstop
+    /// for the case it does not: a label would draw the break, push the row's
+    /// neighbours down and leave the strip a line taller than it reserved.
     /// </remarks>
     public static string OneLine(string? rendered) =>
         string.IsNullOrEmpty(rendered)

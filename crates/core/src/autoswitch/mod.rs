@@ -433,6 +433,9 @@ mod tests {
                 added: String::new(),
                 alias: None,
                 disabled: false,
+                proxy: None,
+                timezone: None,
+                language: None,
             },
         );
         s.upsert_account(
@@ -445,6 +448,9 @@ mod tests {
                 added: String::new(),
                 alias: None,
                 disabled: false,
+                proxy: None,
+                timezone: None,
+                language: None,
             },
         );
         s.active_account_number = Some(1);
@@ -496,6 +502,9 @@ mod tests {
                 added: String::new(),
                 alias: None,
                 disabled: false,
+                proxy: None,
+                timezone: None,
+                language: None,
             },
         );
         let cache = UsageCache::new();
@@ -625,6 +634,9 @@ mod tests {
                 added: String::new(),
                 alias: None,
                 disabled: false,
+                proxy: None,
+                timezone: None,
+                language: None,
             },
         );
         let cache = UsageCache::new();

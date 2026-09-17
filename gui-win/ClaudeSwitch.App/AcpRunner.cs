@@ -295,11 +295,15 @@ internal sealed class AcpRunner : IAsyncDisposable
 
         int? previous = _accountNumber;
         _accountNumber = target;
+        var proxy = SessionMode.ResolveProxy(_engine, target);
         _launch = new AcpLaunch
         {
             WorkingDirectory = _launch.WorkingDirectory,
             ConfigDir = result["configDir"]?.GetValue<string>(),
-            Proxy = _launch.Proxy,
+            Proxy = proxy.Url,
+            ScrubProxy = proxy.Scrub,
+            ExtraEnv = proxy.Env,
+            ScrubEnv = proxy.ScrubKeys,
         };
 
         // The new account is a different login, so the old agent cannot be

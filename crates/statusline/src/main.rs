@@ -14,7 +14,9 @@
 //!   atomically; nothing here waits on anything.
 //!
 //! What to show is decided in [`claude_switch_core::statusline`], which the GUI
-//! preview calls too, so the preview cannot drift from the real line.
+//! preview calls too, so the preview cannot drift from the real line. The one
+//! thing this program decides for itself is **how wide the terminal is**, since
+//! only the process inside that terminal can ask (see [`terminal_width`]).
 
 use std::io::Read;
 
@@ -30,7 +32,7 @@ const HELP: &str = "\
 cs-statusline — the Claude Switch status line for Claude Code
 
 USAGE:
-    cs-statusline [--preset lean|standard|full] [--no-color]
+    cs-statusline [--preset lean|standard|full] [--no-color] [--width <cols>]
 
 Claude Code runs this itself; it is configured from the Claude Switch app
 (Automation → status line), which writes the command into ~/.claude/settings.json.
@@ -39,6 +41,10 @@ The payload arrives on stdin as JSON.
 OPTIONS:
     -p, --preset <name>  How much to show (default: standard)
         --no-color       Plain text; NO_COLOR in the environment does the same
+    -w, --width <cols>   Terminal columns, when the console cannot be asked.
+                         `full` fits on one line when there is room for it;
+                         0 pins it to two lines. CS_STATUSLINE_WIDTH does the
+                         same from the environment.
     -V, --version        Print the version and exit
     -h, --help           Print this help and exit
 ";
@@ -79,6 +85,7 @@ fn line(opts: &Options, stdin: &str, local: bool) -> String {
     let live = Live::parse(stdin);
     let mut frame = Frame::new(opts.preset, Local::now());
     frame.color = opts.color;
+    frame.width = terminal_width(opts.width);
 
     if local {
         let paths = Paths::resolve(PathEnv::from_process());
@@ -94,10 +101,153 @@ fn line(opts: &Options, stdin: &str, local: bool) -> String {
     statusline::render(&frame)
 }
 
+/// Columns the terminal has, or [`None`] when nothing here can say.
+///
+/// Worth asking because `full` is two lines only when it has to be: a terminal
+/// wide enough to hold both halves gets one line, and the row saved is a row of
+/// transcript the reader keeps (`claude_switch_core::statusline::render`).
+///
+/// Three answers, in falling order of authority:
+///
+/// 1. **`--width`**, or `CS_STATUSLINE_WIDTH` in the environment. The way out
+///    when the probe below cannot work — and `0` is how someone pins the two
+///    lines they preferred.
+/// 2. **`COLUMNS`**, when whoever spawned us exported it.
+/// 3. **The console itself** ([`console_width`]).
+///
+/// The margin comes off whatever answers: Claude Code prints this line inside
+/// its own frame, and a fold that lands on the last column wraps there — two
+/// ragged lines, which is worse than the tidy break we would otherwise draw.
+fn terminal_width(pinned: Option<usize>) -> Option<usize> {
+    let cols = pinned
+        .or_else(|| env_cols("CS_STATUSLINE_WIDTH"))
+        .or_else(|| env_cols("COLUMNS"))
+        .or_else(console_width)?;
+    Some(cols.saturating_sub(WIDTH_MARGIN))
+}
+
+/// Columns kept clear of the fold; see [`terminal_width`].
+const WIDTH_MARGIN: usize = 2;
+
+fn env_cols(name: &str) -> Option<usize> {
+    parse_cols(&std::env::var(name).ok()?)
+}
+
+/// A column count, or [`None`] for anything that is not one. Nothing here is
+/// worth refusing to print a line over, so a bad value is simply not an answer.
+fn parse_cols(s: &str) -> Option<usize> {
+    s.trim().parse().ok()
+}
+
+/// The console this process shares with Claude Code.
+///
+/// Our stdout is a pipe — Claude Code reads what we print — so the size cannot
+/// come from it; it has to come from the console device, `CONOUT$`, which is
+/// answered by a pseudo-console (Windows Terminal, VS Code) as readily as by a
+/// classic console window. Bound to this call only, so it stays within the program's
+/// budget: no allocation, no subprocess, one open and one query.
+#[cfg(windows)]
+fn console_width() -> Option<usize> {
+    use std::ffi::c_void;
+
+    type Handle = *mut c_void;
+
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_SHARE_READ_WRITE: u32 = 0x0000_0003;
+    const OPEN_EXISTING: u32 = 3;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct SmallRect {
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ScreenBufferInfo {
+        size: Coord,
+        cursor: Coord,
+        attributes: u16,
+        window: SmallRect,
+        max_window: Coord,
+    }
+
+    #[allow(non_snake_case)]
+    extern "system" {
+        fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            security: *mut c_void,
+            disposition: u32,
+            flags: u32,
+            template: Handle,
+        ) -> Handle;
+        fn GetConsoleScreenBufferInfo(console: Handle, info: *mut ScreenBufferInfo) -> i32;
+        fn CloseHandle(object: Handle) -> i32;
+    }
+
+    // `CONOUT$`, UTF-16 and NUL-terminated. Read *and* write access: the query
+    // is refused with ERROR_ACCESS_DENIED without both.
+    let name: [u16; 8] = [0x43, 0x4F, 0x4E, 0x4F, 0x55, 0x54, 0x24, 0];
+    let invalid = usize::MAX as Handle;
+
+    // SAFETY: `name` is NUL-terminated and outlives the call; `info` is a live
+    // local of the layout the API writes; the handle is closed exactly once,
+    // and only when it is not INVALID_HANDLE_VALUE.
+    unsafe {
+        let console = CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ_WRITE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
+        if console == invalid {
+            return None;
+        }
+        let mut info = ScreenBufferInfo::default();
+        let ok = GetConsoleScreenBufferInfo(console, &mut info) != 0;
+        CloseHandle(console);
+        if !ok {
+            return None;
+        }
+        // The window, not the buffer: a classic console can scroll a buffer
+        // wider than the window, and it is the window the text has to fit.
+        usize::try_from(i32::from(info.window.right) - i32::from(info.window.left) + 1).ok()
+    }
+}
+
+/// No probe off Windows yet; `--width` and `COLUMNS` still answer.
+///
+/// The product ships on Windows (`docs/design-claude-switch.md` §3.1); the
+/// equivalent here is a `TIOCGWINSZ` on `/dev/tty`, and it belongs in the same
+/// change as the platform it is for rather than as untested code ahead of it.
+#[cfg(not(windows))]
+const fn console_width() -> Option<usize> {
+    None
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct Options {
     preset: Preset,
     color: bool,
+    /// Columns, as pinned on the command line. [`terminal_width`] decides what
+    /// to do when it is absent.
+    width: Option<usize>,
     help: bool,
     version: bool,
 }
@@ -112,6 +262,7 @@ impl Options {
         let mut opts = Self {
             preset: Preset::default(),
             color: std::env::var_os("NO_COLOR").is_none(),
+            width: None,
             help: false,
             version: false,
         };
@@ -124,6 +275,11 @@ impl Options {
                     }
                 }
                 "--no-color" => opts.color = false,
+                "-w" | "--width" => {
+                    if let Some(cols) = args.next().as_deref().and_then(parse_cols) {
+                        opts.width = Some(cols);
+                    }
+                }
                 "-V" | "--version" => opts.version = true,
                 "-h" | "--help" => opts.help = true,
                 // `--preset=full` as well as `--preset full`.
@@ -132,6 +288,8 @@ impl Options {
                         if let Some(p) = Preset::parse(name) {
                             opts.preset = p;
                         }
+                    } else if let Some(cols) = other.strip_prefix("--width=").and_then(parse_cols) {
+                        opts.width = Some(cols);
                     }
                 }
             }
@@ -182,6 +340,31 @@ mod tests {
     #[test]
     fn no_color_can_be_asked_for_on_the_command_line() {
         assert!(!parse(&["--no-color"]).color);
+    }
+
+    #[test]
+    fn the_width_can_be_pinned_either_way() {
+        assert_eq!(parse(&["--width", "200"]).width, Some(200));
+        assert_eq!(parse(&["--width=200"]).width, Some(200));
+        assert_eq!(parse(&["-w", "200"]).width, Some(200));
+        // Zero is a real answer: nothing fits in it, so `full` keeps its break.
+        assert_eq!(parse(&["--width", "0"]).width, Some(0));
+    }
+
+    #[test]
+    fn an_unusable_width_is_ignored_rather_than_obeyed() {
+        // Same reasoning as the preset: this command line lives in the user's
+        // settings.json, and a typo there must not cost them the status line.
+        assert_eq!(parse(&["--width", "wide"]).width, None);
+        assert_eq!(parse(&["--width", "-8"]).width, None);
+        assert_eq!(parse(&["--width"]).width, None);
+    }
+
+    #[test]
+    fn a_pinned_width_beats_the_console_and_keeps_the_margin() {
+        assert_eq!(terminal_width(Some(200)), Some(200 - WIDTH_MARGIN));
+        // And a pin of zero cannot underflow into a very wide terminal.
+        assert_eq!(terminal_width(Some(0)), Some(0));
     }
 
     #[test]

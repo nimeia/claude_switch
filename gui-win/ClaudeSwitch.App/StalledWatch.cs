@@ -412,11 +412,15 @@ internal sealed class StalledWatch
             return false;
         }
 
+        var proxy = SessionMode.ResolveProxy(_engine, record.AccountNumber);
         var launch = new AcpLaunch
         {
             WorkingDirectory = record.Cwd,
             ConfigDir = record.ConfigDir,
-            Proxy = ResolveProxy(),
+            Proxy = proxy.Url,
+            ScrubProxy = proxy.Scrub,
+            ExtraEnv = proxy.Env,
+            ScrubEnv = proxy.ScrubKeys,
         };
 
         // What the run should do about the wall it hit. A quota stall is exactly
@@ -526,19 +530,4 @@ internal sealed class StalledWatch
         Changed?.Invoke();
     }
 
-    /// <summary>
-    /// The proxy the agent must use, resolved by the engine so the env-then-
-    /// registry precedence has one implementation.
-    /// </summary>
-    private string? ResolveProxy()
-    {
-        try
-        {
-            return _engine.Call("proxy_resolve")["proxy"]?.GetValue<string>();
-        }
-        catch (Exception ex) when (ex is EngineException or ObjectDisposedException)
-        {
-            return null;
-        }
-    }
 }

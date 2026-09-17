@@ -52,6 +52,13 @@ const BAR_CELL_PCT: f64 = 10.0;
 
 const SEP: &str = " · ";
 
+/// A width everything fits in, for a caller that is not a terminal.
+///
+/// The GUI preview is the one that needs it: it has no columns of its own, and
+/// what it should show is the shape a terminal gives, not a break drawn for a
+/// width nobody has.
+pub const NO_WIDTH_LIMIT: usize = usize::MAX;
+
 // --- presets ----------------------------------------------------------------
 
 /// How much the line says. Wire values follow the kebab alphabet (design §8.0).
@@ -454,6 +461,15 @@ pub struct Frame {
     pub now: DateTime<Local>,
     /// ANSI colour. Off for the GUI preview and when `NO_COLOR` is set.
     pub color: bool,
+    /// Columns the terminal has, when the caller could find out.
+    ///
+    /// Only [`Preset::Full`] reads it, and only to decide whether its second
+    /// line fits beside the first. `None` means "nobody could say", which keeps
+    /// the two lines: a width guessed too generously wraps in someone's
+    /// terminal, and a wrapped line reads worse than the honest break.
+    /// [`NO_WIDTH_LIMIT`] is the other way out, for callers that are not a
+    /// terminal at all.
+    pub width: Option<usize>,
 }
 
 impl Frame {
@@ -468,6 +484,7 @@ impl Frame {
             branch: None,
             now,
             color: false,
+            width: None,
         }
     }
 }
@@ -479,15 +496,31 @@ impl Frame {
 /// than the absent fact was worth.
 #[must_use]
 pub fn render(f: &Frame) -> String {
-    let mut out = join(&line_one(f), f.color);
-    if f.preset == Preset::Full {
-        let second = join(&line_two(f), f.color);
-        if !second.is_empty() {
-            out.push('\n');
-            out.push_str(&second);
-        }
+    let one = join(&line_one(f), f.color);
+    if f.preset != Preset::Full {
+        return one;
     }
-    out
+    let two = join(&line_two(f), f.color);
+    if two.is_empty() {
+        return one;
+    }
+    // The break is a fallback, not the shape. `full` is two lines because its
+    // second half does not always fit, and a terminal wide enough to hold both
+    // should get both: this line is redrawn at the bottom of every screen, so
+    // the row it does not take is a row of transcript the reader keeps. Fold
+    // whenever the whole line is known to fit.
+    if fits(&one, &two, f.width) {
+        return format!("{one}{}{two}", dim(SEP, f.color));
+    }
+    format!("{one}\n{two}")
+}
+
+/// Whether both halves, and the separator between them, fit one terminal row.
+///
+/// An unknown width never fits: see [`Frame::width`].
+fn fits(one: &str, two: &str, width: Option<usize>) -> bool {
+    let Some(width) = width else { return false };
+    visible_width(one) + visible_width(SEP) + visible_width(two) <= width
 }
 
 fn join(segments: &[String], color: bool) -> String {
@@ -721,6 +754,65 @@ fn pct_int(pct: f64) -> u32 {
     pct.clamp(0.0, 100.0).round() as u32
 }
 
+// --- width ------------------------------------------------------------------
+
+/// Columns `s` takes in a terminal: the ANSI sequences in it are not printed,
+/// and an East Asian character takes two cells rather than one.
+///
+/// Deliberately coarse. It decides one line break, not a layout, and the cost
+/// of being a column out is a fold that wraps instead of one that fits.
+fn visible_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            width += char_columns(c);
+            continue;
+        }
+        // Everything [`paint`] writes is a CSI sequence — `ESC [ … m` — which
+        // ends at the first byte in `@..~` after the bracket. An ESC followed
+        // by anything else is not ours; drop it rather than guess its length.
+        if chars.next() != Some('[') {
+            continue;
+        }
+        for c in chars.by_ref() {
+            if ('@'..='~').contains(&c) {
+                break;
+            }
+        }
+    }
+    width
+}
+
+/// Cells one character occupies. The ranges are the East Asian Wide and
+/// Fullwidth blocks that actually turn up here — an alias or a directory name
+/// in Chinese, Japanese or Korean. The bar glyphs (`█` / `░`) and `·` are
+/// narrow, which is what lets the bar line up in a monospace font at all.
+const fn char_columns(c: char) -> usize {
+    let wide = matches!(
+        c as u32,
+        0x1100..=0x115F         // Hangul Jamo
+            | 0x2E80..=0x303E   // CJK radicals, Kangxi, CJK punctuation
+            | 0x3041..=0x33FF   // kana, Hangul compatibility, CJK compatibility
+            | 0x3400..=0x4DBF   // CJK unified ideographs extension A
+            | 0x4E00..=0x9FFF   // CJK unified ideographs
+            | 0xA000..=0xA4CF   // Yi
+            | 0xAC00..=0xD7A3   // Hangul syllables
+            | 0xF900..=0xFAFF   // CJK compatibility ideographs
+            | 0xFE30..=0xFE6F   // CJK compatibility forms
+            | 0xFF00..=0xFF60   // fullwidth forms
+            | 0xFFE0..=0xFFE6   // fullwidth signs
+            | 0x1F300..=0x1F64F // emoji
+            | 0x1F900..=0x1F9FF
+            | 0x20000..=0x3FFFD // CJK unified ideographs extension B and later
+    );
+    if wide {
+        2
+    } else {
+        1
+    }
+}
+
 // --- colour -----------------------------------------------------------------
 
 /// Green / amber / red by how much of the window is gone.
@@ -841,6 +933,9 @@ mod tests {
             state: Some(state),
             now,
             color: false,
+            // Unset by default so every existing expectation below reads the
+            // preset's own shape, not a shape a terminal width imposed.
+            width: None,
         }
     }
 
@@ -876,6 +971,55 @@ mod tests {
                 "5h resets {reset5} · 7d resets {reset7} · spare #3 ops 8% · auto 90% · $1.24 42m"
             )
         );
+    }
+
+    #[test]
+    fn a_wide_terminal_gets_full_on_one_line() {
+        let mut f = frame(Preset::Full);
+        f.width = Some(NO_WIDTH_LIMIT);
+        let folded = render(&f);
+        assert!(!folded.contains('\n'), "one row when it fits: {folded}");
+
+        // Same text, same order, same separator: folding is where the break
+        // goes, never what the line says.
+        f.width = None;
+        let broken = render(&f);
+        assert_eq!(folded, broken.replace('\n', SEP));
+    }
+
+    #[test]
+    fn the_fold_happens_on_the_column_it_fits_in() {
+        let mut f = frame(Preset::Full);
+        f.width = None;
+        let broken = render(&f);
+        let need = broken.replace('\n', SEP).chars().count();
+
+        f.width = Some(need);
+        assert!(!render(&f).contains('\n'), "exactly wide enough folds");
+        f.width = Some(need - 1);
+        assert!(
+            render(&f).contains('\n'),
+            "one column short keeps the break rather than wrapping"
+        );
+    }
+
+    #[test]
+    fn colour_costs_no_columns_and_east_asian_costs_two() {
+        // What decides the fold is what the terminal draws, and it draws
+        // neither the escape codes nor a narrow cell for a CJK character.
+        assert_eq!(visible_width(&bold("#2 work", true)), 7);
+        assert_eq!(visible_width(&paint("38%", "32", true)), 3);
+        assert_eq!(visible_width(SEP), 3);
+        assert_eq!(visible_width(&bar(50.0)), BAR_CELLS);
+        assert_eq!(visible_width("工作机"), 6);
+
+        // And a coloured `full` folds at the same width as an uncoloured one.
+        let mut f = frame(Preset::Full);
+        f.width = None;
+        let plain = render(&f).replace('\n', SEP).chars().count();
+        f.color = true;
+        f.width = Some(plain);
+        assert!(!render(&f).contains('\n'));
     }
 
     #[test]

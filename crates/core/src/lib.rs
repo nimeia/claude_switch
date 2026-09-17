@@ -9,6 +9,7 @@ pub mod engine;
 pub mod errors;
 pub mod fsutil;
 pub mod keychain;
+pub mod locale;
 pub mod locks;
 pub mod models;
 pub mod oauth;

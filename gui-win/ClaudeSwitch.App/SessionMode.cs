@@ -20,6 +20,13 @@ internal static class SessionMode
     /// <summary>Outcome of a launch attempt, for the caller to display.</summary>
     internal sealed record Result(bool Launched, string? Problem, string? Note);
 
+    /// <summary>Proxy and region the engine resolved for a launch.</summary>
+    internal sealed record ResolvedProxy(
+        string? Url,
+        bool Scrub,
+        Dictionary<string, string> Env,
+        List<string> ScrubKeys);
+
     /// <summary>
     /// Prepare account <paramref name="id"/>'s profile and open a terminal in it.
     /// </summary>
@@ -49,18 +56,87 @@ internal static class SessionMode
             return new Result(false, Loc.T("session.prepareFailed"), null);
         }
 
-        var scrub = (prepared["scrubEnv"] as JsonArray ?? [])
-            .Select(n => n?.GetValue<string>())
-            .Where(s => !string.IsNullOrEmpty(s))
-            .Select(s => s!)
-            .ToList();
+        var scrub = StringList(prepared["scrubEnv"]);
+        var extra = StringMap(prepared["extraEnv"]);
 
-        if (ClaudeCli.Resume(workingDirectory, sessionId, configDir, scrub) is { } problem)
+        if (ClaudeCli.Resume(workingDirectory, sessionId, configDir, scrub, extra) is { } problem)
         {
             return new Result(false, problem, null);
         }
 
         return new Result(true, null, Note(prepared));
+    }
+
+    /// <summary>
+    /// Resume under the default login, still injecting the machine (or current
+    /// account) proxy so a Windows Terminal pane does not drop <c>HTTPS_PROXY</c>.
+    /// </summary>
+    public static string? ResumeDefault(Engine engine, string workingDirectory, string? sessionId = null)
+    {
+        Dictionary<string, string> extra = [];
+        List<string> scrub = [];
+        try
+        {
+            string? id = null;
+            try
+            {
+                if (engine.Call("snapshot")["activeAccountNumber"] is JsonValue active)
+                    id = active.GetValue<int>().ToString();
+            }
+            catch (EngineException)
+            {
+                // Snapshot is optional; machine proxy still applies.
+            }
+            var resolved = id is null
+                ? engine.Call("proxy_resolve")
+                : engine.Call("proxy_resolve", new { id });
+            extra = StringMap(resolved["env"]);
+            scrub = StringList(resolved["scrub"]);
+        }
+        catch (EngineException)
+        {
+            // Older engine without the method: inherit whatever we have.
+        }
+        return ClaudeCli.Resume(workingDirectory, sessionId, scrubEnv: scrub, extraEnv: extra);
+    }
+
+    /// <summary>Machine or per-account proxy for an ACP / adapter spawn.</summary>
+    public static ResolvedProxy ResolveProxy(Engine engine, int? accountNumber)
+    {
+        try
+        {
+            var node = accountNumber is { } n
+                ? engine.Call("proxy_resolve", new { id = n.ToString() })
+                : engine.Call("proxy_resolve");
+            return new(
+                node["proxy"]?.GetValue<string>(),
+                node["choice"]?.GetValue<string>() == "direct",
+                StringMap(node["env"]),
+                StringList(node["scrub"]));
+        }
+        catch (EngineException)
+        {
+            return new(null, false, [], []);
+        }
+    }
+
+    internal static List<string> StringList(JsonNode? node) =>
+        (node as JsonArray ?? [])
+            .Select(n => n?.GetValue<string>())
+            .Where(s => !string.IsNullOrEmpty(s))
+            .Select(s => s!)
+            .ToList();
+
+    internal static Dictionary<string, string> StringMap(JsonNode? node)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (node is not JsonObject obj) return map;
+        foreach (var (key, value) in obj)
+        {
+            if (value?.GetValue<string>() is { Length: > 0 } s)
+                map[key] = s;
+        }
+        return map;
     }
 
     /// <summary>

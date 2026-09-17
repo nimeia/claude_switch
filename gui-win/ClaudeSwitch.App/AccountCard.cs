@@ -9,6 +9,14 @@ public sealed class AccountCardModel
     public int Number { get; init; }
     public string Email { get; init; } = "";
     public string? Alias { get; init; }
+    /// <summary>
+    /// Per-account Claude Code proxy: null = system, <c>direct</c>, or an http(s) URL.
+    /// </summary>
+    public string? Proxy { get; init; }
+    /// <summary>IANA timezone for Claude Code; null follows the machine zone.</summary>
+    public string? Timezone { get; init; }
+    /// <summary>Claude Code response language; null does not override.</summary>
+    public string? Language { get; init; }
     public bool Active { get; init; }
     public bool Disabled { get; init; }
     /// <summary>

@@ -92,6 +92,7 @@ A line at the bottom of every Claude Code terminal, answering what Claude Code's
 ```
 
 - **Three presets, no widget editor** — Lean / Standard / Full, from a checkbox in **Automation**. The settings row previews the real line, rendered by the same code that draws it in the terminal
+- **It uses the width you have** — Full is one line on a terminal wide enough to hold it, and only breaks in two when it is not. Pass `--width <cols>` (or `--width 0` to keep the break) if your terminal cannot be asked
 - **Model, thinking effort, context, cost** come from Claude Code's own payload; the account, the windows and the spare come from this app
 - **Per terminal, not per machine** — a terminal opened for one account names *that* account, not the default login
 - **No Node, no runtime** — a ~750 KB native binary, written to `~/.claude-swap-backup/bin/` when you turn the feature on. No network, no `git` subprocess: it reads three local files and exits

@@ -553,8 +553,21 @@ internal sealed class AcpLaunch
     /// <summary>Session profile for <c>CLAUDE_CONFIG_DIR</c>; null uses the default login.</summary>
     public string? ConfigDir { get; init; }
 
-    /// <summary>Proxy URL to inject, or null for a direct connection.</summary>
+    /// <summary>Proxy URL to inject, or null to leave inherited env alone.</summary>
     public string? Proxy { get; init; }
+
+    /// <summary>
+    /// Drop inherited <c>HTTP(S)_PROXY</c> so this run is a true direct
+    /// connection. Distinct from <see cref="Proxy"/> being null, which means
+    /// "do not set", not "clear".
+    /// </summary>
+    public bool ScrubProxy { get; init; }
+
+    /// <summary>Timezone, language, and any other launch env from the engine.</summary>
+    public IReadOnlyDictionary<string, string>? ExtraEnv { get; init; }
+
+    /// <summary>Names to drop after <see cref="ExtraEnv"/> is applied (scrub wins).</summary>
+    public IEnumerable<string>? ScrubEnv { get; init; }
 
     /// <summary>The node executable; null finds it on PATH.</summary>
     public string? NodePath { get; init; }
@@ -595,7 +608,20 @@ internal sealed class AcpLaunch
             psi.Environment["HTTP_PROXY"] = Proxy;
             psi.Environment["https_proxy"] = Proxy;
             psi.Environment["http_proxy"] = Proxy;
+            psi.Environment["CLAUDE_CODE_PROXY_RESOLVES_HOSTS"] = "1";
         }
+        else if (ScrubProxy)
+        {
+            foreach (var name in new[]
+            {
+                "HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy",
+                "ALL_PROXY", "all_proxy", "CLAUDE_CODE_PROXY_RESOLVES_HOSTS",
+            })
+            {
+                psi.Environment.Remove(name);
+            }
+        }
+        ClaudeCli.ApplyLaunchEnv(psi, ExtraEnv, ScrubEnv);
         return psi;
     }
 

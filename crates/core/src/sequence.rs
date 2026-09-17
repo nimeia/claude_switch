@@ -26,6 +26,20 @@ pub struct AccountRecord {
     pub alias: Option<String>,
     #[serde(default)]
     pub disabled: bool,
+    /// Per-account proxy for Claude Code launches.
+    ///
+    /// Absent = use the machine proxy (env, then Windows Internet Settings).
+    /// `"direct"` = no proxy. Any other value is an `http(s)` URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    /// IANA timezone for Claude Code (`settings.json` `timeZone` + `TZ`).
+    /// Absent = the machine zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// Claude Code response language (`settings.json` `language`).
+    /// Absent = do not override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -178,6 +192,9 @@ mod tests {
                 added: "t".into(),
                 alias: Some("dev".into()),
                 disabled: false,
+                proxy: None,
+                timezone: None,
+                language: None,
             },
         );
         data.active_account_number = Some(1);

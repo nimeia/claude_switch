@@ -1,6 +1,6 @@
 //! Public Engine façade used by FFI and GUI.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -36,8 +36,8 @@ use crate::warmup_cloud::{self, CloudSyncReport, RoutineSpec};
 use chrono::Local;
 use std::time::{Duration, Instant};
 
-/// Bumped to 3 when `accounts[].liveSessions` was added (additive; older readers ignore it).
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+/// Bumped to 5 when `accounts[].timezone` / `language` were added (additive).
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 5;
 pub const FFI_SCHEMA_VERSION: u32 = 1;
 
 /// One account a cloud warmup sync touches, and the routines it should end
@@ -77,6 +77,15 @@ pub struct AccountSnapshot {
     /// (use `usage.fiveHour.resetsAt` then) or when warmup is off.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warmup_anchor: Option<String>,
+    /// Per-account Claude Code proxy: absent = system, `"direct"`, or an http(s) URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    /// IANA timezone for Claude Code. Absent = the machine zone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// Claude Code response language. Absent = do not override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -196,6 +205,11 @@ pub struct SessionLaunch {
     /// Variables the caller must remove from the child environment: each one
     /// would override the account this launch is explicitly asking for.
     pub scrub_env: Vec<String>,
+    /// Extra environment the child must have (proxy + timezone/language). Empty
+    /// when the account uses a direct connection, the machine has no proxy, and
+    /// timezone/language follow the system.
+    #[serde(default)]
+    pub extra_env: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -673,6 +687,9 @@ impl Engine {
                 live_sessions: u32::try_from(self.live_sessions(num, &rec.email).len())
                     .unwrap_or(u32::MAX),
                 warmup_anchor,
+                proxy: rec.proxy.clone(),
+                timezone: rec.timezone.clone(),
+                language: rec.language.clone(),
             });
         }
         // Only report a foreign login when it is genuinely unmanaged.
@@ -856,6 +873,8 @@ impl Engine {
         // live account rather than the recorded one, so a `/login` outside this
         // tool cannot make us open a redundant profile.
         if self.resolve_active(&seq).number == Some(num) {
+            let (extra_env, scrub_env, _) = Self::launch_env_for(rec);
+            self.write_launch_settings_file(&self.paths.claude_settings, rec);
             return Ok(SessionLaunch {
                 config_dir: String::new(),
                 use_default_login: true,
@@ -864,7 +883,8 @@ impl Engine {
                 reused: true,
                 live_sessions: 0,
                 share_problems: Vec::new(),
-                scrub_env: Vec::new(),
+                scrub_env,
+                extra_env,
             });
         }
 
@@ -907,6 +927,15 @@ impl Engine {
         };
         let share_problems = session::sync_sharing(&dir, &default_home, share);
         session::sync_mcp_servers(&dir, &self.paths.env.default_global_config_path(), share);
+        // After the share copy, which would otherwise overwrite a previous
+        // per-account env block with the default profile's settings.json.
+        self.write_launch_settings_file(&dir.join("settings.json"), rec);
+        let (extra_env, proxy_scrub, _) = Self::launch_env_for(rec);
+        let mut scrub_env: Vec<String> = session::AUTH_OVERRIDE_ENV_VARS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        scrub_env.extend(proxy_scrub);
 
         Ok(SessionLaunch {
             config_dir: dir.to_string_lossy().to_string(),
@@ -916,10 +945,8 @@ impl Engine {
             reused,
             live_sessions: u32::try_from(live.len()).unwrap_or(u32::MAX),
             share_problems,
-            scrub_env: session::AUTH_OVERRIDE_ENV_VARS
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
+            scrub_env,
+            extra_env,
         })
     }
 
@@ -1213,6 +1240,14 @@ impl Engine {
         let seq = self.switcher.load_sequence()?;
         let num = seq.resolve_identifier(identifier)?;
         let result = self.switcher.switch_to(num)?;
+        if let Some(rec) = self
+            .switcher
+            .load_sequence()
+            .ok()
+            .and_then(|s| s.account(num).cloned())
+        {
+            self.write_launch_settings_file(&self.paths.claude_settings, &rec);
+        }
         self.autoswitch.mark_switched();
         self.emit(CoreEvent::Switch {
             from: result.from.clone(),
@@ -1289,6 +1324,94 @@ impl Engine {
         self.switcher.set_alias(num, alias)?;
         self.emit(CoreEvent::SnapshotUpdated);
         Ok(())
+    }
+
+    /// Store a per-account proxy and write it into the Claude config this
+    /// account would actually run under (the default home if it is the live
+    /// login, plus a session profile if one exists).
+    pub fn set_proxy(&self, identifier: &str, proxy: Option<String>) -> Result<()> {
+        let seq = self.switcher.load_sequence()?;
+        let num = seq.resolve_identifier(identifier)?;
+        let stored = crate::proxy::normalize_stored(proxy.as_deref())?;
+        self.switcher.set_proxy(num, stored.clone())?;
+        if let Some(rec) = self.switcher.load_sequence()?.account(num) {
+            self.write_launch_settings(num, rec);
+        }
+        self.emit(CoreEvent::SnapshotUpdated);
+        Ok(())
+    }
+
+    /// Store proxy, timezone and language together — one region for the
+    /// account's proxy exit.
+    pub fn set_locale(
+        &self,
+        identifier: &str,
+        proxy: Option<String>,
+        timezone: Option<String>,
+        language: Option<String>,
+    ) -> Result<()> {
+        let seq = self.switcher.load_sequence()?;
+        let num = seq.resolve_identifier(identifier)?;
+        let proxy = crate::proxy::normalize_stored(proxy.as_deref())?;
+        let timezone = crate::locale::normalize_timezone(timezone.as_deref())?;
+        let language = crate::locale::normalize_language(language.as_deref())?;
+        self.switcher.set_locale(num, proxy, timezone, language)?;
+        if let Some(rec) = self.switcher.load_sequence()?.account(num) {
+            self.write_launch_settings(num, rec);
+        }
+        self.emit(CoreEvent::SnapshotUpdated);
+        Ok(())
+    }
+
+    /// Env a child Claude Code / adapter should get for this account.
+    fn launch_env_for(
+        rec: &crate::sequence::AccountRecord,
+    ) -> (BTreeMap<String, String>, Vec<String>, Option<String>) {
+        let (mut env, mut scrub, url) =
+            crate::proxy::launch_env(rec.proxy.as_deref(), crate::proxy::ANTHROPIC_API_HOST);
+        let (locale_env, locale_scrub) =
+            crate::locale::launch_env(rec.timezone.as_deref(), rec.language.as_deref());
+        env.extend(locale_env);
+        scrub.extend(locale_scrub);
+        (env, scrub, url)
+    }
+
+    /// Best-effort write of proxy + region into `settings.json`.
+    ///
+    /// A broken settings file is reported, not a failed launch: the spawn still
+    /// injects the env vars, which is enough for the process we own.
+    fn write_launch_settings_file(
+        &self,
+        settings_path: &Path,
+        rec: &crate::sequence::AccountRecord,
+    ) {
+        let url =
+            crate::proxy::resolve_stored(rec.proxy.as_deref(), crate::proxy::ANTHROPIC_API_HOST);
+        if let Err(e) = crate::proxy::apply_launch_settings(
+            settings_path,
+            url.as_deref(),
+            rec.timezone.as_deref(),
+            rec.language.as_deref(),
+        ) {
+            self.emit(CoreEvent::Error {
+                message: format!("could not write Claude Code settings: {e}"),
+                retryable: false,
+            });
+        }
+    }
+
+    fn write_launch_settings(&self, num: u32, rec: &crate::sequence::AccountRecord) {
+        let seq = self.switcher.load_sequence().ok();
+        let is_default = seq
+            .as_ref()
+            .is_some_and(|s| self.resolve_active(s).number == Some(num));
+        if is_default {
+            self.write_launch_settings_file(&self.paths.claude_settings, rec);
+        }
+        let profile = self.session_dir(num, &rec.email);
+        if profile.is_dir() {
+            self.write_launch_settings_file(&profile.join("settings.json"), rec);
+        }
     }
 
     pub fn reorder_accounts(&self, order: &[u32]) -> Result<()> {
@@ -1403,6 +1526,10 @@ impl Engine {
         frame.state = statusline::State::load(&self.paths.statusline_file);
         frame.identity = statusline::identity(&self.paths.global_config, frame.state.as_ref());
         frame.branch = Some("main".into());
+        // The settings row is not a terminal and has no columns to speak of,
+        // so it shows the shape a terminal gives rather than a break drawn for
+        // a width nobody has (`StatuslineHelper.OneLine` still guards the rest).
+        frame.width = Some(statusline::NO_WIDTH_LIMIT);
         statusline::render(&frame)
     }
 
@@ -2993,8 +3120,64 @@ impl Engine {
                 let host = params
                     .get("host")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("api.anthropic.com");
-                Ok(json!({ "proxy": crate::proxy::resolve_for(host) }))
+                    .unwrap_or(crate::proxy::ANTHROPIC_API_HOST);
+                let rec = match params.get("id").and_then(|v| v.as_str()) {
+                    Some(id) => {
+                        let seq = self.switcher.load_sequence()?;
+                        let num = seq.resolve_identifier(id)?;
+                        seq.account(num).cloned()
+                    }
+                    None => None,
+                };
+                let stored = rec.as_ref().and_then(|r| r.proxy.clone());
+                let choice = if crate::proxy::is_direct(stored.as_deref()) {
+                    "direct"
+                } else if stored.is_some() {
+                    "url"
+                } else {
+                    "system"
+                };
+                let (mut env, mut scrub, url) = crate::proxy::launch_env(stored.as_deref(), host);
+                if let Some(rec) = rec.as_ref() {
+                    let (locale_env, locale_scrub) =
+                        crate::locale::launch_env(rec.timezone.as_deref(), rec.language.as_deref());
+                    env.extend(locale_env);
+                    scrub.extend(locale_scrub);
+                }
+                Ok(json!({
+                    "choice": choice,
+                    "proxy": url,
+                    "timezone": rec.as_ref().and_then(|r| r.timezone.clone()),
+                    "language": rec.as_ref().and_then(|r| r.language.clone()),
+                    "env": env,
+                    "scrub": scrub,
+                }))
+            }
+            "set_proxy" => {
+                let id = str_param(params, "id")?;
+                let proxy = params
+                    .get("proxy")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let proxy = match proxy.as_deref() {
+                    None | Some("") => None,
+                    Some(s) => Some(s.to_string()),
+                };
+                self.set_proxy(id, proxy)?;
+                Ok(json!({ "ok": true }))
+            }
+            "set_locale" => {
+                let id = str_param(params, "id")?;
+                let opt = |key: &str| -> Option<String> {
+                    params
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                };
+                self.set_locale(id, opt("proxy"), opt("timezone"), opt("language"))?;
+                Ok(json!({ "ok": true }))
             }
             "schema_version" => Ok(json!({"ffiSchemaVersion": FFI_SCHEMA_VERSION})),
             other => Err(Error::Validation(format!("invalid-method: {other}"))),
@@ -4902,6 +5085,132 @@ mod tests {
         assert!(std::fs::read_to_string(dir.join(".credentials.json"))
             .unwrap()
             .contains("rotated"));
+    }
+
+    #[test]
+    fn a_session_launch_carries_the_accounts_proxy_after_share() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        std::fs::create_dir_all(eng.paths.claude_settings.parent().unwrap()).unwrap();
+        std::fs::write(&eng.paths.claude_settings, br#"{"model":"opus"}"#).unwrap();
+        eng.set_proxy("2", Some("http://127.0.0.1:7897".into()))
+            .unwrap();
+
+        let launch = eng.session_prepare("2", true).unwrap();
+        assert_eq!(
+            launch.extra_env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7897")
+        );
+        assert_eq!(
+            launch.extra_env.get("https_proxy").map(String::as_str),
+            Some("http://127.0.0.1:7897")
+        );
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(PathBuf::from(&launch.config_dir).join("settings.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["model"], "opus");
+        assert_eq!(v["env"]["HTTPS_PROXY"], "http://127.0.0.1:7897");
+    }
+
+    #[test]
+    fn a_direct_proxy_scrubs_inherited_proxy_vars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        eng.set_proxy("2", Some("direct".into())).unwrap();
+        let launch = eng.session_prepare("2", true).unwrap();
+        assert!(launch.extra_env.is_empty());
+        assert!(launch.scrub_env.iter().any(|k| k == "HTTPS_PROXY"));
+        assert_eq!(
+            eng.snapshot().unwrap().accounts[1].proxy.as_deref(),
+            Some("direct")
+        );
+    }
+
+    #[test]
+    fn switching_writes_the_new_accounts_proxy_into_the_default_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        eng.set_proxy("1", Some("http://127.0.0.1:7897".into()))
+            .unwrap();
+        eng.switch_to("1").unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&eng.paths.claude_settings).unwrap())
+                .unwrap();
+        assert_eq!(v["env"]["HTTPS_PROXY"], "http://127.0.0.1:7897");
+        eng.set_proxy("2", Some("direct".into())).unwrap();
+        eng.switch_to("2").unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&eng.paths.claude_settings).unwrap())
+                .unwrap();
+        assert!(v.get("env").and_then(|e| e.get("HTTPS_PROXY")).is_none());
+    }
+
+    #[test]
+    fn a_session_launch_carries_timezone_and_language_after_share() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        std::fs::create_dir_all(eng.paths.claude_settings.parent().unwrap()).unwrap();
+        std::fs::write(&eng.paths.claude_settings, br#"{"model":"opus"}"#).unwrap();
+        eng.set_locale(
+            "2",
+            Some("http://127.0.0.1:7897".into()),
+            Some("Asia/Tokyo".into()),
+            Some("japanese".into()),
+        )
+        .unwrap();
+
+        let launch = eng.session_prepare("2", true).unwrap();
+        assert_eq!(
+            launch.extra_env.get("TZ").map(String::as_str),
+            Some("Asia/Tokyo")
+        );
+        assert_eq!(
+            launch.extra_env.get("LANG").map(String::as_str),
+            Some("ja_JP.UTF-8")
+        );
+        let v: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(PathBuf::from(&launch.config_dir).join("settings.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["model"], "opus");
+        assert_eq!(v["timeZone"], "Asia/Tokyo");
+        assert_eq!(v["language"], "japanese");
+        assert_eq!(v["env"]["HTTPS_PROXY"], "http://127.0.0.1:7897");
+        assert_eq!(v["env"]["TZ"], "Asia/Tokyo");
+        let snap = eng.snapshot().unwrap();
+        assert_eq!(snap.accounts[1].timezone.as_deref(), Some("Asia/Tokyo"));
+        assert_eq!(snap.accounts[1].language.as_deref(), Some("japanese"));
+    }
+
+    #[test]
+    fn switching_clears_the_previous_accounts_timezone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        eng.set_locale(
+            "1",
+            Some("http://127.0.0.1:7897".into()),
+            Some("America/Los_Angeles".into()),
+            Some("english".into()),
+        )
+        .unwrap();
+        eng.switch_to("1").unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&eng.paths.claude_settings).unwrap())
+                .unwrap();
+        assert_eq!(v["timeZone"], "America/Los_Angeles");
+        eng.set_locale("2", Some("direct".into()), None, None)
+            .unwrap();
+        eng.switch_to("2").unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&eng.paths.claude_settings).unwrap())
+                .unwrap();
+        assert!(v.get("timeZone").is_none());
+        assert!(v.get("language").is_none());
+        let launch = eng.session_prepare("2", true).unwrap();
+        assert!(launch.scrub_env.iter().any(|k| k == "TZ"));
     }
 
     #[test]

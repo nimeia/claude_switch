@@ -249,11 +249,15 @@ internal sealed class AgentWindow : Form
         string prompt = _prompt.Text.Trim();
         if (prompt.Length == 0) return;
 
+        var proxy = SessionMode.ResolveProxy(_engine, _accountNumber);
         var launch = new AcpLaunch
         {
             WorkingDirectory = _workDir,
             ConfigDir = _configDir,
-            Proxy = ResolveProxy(),
+            Proxy = proxy.Url,
+            ScrubProxy = proxy.Scrub,
+            ExtraEnv = proxy.Env,
+            ScrubEnv = proxy.ScrubKeys,
         };
 
         var policy = BuildPolicy();
@@ -314,24 +318,6 @@ internal sealed class AgentWindow : Form
         if (onQuota != "wait") policy["onRateLimit"] = onQuota;
 
         return policy.Count == 0 ? null : policy;
-    }
-
-    /// <summary>
-    /// The proxy the agent must use. Resolved by the engine so the precedence
-    /// rules (env vars, then Windows Internet Settings) have one implementation.
-    /// </summary>
-    private string? ResolveProxy()
-    {
-        try
-        {
-            return _engine.Call("proxy_resolve")["proxy"]?.GetValue<string>();
-        }
-        catch (EngineException)
-        {
-            // An older engine without the method: a direct connection is the
-            // right guess, and a proxied machine will say so in its first error.
-            return null;
-        }
     }
 
     private void StopRun()

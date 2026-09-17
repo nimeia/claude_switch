@@ -65,7 +65,16 @@ ccstatusline 在这次设计里的价值是**经验来源**：它的 stdin schem
 
 ### 3.3 `full`（完整）
 
-两行。第一行同 `standard`，第二行是只有 claude-switch 给得出的信息。
+在 `standard` 之上，再加一段只有 claude-switch 给得出的信息。
+
+**装得下就一行，装不下才折行**（§3.4）。今天的终端通常有 120～200 列，
+两段并排绰绰有余：
+
+```
+#2 work · 5h ████░░░░░░ 38% · 7d 12% · ctx 24% · Sonnet 5 high · claude_switch (master) · 5h resets 14:30 · 7d resets Fri 09:00 · spare #3 ops 8% · auto 90% · $1.24 42m
+```
+
+窄终端下退回两行，第一行仍与 `standard` 一致：
 
 ```
 #2 work · 5h ████░░░░░░ 38% · 7d 12% · ctx 24% · Sonnet 5 high · claude_switch (master)
@@ -78,6 +87,33 @@ ccstatusline 在这次设计里的价值是**经验来源**：它的 stdin schem
 | `spare #3 ops 8%` | **自动切换会挑中的下一个账号**及其已用量；没有可用备选时整段消失 |
 | `auto 90%` | 自动切换开启及阈值；关闭时显示 `auto off` |
 | `$1.24 42m` | 本次会话成本与时长（来自 stdin `cost`） |
+
+### 3.4 `full` 什么时候折行
+
+状态栏画在**每一屏的底部**：少占一行，就是给正文多留一行。所以换行是兜底，不是形态——
+只要这一行放得下，就不折。
+
+判定很直白：两段加中间的 ` · ` 的**可见宽度** ≤ 终端列数，就并成一行。「可见宽度」不算 ANSI
+转义序列，中日韩字符按两格算（别名或目录名可能是中文）——进度条的 `█`/`░` 和 `·` 都是一格。
+
+终端有多少列，只有跑在终端里的进程问得到，按权威性从高到低：
+
+| 来源 | 说明 |
+|---|---|
+| `--width <cols>` / `CS_STATUSLINE_WIDTH` | 显式指定。探测不到时的出路；填 `0` 就是「永远两行」 |
+| `COLUMNS` | 父进程导出了才有 |
+| 控制台本身 | Windows 上打开 `CONOUT$` 调 `GetConsoleScreenBufferInfo`，取**窗口**宽而不是缓冲区宽 |
+
+几条细节：
+
+- **stdout 是管道**（Claude Code 读我们打印的东西），所以宽度不能从 stdout 问，只能问控制台设备。
+  `CONOUT$` 在 ConPTY（Windows Terminal、VS Code）下同样有答案，需要 `GENERIC_READ | GENERIC_WRITE`
+  才不会被拒；只读打开在部分宿主上返回 `ERROR_ACCESS_DENIED`。
+- **问不出来就保持两行**。猜一个偏大的宽度会在别人终端里真的换行，而换行后的两行比我们自己画的
+  断行更难看。
+- 留 2 列余量：Claude Code 把这行画在它自己的框里，折到最后一列就会被它再折一次。
+- 非 Windows 平台暂时只认 `--width` / `COLUMNS`，等对应 GUI 落地时再补 `TIOCGWINSZ`。
+- GUI 预览走 `NO_WIDTH_LIMIT`：设置区不是终端，没有「列数」，它该展示的是终端里的样子。
 
 ## 4. 数据来自哪里
 
@@ -259,7 +295,8 @@ wire 取值遵守设计文档 §8.0 的 kebab 字母表：`lean` | `standard` | 
 - **预览是真的**：调 `statusline_preview`，渲染代码与安装的二进制同一份，账号和百分比取自真实快照，
   只有模型名/目录/分支是样例。等宽字体（`Theme.FontMono`，Cascadia Mono → Consolas → 通用等宽），
   否则进度条的宽度会骗人；有一条测试断言这个字体确实等宽。
-- `full` 是两行，而设置区每行只有一行的高度，所以预览把第二行折进同一行（`StatuslineHelper.OneLine`）。
+- `full` 在终端里通常是一行（§3.4），预览也就按那个样子渲染；`StatuslineHelper.OneLine` 留作兜底，
+  因为设置区每行只有一行的高度。
 - 勾选/切档立即生效，走既有 `FlashSettingsSaved`；失败弹 MessageBox，且显示的是**引擎自己的话**
   （从错误 JSON 里取 `message`，而不是「调用失败(2)」加一串 JSON）。
 - **启动时后台跑一次** `statusline_heal` 和 `claude --version` 探测：前者要读写文件，后者要起 Node 进程，
@@ -276,7 +313,7 @@ wire 取值遵守设计文档 §8.0 的 kebab 字母表：`lean` | `standard` | 
 | `statusline_status` | `{enabled, preset, command?, standing}` |
 | `statusline_set` | `{enabled, preset, binaryPath, takeover, refreshInterval}` → 释放二进制 + 写/还原 `~/.claude/settings.json` |
 | `statusline_heal` | `{binaryPath, refreshInterval}` → 只在 `standing=drifted` 时改写；启动时调一次 |
-| `statusline_preview` | `{preset}` → `{line}`，渲染好的纯文本 |
+| `statusline_preview` | `{preset}` → `{line}`，渲染好的纯文本（按 `NO_WIDTH_LIMIT` 渲染，见 §3.4） |
 
 `standing` 是一个**按优先级排序的单值**，而不是几个 bool：
 
@@ -305,6 +342,8 @@ DLL 里的 `current_exe()` 拿到的是用户双击的那个便携 exe，不是�
 
 - `crates/core/src/statusline.rs`：渲染是纯函数 `render(preset, stdin, snapshot, now) -> String`，
   三档各配 golden 断言；缺字段、陈旧快照、无订阅、非法 stdin 各一例。
+- 折行（§3.4）：够宽时并成一行且文字与两行版逐字相同；刚好够/差一列各一例（断在哪一列是有定义的）；
+  可见宽度不数 ANSI、中日韩按两格，因此上色与否折在同一列。
 - `settings.json` 合并：保留未知键、非法 JSON 不落盘、接管与还原往返、路径引号。
 - 释放逻辑：版本戳命中则不写盘；`.old` 改名路径。
 - C# 侧：预览文本非空且不含 ANSI；勾选 → 设置文件内容的往返。
@@ -325,3 +364,4 @@ DLL 里的 `current_exe()` 拿到的是用户双击的那个便携 exe，不是�
 | 释放的 exe 被杀软拦 | 与既有 dll 自解压同性质，文档说明；失败时状态栏保持关闭并给出原因 |
 | 用户同时装了 ccstatusline | 不静默接管，替换前确认并保存原值（§6.3） |
 | 每次重绘都起进程 | Rust 二进制 + 只读文件 + 不 fork git；并写 `refreshInterval: 10` 降低重绘频率 |
+| 宽度探测在某些宿主下失效 | 探不到就保持两行（旧行为），`--width` / `CS_STATUSLINE_WIDTH` 是人工出路（§3.4） |

@@ -2459,7 +2459,7 @@ sealed class MainForm : Form
             return true;
         }
 
-        if (ClaudeCli.Resume(session.Path, session.SessionId) is { } problem)
+        if (SessionMode.ResumeDefault(_engine, session.Path, session.SessionId) is { } problem)
         {
             MessageBox.Show(owner, problem, Loc.T("resume.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
@@ -4382,6 +4382,9 @@ sealed class MainForm : Form
                     Number = number,
                     Email = email,
                     Alias = alias,
+                    Proxy = a["proxy"]?.GetValue<string>(),
+                    Timezone = a["timezone"]?.GetValue<string>(),
+                    Language = a["language"]?.GetValue<string>(),
                     Active = active,
                     Disabled = disabled,
                     LiveSessions = a["liveSessions"]?.GetValue<int>() ?? 0,
@@ -4673,6 +4676,9 @@ sealed class MainForm : Form
         var aliasItem = new ToolStripMenuItem(Loc.T("menu.alias"));
         aliasItem.Click += (_, _) => Run(DoEditAlias);
 
+        var proxyItem = new ToolStripMenuItem(Loc.T("menu.proxy"));
+        proxyItem.Click += (_, _) => Run(DoEditProxy);
+
         var detailItem = new ToolStripMenuItem(Loc.T("menu.detail"));
         detailItem.Click += (_, _) => Run(OpenDetailSafe);
 
@@ -4691,6 +4697,7 @@ sealed class MainForm : Form
         menu.Items.Add(warmItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(aliasItem);
+        menu.Items.Add(proxyItem);
         menu.Items.Add(detailItem);
         menu.Items.Add(disableItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -4924,6 +4931,35 @@ sealed class MainForm : Form
         catch (Exception ex)
         {
             MessageBox.Show(this, ex.Message, Loc.T("disable.failed.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private void DoEditProxy()
+    {
+        if (_selected is null)
+        {
+            MessageBox.Show(this, Loc.T("action.selectFirst.proxy"), Loc.T("menu.proxy"),
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        var m = _selected.Model;
+        if (!ProxyEditDialog.TryEdit(this, m, out var edit))
+            return;
+        try
+        {
+            _engine.Call("set_locale", new
+            {
+                id = m.Number.ToString(),
+                proxy = edit.Proxy ?? "",
+                timezone = edit.Timezone ?? "",
+                language = edit.Language ?? "",
+            });
+            _status.Text = Loc.T("locale.saved", m.Number);
+            Reload();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, Loc.T("proxy.saveFailed"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 

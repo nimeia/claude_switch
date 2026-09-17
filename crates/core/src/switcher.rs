@@ -38,6 +38,9 @@ fn identity_record(config_json: &str) -> AccountRecord {
         added: String::new(),
         alias: None,
         disabled: false,
+        proxy: None,
+        timezone: None,
+        language: None,
     }
 }
 
@@ -125,6 +128,9 @@ impl Switcher {
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
             alias: alias.or_else(|| kept.as_ref().and_then(|k| k.alias.clone())),
             disabled: kept.as_ref().is_some_and(|k| k.disabled),
+            proxy: kept.as_ref().and_then(|k| k.proxy.clone()),
+            timezone: kept.as_ref().and_then(|k| k.timezone.clone()),
+            language: kept.as_ref().and_then(|k| k.language.clone()),
             ..identity_record(&config_json)
         };
         seq.upsert_account(num, rec);
@@ -394,6 +400,34 @@ impl Switcher {
             .account_mut(num)
             .ok_or_else(|| Error::AccountNotFound(num.to_string()))?;
         rec.alias = alias;
+        self.save_sequence(&seq)?;
+        Ok(())
+    }
+
+    pub fn set_proxy(&self, num: u32, proxy: Option<String>) -> Result<()> {
+        let mut seq = self.load_sequence()?;
+        let rec = seq
+            .account_mut(num)
+            .ok_or_else(|| Error::AccountNotFound(num.to_string()))?;
+        rec.proxy = proxy;
+        self.save_sequence(&seq)?;
+        Ok(())
+    }
+
+    pub fn set_locale(
+        &self,
+        num: u32,
+        proxy: Option<String>,
+        timezone: Option<String>,
+        language: Option<String>,
+    ) -> Result<()> {
+        let mut seq = self.load_sequence()?;
+        let rec = seq
+            .account_mut(num)
+            .ok_or_else(|| Error::AccountNotFound(num.to_string()))?;
+        rec.proxy = proxy;
+        rec.timezone = timezone;
+        rec.language = language;
         self.save_sequence(&seq)?;
         Ok(())
     }

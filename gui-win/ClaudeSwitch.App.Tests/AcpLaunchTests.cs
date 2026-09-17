@@ -122,6 +122,7 @@ public class AcpLaunchTests
             Assert.Equal("http://127.0.0.1:7890", psi.Environment["https_proxy"]);
             Assert.Equal("http://127.0.0.1:7890", psi.Environment["HTTP_PROXY"]);
             Assert.Equal("http://127.0.0.1:7890", psi.Environment["http_proxy"]);
+            Assert.Equal("1", psi.Environment["CLAUDE_CODE_PROXY_RESOLVES_HOSTS"]);
         }
         finally
         {
@@ -151,6 +152,57 @@ public class AcpLaunchTests
             string? inherited = Environment.GetEnvironmentVariable("HTTPS_PROXY");
             psi.Environment.TryGetValue("HTTPS_PROXY", out string? child);
             Assert.Equal(inherited, child);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void BuildStartInfo_scrubs_inherited_proxy_when_asked()
+    {
+        string dir = MakeTempDir();
+        try
+        {
+            var launch = new AcpLaunch
+            {
+                WorkingDirectory = dir,
+                Proxy = null,
+                ScrubProxy = true,
+                NodePath = FakeNode,
+                AdapterPath = FakeAdapter,
+            };
+            var psi = launch.BuildStartInfo();
+            Assert.False(psi.Environment.ContainsKey("HTTPS_PROXY"));
+            Assert.False(psi.Environment.ContainsKey("https_proxy"));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void BuildStartInfo_injects_timezone_from_extra_env()
+    {
+        string dir = MakeTempDir();
+        try
+        {
+            var launch = new AcpLaunch
+            {
+                WorkingDirectory = dir,
+                NodePath = FakeNode,
+                AdapterPath = FakeAdapter,
+                ExtraEnv = new Dictionary<string, string>
+                {
+                    ["TZ"] = "Asia/Tokyo",
+                    ["LANG"] = "ja_JP.UTF-8",
+                },
+            };
+            var psi = launch.BuildStartInfo();
+            Assert.Equal("Asia/Tokyo", psi.Environment["TZ"]);
+            Assert.Equal("ja_JP.UTF-8", psi.Environment["LANG"]);
         }
         finally
         {
