@@ -15,7 +15,7 @@
 //! machine sources. An explicit URL (app or account) is used as given.
 //!
 //! Claude Code's HTTP stack reads only those environment variables (and
-//! `settings.json` `env`), never WinINET. A child we spawn has to have them
+//! `settings.json` `env`), never `WinINET`. A child we spawn has to have them
 //! set, and a daemon worker that does not inherit our environment still picks
 //! them up from the profile's `settings.json`.
 
@@ -260,18 +260,15 @@ fn merge_proxy_env(map: &mut Map<String, Value>, url: Option<&str>) {
         Some(Value::Object(m)) => m.clone(),
         _ => Map::new(),
     };
-    match url {
-        Some(u) => {
-            for (k, v) in child_env_pairs(Some(u)) {
-                env.insert(k.to_string(), json!(v));
-            }
+    if let Some(u) = url {
+        for (k, v) in child_env_pairs(Some(u)) {
+            env.insert(k.to_string(), json!(v));
         }
-        None => {
-            for k in PROXY_ENV_KEYS {
-                env.remove(*k);
-            }
-            env.remove(RESOLVES_HOSTS);
+    } else {
+        for k in PROXY_ENV_KEYS {
+            env.remove(*k);
         }
+        env.remove(RESOLVES_HOSTS);
     }
     if env.is_empty() {
         map.remove("env");

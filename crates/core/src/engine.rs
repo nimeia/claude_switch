@@ -154,6 +154,18 @@ fn str_param<'a>(params: &'a serde_json::Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| Error::Validation(format!("missing {key}")))
 }
 
+/// An optional string parameter: absent, blank or whitespace all read as none.
+///
+/// Borrowed rather than owned because every caller hands it straight to a
+/// normaliser that only reads it.
+fn opt_param<'a>(params: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    params
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
 /// Transcript folders for one directory.
 ///
 /// Accepts `transcriptDirs` (the complete set, since session mode can spread one
@@ -1338,10 +1350,10 @@ impl Engine {
     /// Store a per-account proxy and write it into the Claude config this
     /// account would actually run under (the default home if it is the live
     /// login, plus a session profile if one exists).
-    pub fn set_proxy(&self, identifier: &str, proxy: Option<String>) -> Result<()> {
+    pub fn set_proxy(&self, identifier: &str, proxy: Option<&str>) -> Result<()> {
         let seq = self.switcher.load_sequence()?;
         let num = seq.resolve_identifier(identifier)?;
-        let stored = crate::proxy::normalize_stored(proxy.as_deref())?;
+        let stored = crate::proxy::normalize_stored(proxy)?;
         self.switcher.set_proxy(num, stored.clone())?;
         if let Some(rec) = self.switcher.load_sequence()?.account(num) {
             self.write_launch_settings(num, rec);
@@ -1355,15 +1367,15 @@ impl Engine {
     pub fn set_locale(
         &self,
         identifier: &str,
-        proxy: Option<String>,
-        timezone: Option<String>,
-        language: Option<String>,
+        proxy: Option<&str>,
+        timezone: Option<&str>,
+        language: Option<&str>,
     ) -> Result<()> {
         let seq = self.switcher.load_sequence()?;
         let num = seq.resolve_identifier(identifier)?;
-        let proxy = crate::proxy::normalize_stored(proxy.as_deref())?;
-        let timezone = crate::locale::normalize_timezone(timezone.as_deref())?;
-        let language = crate::locale::normalize_language(language.as_deref())?;
+        let proxy = crate::proxy::normalize_stored(proxy)?;
+        let timezone = crate::locale::normalize_timezone(timezone)?;
+        let language = crate::locale::normalize_language(language)?;
         self.switcher.set_locale(num, proxy, timezone, language)?;
         if let Some(rec) = self.switcher.load_sequence()?.account(num) {
             self.write_launch_settings(num, rec);
@@ -1445,11 +1457,11 @@ impl Engine {
     }
 
     /// Store the app-wide proxy and rewrite every account that inherits it.
-    pub fn set_app_proxy(&self, proxy: Option<String>) -> Result<()> {
-        let stored = crate::proxy::normalize_stored(proxy.as_deref())?;
+    pub fn set_app_proxy(&self, proxy: Option<&str>) -> Result<()> {
+        let stored = crate::proxy::normalize_stored(proxy)?;
         {
             let mut s = self.settings.lock();
-            s.proxy = stored.clone();
+            s.proxy.clone_from(&stored);
             s.save(&self.paths.settings_file)?;
         }
         *self.app_proxy.lock() = stored;
@@ -3240,38 +3252,21 @@ impl Engine {
             }
             "set_proxy" => {
                 let id = str_param(params, "id")?;
-                let proxy = params
-                    .get("proxy")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let proxy = match proxy.as_deref() {
-                    None | Some("") => None,
-                    Some(s) => Some(s.to_string()),
-                };
-                self.set_proxy(id, proxy)?;
+                self.set_proxy(id, opt_param(params, "proxy"))?;
                 Ok(json!({ "ok": true }))
             }
             "set_locale" => {
                 let id = str_param(params, "id")?;
-                let opt = |key: &str| -> Option<String> {
-                    params
-                        .get(key)
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                };
-                self.set_locale(id, opt("proxy"), opt("timezone"), opt("language"))?;
+                self.set_locale(
+                    id,
+                    opt_param(params, "proxy"),
+                    opt_param(params, "timezone"),
+                    opt_param(params, "language"),
+                )?;
                 Ok(json!({ "ok": true }))
             }
             "set_app_proxy" => {
-                let proxy = params
-                    .get("proxy")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string);
-                self.set_app_proxy(proxy)?;
+                self.set_app_proxy(opt_param(params, "proxy"))?;
                 Ok(json!({ "ok": true }))
             }
             "locale_detect" => {
@@ -3279,7 +3274,7 @@ impl Engine {
                 let stored = crate::proxy::normalize_stored(proxy)?;
                 let os_only = params
                     .get("osOnly")
-                    .and_then(|v| v.as_bool())
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 let app = if os_only {
                     None
@@ -5209,8 +5204,7 @@ mod tests {
         let (eng, _m) = engine_with_two_accounts(tmp.path());
         std::fs::create_dir_all(eng.paths.claude_settings.parent().unwrap()).unwrap();
         std::fs::write(&eng.paths.claude_settings, br#"{"model":"opus"}"#).unwrap();
-        eng.set_proxy("2", Some("http://127.0.0.1:7897".into()))
-            .unwrap();
+        eng.set_proxy("2", Some("http://127.0.0.1:7897")).unwrap();
 
         let launch = eng.session_prepare("2", true).unwrap();
         assert_eq!(
@@ -5234,7 +5228,7 @@ mod tests {
     fn a_direct_proxy_scrubs_inherited_proxy_vars() {
         let tmp = tempfile::tempdir().unwrap();
         let (eng, _m) = engine_with_two_accounts(tmp.path());
-        eng.set_proxy("2", Some("direct".into())).unwrap();
+        eng.set_proxy("2", Some("direct")).unwrap();
         let launch = eng.session_prepare("2", true).unwrap();
         assert!(launch.extra_env.is_empty());
         assert!(launch.scrub_env.iter().any(|k| k == "HTTPS_PROXY"));
@@ -5248,14 +5242,13 @@ mod tests {
     fn switching_writes_the_new_accounts_proxy_into_the_default_settings() {
         let tmp = tempfile::tempdir().unwrap();
         let (eng, _m) = engine_with_two_accounts(tmp.path());
-        eng.set_proxy("1", Some("http://127.0.0.1:7897".into()))
-            .unwrap();
+        eng.set_proxy("1", Some("http://127.0.0.1:7897")).unwrap();
         eng.switch_to("1").unwrap();
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&eng.paths.claude_settings).unwrap())
                 .unwrap();
         assert_eq!(v["env"]["HTTPS_PROXY"], "http://127.0.0.1:7897");
-        eng.set_proxy("2", Some("direct".into())).unwrap();
+        eng.set_proxy("2", Some("direct")).unwrap();
         eng.switch_to("2").unwrap();
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&eng.paths.claude_settings).unwrap())
@@ -5271,9 +5264,9 @@ mod tests {
         std::fs::write(&eng.paths.claude_settings, br#"{"model":"opus"}"#).unwrap();
         eng.set_locale(
             "2",
-            Some("http://127.0.0.1:7897".into()),
-            Some("Asia/Tokyo".into()),
-            Some("japanese".into()),
+            Some("http://127.0.0.1:7897"),
+            Some("Asia/Tokyo"),
+            Some("japanese"),
         )
         .unwrap();
 
@@ -5307,9 +5300,9 @@ mod tests {
         let (eng, _m) = engine_with_two_accounts(tmp.path());
         eng.set_locale(
             "1",
-            Some("http://127.0.0.1:7897".into()),
-            Some("America/Los_Angeles".into()),
-            Some("english".into()),
+            Some("http://127.0.0.1:7897"),
+            Some("America/Los_Angeles"),
+            Some("english"),
         )
         .unwrap();
         eng.switch_to("1").unwrap();
@@ -5317,8 +5310,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&eng.paths.claude_settings).unwrap())
                 .unwrap();
         assert_eq!(v["timeZone"], "America/Los_Angeles");
-        eng.set_locale("2", Some("direct".into()), None, None)
-            .unwrap();
+        eng.set_locale("2", Some("direct"), None, None).unwrap();
         eng.switch_to("2").unwrap();
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&eng.paths.claude_settings).unwrap())
@@ -5345,8 +5337,7 @@ mod tests {
     fn app_proxy_is_inherited_by_accounts_on_system() {
         let tmp = tempfile::tempdir().unwrap();
         let (eng, _m) = engine_with_two_accounts(tmp.path());
-        eng.set_app_proxy(Some("http://127.0.0.1:7897".into()))
-            .unwrap();
+        eng.set_app_proxy(Some("http://127.0.0.1:7897")).unwrap();
         assert_eq!(
             eng.snapshot().unwrap().proxy.as_deref(),
             Some("http://127.0.0.1:7897")
@@ -5358,23 +5349,22 @@ mod tests {
             Some("http://127.0.0.1:7897")
         );
 
-        eng.set_proxy("2", Some("http://10.0.0.1:1".into()))
-            .unwrap();
+        eng.set_proxy("2", Some("http://10.0.0.1:1")).unwrap();
         let launch = eng.session_prepare("2", true).unwrap();
         assert_eq!(
             launch.extra_env.get("HTTPS_PROXY").map(String::as_str),
             Some("http://10.0.0.1:1")
         );
 
-        eng.set_proxy("2", Some("direct".into())).unwrap();
+        eng.set_proxy("2", Some("direct")).unwrap();
         let launch = eng.session_prepare("2", true).unwrap();
         assert!(launch.scrub_env.iter().any(|k| k == "HTTPS_PROXY"));
 
-        eng.set_app_proxy(Some("direct".into())).unwrap();
+        eng.set_app_proxy(Some("direct")).unwrap();
         eng.set_proxy("2", None).unwrap();
         let launch = eng.session_prepare("2", true).unwrap();
         assert!(launch.scrub_env.iter().any(|k| k == "HTTPS_PROXY"));
-        assert!(launch.extra_env.get("HTTPS_PROXY").is_none());
+        assert!(!launch.extra_env.contains_key("HTTPS_PROXY"));
     }
 
     #[test]

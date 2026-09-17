@@ -67,21 +67,16 @@ pub fn launch_env(
         }
         None => scrub.push(TZ.to_string()),
     }
-    match language.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(lang) => match posix_locale(lang) {
-            Some(posix) => {
-                env.insert(LANG.to_string(), posix.clone());
-                env.insert(LC_ALL.to_string(), posix);
-            }
-            None => {
-                scrub.push(LANG.to_string());
-                scrub.push(LC_ALL.to_string());
-            }
-        },
-        None => {
-            scrub.push(LANG.to_string());
-            scrub.push(LC_ALL.to_string());
-        }
+    if let Some(posix) = language
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(posix_locale)
+    {
+        env.insert(LANG.to_string(), posix.clone());
+        env.insert(LC_ALL.to_string(), posix);
+    } else {
+        scrub.push(LANG.to_string());
+        scrub.push(LC_ALL.to_string());
     }
     (env, scrub)
 }
@@ -121,21 +116,16 @@ pub fn merge_into_settings(
             env.remove(TZ);
         }
     }
-    match language.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(lang) => match posix_locale(lang) {
-            Some(posix) => {
-                env.insert(LANG.into(), json!(posix));
-                env.insert(LC_ALL.into(), json!(posix));
-            }
-            None => {
-                env.remove(LANG);
-                env.remove(LC_ALL);
-            }
-        },
-        None => {
-            env.remove(LANG);
-            env.remove(LC_ALL);
-        }
+    if let Some(posix) = language
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(posix_locale)
+    {
+        env.insert(LANG.into(), json!(posix));
+        env.insert(LC_ALL.into(), json!(posix));
+    } else {
+        env.remove(LANG);
+        env.remove(LC_ALL);
     }
     if env.is_empty() {
         map.remove("env");
