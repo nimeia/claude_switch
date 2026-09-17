@@ -569,7 +569,7 @@ fn dir_size_contents(path: &Path) -> u64 {
 }
 
 fn file_len(path: &Path) -> u64 {
-    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    fs::metadata(path).map_or(0, |m| m.len())
 }
 
 fn is_dir_link(path: &Path) -> bool {
