@@ -341,6 +341,8 @@ pub fn run_sync(
     work_dir: &Path,
     prompt: &str,
     timeout: Duration,
+    stored_proxy: Option<&str>,
+    app_proxy: Option<&str>,
 ) -> Result<String, String> {
     std::fs::create_dir_all(work_dir).map_err(|e| format!("cloud warmup work dir: {e}"))?;
 
@@ -371,9 +373,7 @@ pub fn run_sync(
     }
     // Without this a machine whose proxy lives in Windows Internet Settings
     // sends the session straight out, and Anthropic answers 403.
-    for (key, value) in crate::proxy::child_env(API_HOST) {
-        cmd.env(key, value);
-    }
+    crate::proxy::apply_to_command(&mut cmd, stored_proxy, API_HOST, app_proxy);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

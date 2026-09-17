@@ -17,6 +17,7 @@ pub mod paths;
 pub mod plan;
 pub mod projects;
 pub mod proxy;
+pub mod relocate;
 pub mod resume;
 pub mod rules;
 pub mod sequence;

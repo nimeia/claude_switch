@@ -173,6 +173,189 @@ pub fn posix_locale(language: &str) -> Option<String> {
     )
 }
 
+/// What a geolocation lookup concluded about the proxy's exit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExitLocale {
+    pub ip: String,
+    pub country_code: String,
+    pub country: String,
+    pub timezone: String,
+    pub language: String,
+}
+
+/// Probe the public IP as seen through `stored` (system / direct / URL) and
+/// map it to a Claude Code timezone + language.
+///
+/// `app` is the app-wide proxy used when `stored` is system.
+pub fn detect_exit(stored: Option<&str>, app: Option<&str>) -> Result<ExitLocale> {
+    let proxy_url = crate::proxy::resolve_stored_in(stored, crate::proxy::ANTHROPIC_API_HOST, app);
+    fetch_exit(proxy_url.as_deref())
+}
+
+fn fetch_exit(proxy_url: Option<&str>) -> Result<ExitLocale> {
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(4))
+        .timeout_read(std::time::Duration::from_secs(8));
+    if let Some(url) = proxy_url {
+        match ureq::Proxy::new(url) {
+            Ok(p) => builder = builder.proxy(p),
+            Err(e) => {
+                return Err(Error::Validation(format!("proxy URL is not usable: {e}")));
+            }
+        }
+    }
+    let agent = builder.build();
+    let mut last = None;
+    for url in [
+        "https://ipwho.is/",
+        "https://ipapi.co/json/",
+        "http://ip-api.com/json/?fields=status,message,query,country,countryCode,timezone",
+    ] {
+        match get_json(&agent, url) {
+            Ok(v) => match parse_geo_json(&v) {
+                Ok(loc) => return Ok(loc),
+                Err(e) => last = Some(e),
+            },
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        Error::Network("could not reach an IP geolocation service through this proxy".into())
+    }))
+}
+
+fn get_json(agent: &ureq::Agent, url: &str) -> Result<serde_json::Value> {
+    let resp = agent
+        .get(url)
+        .set("Accept", "application/json")
+        .set("User-Agent", "ClaudeSwitch/locale-detect")
+        .call()
+        .map_err(|e| Error::Network(format!("geolocation GET failed: {e}")))?;
+    let text = resp
+        .into_string()
+        .map_err(|e| Error::Network(format!("geolocation body: {e}")))?;
+    serde_json::from_str(&text).map_err(|e| Error::Network(format!("geolocation JSON: {e}")))
+}
+
+/// Read country / timezone out of ipwho.is, ipapi.co, or ip-api.com JSON.
+pub fn parse_geo_json(v: &Value) -> Result<ExitLocale> {
+    if v.get("success") == Some(&json!(false)) {
+        let msg = v
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("geolocation failed");
+        return Err(Error::Network(msg.into()));
+    }
+    if v.get("status").and_then(Value::as_str) == Some("fail") {
+        let msg = v
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("geolocation failed");
+        return Err(Error::Network(msg.into()));
+    }
+
+    let ip = first_str(v, &["ip", "query"]).unwrap_or_default();
+    let country_code = first_str(v, &["country_code", "countryCode"])
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let country = first_str(v, &["country", "country_name"]).unwrap_or_default();
+    let tz_raw = timezone_field(v);
+
+    let timezone = match tz_raw.as_deref().filter(|s| is_iana(s)) {
+        Some(tz) => tz.to_string(),
+        None => timezone_for_country(&country_code)
+            .map(str::to_string)
+            .ok_or_else(|| Error::Network("geolocation response had no usable timezone".into()))?,
+    };
+    if country_code.is_empty() && tz_raw.is_none() {
+        return Err(Error::Network(
+            "geolocation response had no country or timezone".into(),
+        ));
+    }
+    let language = language_for_country(&country_code).to_string();
+    Ok(ExitLocale {
+        ip,
+        country_code,
+        country,
+        timezone,
+        language,
+    })
+}
+
+#[must_use]
+pub fn language_for_country(cc: &str) -> &'static str {
+    match cc.trim().to_ascii_uppercase().as_str() {
+        "JP" => "japanese",
+        "CN" | "TW" | "HK" | "MO" => "chinese",
+        "KR" => "korean",
+        "FR" => "french",
+        "DE" | "AT" => "german",
+        "ES" | "MX" | "AR" | "CL" | "CO" | "PE" | "VE" | "EC" | "UY" | "PY" | "BO" | "GT"
+        | "CR" | "PA" | "CU" | "DO" | "HN" | "SV" | "NI" => "spanish",
+        "BR" | "PT" => "portuguese",
+        "IT" => "italian",
+        "RU" | "BY" | "KZ" => "russian",
+        "TH" => "thai",
+        "VN" => "vietnamese",
+        "ID" => "indonesian",
+        "TR" => "turkish",
+        "SA" | "AE" | "EG" | "QA" | "KW" | "BH" | "OM" | "JO" | "IQ" | "MA" | "DZ" | "TN"
+        | "LB" => "arabic",
+        _ => "english",
+    }
+}
+
+fn timezone_for_country(cc: &str) -> Option<&'static str> {
+    Some(match cc {
+        "JP" => "Asia/Tokyo",
+        "CN" => "Asia/Shanghai",
+        "HK" => "Asia/Hong_Kong",
+        "TW" => "Asia/Taipei",
+        "MO" => "Asia/Macau",
+        "KR" => "Asia/Seoul",
+        "SG" => "Asia/Singapore",
+        "GB" | "UK" => "Europe/London",
+        "DE" => "Europe/Berlin",
+        "FR" => "Europe/Paris",
+        "AU" => "Australia/Sydney",
+        "IN" => "Asia/Kolkata",
+        "RU" => "Europe/Moscow",
+        "BR" => "America/Sao_Paulo",
+        "US" => "America/New_York",
+        "CA" => "America/Toronto",
+        _ => return None,
+    })
+}
+
+fn first_str(v: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|k| {
+        v.get(*k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn timezone_field(v: &Value) -> Option<String> {
+    if let Some(s) = first_str(v, &["timezone", "time_zone"]) {
+        return Some(s);
+    }
+    for key in ["timezone", "time_zone"] {
+        if let Some(id) = v
+            .get(key)
+            .and_then(Value::as_object)
+            .and_then(|o| o.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
 fn is_system_token(s: &str) -> bool {
     s.eq_ignore_ascii_case("system")
         || s.eq_ignore_ascii_case("default")
@@ -315,5 +498,65 @@ mod tests {
         assert!(map.get("language").is_none());
         assert_eq!(map["env"]["FOO"], "bar");
         assert!(map["env"].get("TZ").is_none());
+    }
+
+    #[test]
+    fn geo_json_from_the_common_providers() {
+        let ipwho = json!({
+            "ip": "203.0.113.10",
+            "success": true,
+            "country": "Japan",
+            "country_code": "JP",
+            "timezone": { "id": "Asia/Tokyo" }
+        });
+        let loc = parse_geo_json(&ipwho).unwrap();
+        assert_eq!(loc.ip, "203.0.113.10");
+        assert_eq!(loc.country_code, "JP");
+        assert_eq!(loc.timezone, "Asia/Tokyo");
+        assert_eq!(loc.language, "japanese");
+
+        let ipapi = json!({
+            "ip": "198.51.100.2",
+            "country_name": "United States",
+            "country_code": "us",
+            "timezone": "America/Los_Angeles"
+        });
+        let loc = parse_geo_json(&ipapi).unwrap();
+        assert_eq!(loc.timezone, "America/Los_Angeles");
+        assert_eq!(loc.language, "english");
+
+        let ipapi_com = json!({
+            "status": "success",
+            "query": "192.0.2.1",
+            "country": "China",
+            "countryCode": "CN",
+            "timezone": "Asia/Shanghai"
+        });
+        let loc = parse_geo_json(&ipapi_com).unwrap();
+        assert_eq!(loc.language, "chinese");
+        assert_eq!(loc.timezone, "Asia/Shanghai");
+    }
+
+    #[test]
+    fn geo_json_falls_back_to_country_timezone() {
+        let v = json!({ "country_code": "JP", "ip": "1.1.1.1" });
+        let loc = parse_geo_json(&v).unwrap();
+        assert_eq!(loc.timezone, "Asia/Tokyo");
+        assert_eq!(loc.language, "japanese");
+    }
+
+    #[test]
+    fn geo_json_rejects_failures() {
+        assert!(parse_geo_json(&json!({"success": false, "message": "nope"})).is_err());
+        assert!(parse_geo_json(&json!({"status": "fail", "message": "nope"})).is_err());
+        assert!(parse_geo_json(&json!({"ip": "1.2.3.4"})).is_err());
+    }
+
+    #[test]
+    fn language_follows_the_country() {
+        assert_eq!(language_for_country("jp"), "japanese");
+        assert_eq!(language_for_country("CN"), "chinese");
+        assert_eq!(language_for_country("GB"), "english");
+        assert_eq!(language_for_country("XX"), "english");
     }
 }

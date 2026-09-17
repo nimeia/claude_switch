@@ -262,6 +262,12 @@ pub struct Settings {
     pub ui: UiSettings,
     #[serde(default)]
     pub statusline: StatuslineSettings,
+    /// App-wide proxy for this tool and for accounts set to `"system"`.
+    ///
+    /// Absent = machine (env, then Windows Internet Settings). `"direct"` = no
+    /// proxy. Any other value is an `http(s)` URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 fn default_schema() -> u32 {
@@ -276,6 +282,7 @@ impl Default for Settings {
             warmup: WarmupSettings::default(),
             ui: UiSettings::default(),
             statusline: StatuslineSettings::default(),
+            proxy: None,
         }
     }
 }
@@ -334,6 +341,7 @@ mod tests {
         s.warmup.enabled = true;
         s.warmup.work_start = "08:30".into();
         s.warmup.work_end = "17:30".into();
+        s.proxy = Some("http://127.0.0.1:7897".into());
         s.save(&path).unwrap();
         let loaded = Settings::load(&path).unwrap();
         assert!(loaded.autoswitch.enabled);
@@ -341,6 +349,7 @@ mod tests {
         assert!(loaded.warmup.enabled);
         assert_eq!(loaded.warmup.work_start, "08:30");
         assert_eq!(loaded.warmup.work_end, "17:30");
+        assert_eq!(loaded.proxy.as_deref(), Some("http://127.0.0.1:7897"));
     }
 
     #[test]

@@ -17,6 +17,11 @@ public sealed class AccountCardModel
     public string? Timezone { get; init; }
     /// <summary>Claude Code response language; null does not override.</summary>
     public string? Language { get; init; }
+    /// <summary>
+    /// App-wide proxy from the snapshot. Used when <see cref="Proxy"/> is
+    /// null (this account follows the app / system choice).
+    /// </summary>
+    public string? AppProxy { get; init; }
     public bool Active { get; init; }
     public bool Disabled { get; init; }
     /// <summary>
@@ -331,7 +336,9 @@ internal sealed class AccountCard : Control
         if (Theme.FormatWarmupAnchor(model.WarmupAnchor) is { } warm)
             warmTip = Loc.T("card.tip.warmup", warm);
         _tip.SetToolTip(this,
-            $"{title}\n{Loc.T("card.slot", model.Number)} · {email}\n{PlanTooltipLines(model)}"
+            $"{title}\n{Loc.T("card.slot", model.Number)} · {email}\n"
+            + Loc.T("card.tip.locale", BuildLocaleLine(model))
+            + PlanTooltipLines(model)
             + Loc.T("card.tip.windows", five, seven)
             + warmTip
             + (model.Active ? Loc.T("card.tip.inUse") : "")
@@ -700,11 +707,6 @@ internal sealed class AccountCard : Control
         int row1Y = bounds.Y + Sc(PadY);
         int row2Y = row1Y + s_row1H + Sc(3);
         int row3Y = row2Y + s_row2H + Sc(2);
-        // Identity is two rows against the meters' three, so it centres on the
-        // card instead of leaving the name hanging at the top.
-        int identityH = s_row1H + Sc(3) + s_row2H;
-        int idRow1Y = bounds.Y + Math.Max(Sc(PadY), (bounds.Height - identityH) / 2);
-        int idRow2Y = idRow1Y + s_row1H + Sc(3);
 
         int avatarD = Sc(AvatarD);
         DrawAvatar(
@@ -723,9 +725,9 @@ internal sealed class AccountCard : Control
         // the identity line rather than disappearing. Dropping it would take the
         // amber "needs you" with it — the one thing on the card that must never
         // be the casualty of a narrow window.
-        DrawIdentity(g, col, idRow1Y, idRow2Y, m, inlineState: col.StatusW == 0);
+        DrawIdentity(g, col, row1Y, row2Y, row3Y, m, inlineState: col.StatusW == 0);
         _fixRect = col.StatusW > 0
-            ? DrawStatusColumn(g, col, idRow1Y, idRow2Y, m)
+            ? DrawStatusColumn(g, col, row1Y, row2Y, m)
             : Rectangle.Empty;
         DrawMeters(g, col, row1Y, row2Y, row3Y, m);
 
@@ -757,7 +759,7 @@ internal sealed class AccountCard : Control
     }
 
     private static void DrawIdentity(
-        Graphics g, Columns col, int row1Y, int row2Y, AccountCardModel m, bool inlineState)
+        Graphics g, Columns col, int row1Y, int row2Y, int row3Y, AccountCardModel m, bool inlineState)
     {
         int w = col.IdentityW;
         int gap = Sc(Theme.Space2);
@@ -799,6 +801,12 @@ internal sealed class AccountCard : Control
             g, BuildSubLine(m, w), Theme.FontSmall,
             new Rectangle(col.IdentityLeft, row2Y, w, s_row2H),
             m.Disabled ? Theme.TextDisabled : Theme.TextSecondary,
+            TfLeft);
+
+        TextRenderer.DrawText(
+            g, BuildLocaleLine(m), Theme.FontSmall,
+            new Rectangle(col.IdentityLeft, row3Y, w, s_row3H),
+            m.Disabled ? Theme.TextDisabled : Theme.TextMuted,
             TfLeft);
     }
 
@@ -937,6 +945,56 @@ internal sealed class AccountCard : Control
 
         string full = Loc.T("card.subLine", baseLine, started);
         return TextW(full, Theme.FontSmall) <= availWidth ? full : baseLine;
+    }
+
+    /// <summary>
+    /// Proxy, timezone and language this account's Claude Code will launch with.
+    /// Always three parts so the column is scannable down the list.
+    /// </summary>
+    public static string BuildLocaleLine(AccountCardModel m)
+    {
+        EnsureMetrics();
+        return string.Join(" · ", FormatProxyLabel(m), FormatTimezone(m.Timezone), FormatLanguage(m.Language));
+    }
+
+    internal static string FormatProxyLabel(AccountCardModel m)
+    {
+        if (string.Equals(m.Proxy, "direct", StringComparison.OrdinalIgnoreCase))
+            return Loc.T("card.locale.proxy.direct");
+        if (!string.IsNullOrWhiteSpace(m.Proxy))
+            return ShortProxyUrl(m.Proxy);
+        if (string.Equals(m.AppProxy, "direct", StringComparison.OrdinalIgnoreCase))
+            return Loc.T("card.locale.proxy.appDirect");
+        if (!string.IsNullOrWhiteSpace(m.AppProxy))
+            return Loc.T("card.locale.proxy.app", ShortProxyUrl(m.AppProxy));
+        return Loc.T("card.locale.proxy.system");
+    }
+
+    internal static string ShortProxyUrl(string raw)
+    {
+        raw = raw.Trim();
+        if (raw.Length == 0) return raw;
+        string candidate = raw.Contains("://", StringComparison.Ordinal) ? raw : "http://" + raw;
+        if (Uri.TryCreate(candidate, UriKind.Absolute, out var uri) && !string.IsNullOrEmpty(uri.Host))
+            return uri.IsDefaultPort ? uri.Host : $"{uri.Host}:{uri.Port}";
+        return raw;
+    }
+
+    internal static string FormatTimezone(string? timezone) =>
+        string.IsNullOrWhiteSpace(timezone) ? Loc.T("card.locale.tz.system") : timezone.Trim();
+
+    internal static string FormatLanguage(string? language)
+    {
+        if (string.IsNullOrWhiteSpace(language))
+            return Loc.T("card.locale.lang.system");
+        return language.Trim().ToLowerInvariant() switch
+        {
+            "chinese" or "zh" or "zh-cn" or "zh-hans" => Loc.T("card.locale.lang.chinese"),
+            "japanese" or "ja" or "jp" => Loc.T("card.locale.lang.japanese"),
+            "english" or "en" or "en-us" => Loc.T("card.locale.lang.english"),
+            "korean" or "ko" => Loc.T("card.locale.lang.korean"),
+            _ => language.Trim(),
+        };
     }
 
     /// <summary>

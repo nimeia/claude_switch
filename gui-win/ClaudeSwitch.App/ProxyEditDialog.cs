@@ -1,9 +1,12 @@
+using System.Text.Json.Nodes;
+using ClaudeSwitch.Core;
+
 namespace ClaudeSwitch.App;
 
 /// <summary>
 /// One account's proxy, timezone and language — kept together so they match
-/// the proxy node's exit region. Clash's local URL cannot say which country
-/// that is, so the region is chosen here next to the proxy.
+/// the proxy node's exit region. The local Clash URL cannot say which country
+/// that is, so this window probes the exit IP through the chosen proxy.
 /// </summary>
 internal sealed class ProxyEditDialog : Form
 {
@@ -26,6 +29,7 @@ internal sealed class ProxyEditDialog : Form
         new("custom", null, null),
     ];
 
+    private readonly Engine? _engine;
     private readonly RadioButton _system = new();
     private readonly RadioButton _direct = new();
     private readonly RadioButton _custom = new();
@@ -33,12 +37,19 @@ internal sealed class ProxyEditDialog : Form
     private readonly ComboBox _region = new();
     private readonly TextBox _timezone = new();
     private readonly TextBox _language = new();
+    private readonly Label _detectStatus = new();
+    private readonly SecondaryButton _detect = new();
+    private readonly System.Windows.Forms.Timer _urlDebounce = new() { Interval = 600 };
     private bool _syncingRegion;
+    private bool _userTouchedRegion;
+    private bool _ready;
+    private int _detectGen;
 
     public Result EditResult { get; private set; }
 
-    public ProxyEditDialog(AccountCardModel model)
+    public ProxyEditDialog(AccountCardModel model, Engine? engine = null)
     {
+        _engine = engine;
         Text = Loc.T("proxy.title");
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
@@ -95,6 +106,19 @@ internal sealed class ProxyEditDialog : Form
         _language.PlaceholderText = Loc.T("locale.language.placeholder");
         layout.Advance(_language);
 
+        _detectStatus.Name = "detectStatus";
+        _detectStatus.Font = Theme.FontSmall;
+        _detectStatus.ForeColor = Theme.TextMuted;
+        _detectStatus.AutoSize = true;
+        _detectStatus.MaximumSize = new Size(layout.TextWidth, 0);
+        _detectStatus.Location = new Point(layout.Left, layout.Y);
+        // Reserve two lines so a later probe result does not sit on the buttons.
+        _detectStatus.Text = Loc.T("locale.detect.ok", "255.255.255.255", "United States", "America/Los_Angeles", "english");
+        _detectStatus.Size = _detectStatus.GetPreferredSize(new Size(layout.TextWidth, 0));
+        _detectStatus.MinimumSize = new Size(0, _detectStatus.Height);
+        _detectStatus.Text = "";
+        layout.Advance(_detectStatus);
+
         string stored = model.Proxy ?? "";
         if (string.Equals(stored, "direct", StringComparison.OrdinalIgnoreCase))
         {
@@ -115,14 +139,35 @@ internal sealed class ProxyEditDialog : Form
         SelectMatchingPreset();
 
         void SyncUrlEnabled() => _url.Enabled = _custom.Checked;
-        _system.CheckedChanged += (_, _) => SyncUrlEnabled();
-        _direct.CheckedChanged += (_, _) => SyncUrlEnabled();
-        _custom.CheckedChanged += (_, _) => SyncUrlEnabled();
+        _system.CheckedChanged += (_, _) => { SyncUrlEnabled(); if (_system.Checked) OnProxyChoiceChanged(); };
+        _direct.CheckedChanged += (_, _) => { SyncUrlEnabled(); if (_direct.Checked) OnProxyChoiceChanged(); };
+        _custom.CheckedChanged += (_, _) => { SyncUrlEnabled(); if (_custom.Checked) OnProxyChoiceChanged(); };
         SyncUrlEnabled();
 
-        _region.SelectedIndexChanged += (_, _) => ApplySelectedPreset();
+        _region.SelectedIndexChanged += (_, _) =>
+        {
+            if (!_syncingRegion) _userTouchedRegion = true;
+            ApplySelectedPreset();
+        };
         _timezone.TextChanged += (_, _) => MarkCustomIfEdited();
         _language.TextChanged += (_, _) => MarkCustomIfEdited();
+        _url.TextChanged += (_, _) =>
+        {
+            if (!_ready || !_custom.Checked) return;
+            _urlDebounce.Stop();
+            _urlDebounce.Start();
+        };
+        _urlDebounce.Tick += (_, _) =>
+        {
+            _urlDebounce.Stop();
+            _userTouchedRegion = false;
+            BeginDetect(force: false);
+        };
+
+        _detect.Name = "detect";
+        _detect.Text = Loc.T("locale.detect");
+        _detect.Enabled = _engine is not null;
+        _detect.Click += (_, _) => BeginDetect(force: true);
 
         var btnOk = new PrimaryButton { Text = Loc.T("proxy.save") };
         var btnCancel = new SecondaryButton
@@ -132,25 +177,11 @@ internal sealed class ProxyEditDialog : Form
         };
         btnOk.Click += (_, _) =>
         {
-            string? proxy;
-            if (_direct.Checked)
+            if (!TryReadProxy(out string? proxy, out string? problem))
             {
-                proxy = "direct";
-            }
-            else if (_custom.Checked)
-            {
-                string raw = _url.Text.Trim();
-                if (string.IsNullOrEmpty(raw))
-                {
-                    MessageBox.Show(this, Loc.T("proxy.err.empty"), Loc.T("proxy.invalid"),
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-                proxy = raw;
-            }
-            else
-            {
-                proxy = null;
+                MessageBox.Show(this, problem, Loc.T("proxy.invalid"),
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
             }
 
             string? timezone = EmptyToNull(_timezone.Text);
@@ -171,18 +202,29 @@ internal sealed class ProxyEditDialog : Form
             title, email, hint, when,
             _system, _direct, _custom, _url,
             regionLabel, regionHint, _region, tzLabel, _timezone, langLabel, _language,
-            btnOk, btnCancel,
+            _detectStatus, _detect, btnOk, btnCancel,
         ]);
-        layout.ActionRow(btnOk, btnCancel);
+        layout.ActionRow(_detect, btnOk, btnCancel);
         AcceptButton = btnOk;
         CancelButton = btnCancel;
         ActiveControl = _custom.Checked ? _url : _system;
+        _ready = true;
+
+        if (_engine is not null)
+            Shown += (_, _) => BeginDetect(force: false);
+
+        FormClosed += (_, _) =>
+        {
+            _detectGen++;
+            _urlDebounce.Stop();
+            _urlDebounce.Dispose();
+        };
     }
 
-    public static bool TryEdit(IWin32Window owner, AccountCardModel model, out Result result)
+    public static bool TryEdit(IWin32Window owner, Engine engine, AccountCardModel model, out Result result)
     {
         result = new(model.Proxy, model.Timezone, model.Language);
-        using var dlg = new ProxyEditDialog(model);
+        using var dlg = new ProxyEditDialog(model, engine);
         if (dlg.ShowDialog(owner) != DialogResult.OK)
             return false;
         result = dlg.EditResult;
@@ -200,8 +242,120 @@ internal sealed class ProxyEditDialog : Form
         box.ForeColor = Theme.TextPrimary;
     }
 
+    private void OnProxyChoiceChanged()
+    {
+        if (!_ready) return;
+        _urlDebounce.Stop();
+        _userTouchedRegion = false;
+        BeginDetect(force: false);
+    }
+
+    private void BeginDetect(bool force)
+    {
+        if (_engine is null || IsDisposed) return;
+        if (!TryReadProxy(out string? proxy, out string? problem))
+        {
+            _detectStatus.Text = problem ?? Loc.T("locale.detect.needUrl");
+            _detectStatus.ForeColor = Theme.TextMuted;
+            return;
+        }
+        if (force) _userTouchedRegion = false;
+        int gen = ++_detectGen;
+        _detect.Enabled = false;
+        _detectStatus.ForeColor = Theme.TextMuted;
+        _detectStatus.Text = Loc.T("locale.detect.working");
+        var engine = _engine;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+                var node = engine.Call("locale_detect", new { proxy = proxy ?? "" });
+                Post(() => ApplyDetect(gen, node, error: null));
+            }
+            catch (Exception ex)
+            {
+                string msg = DescribeEngine(ex);
+                Post(() => ApplyDetect(gen, null, msg));
+            }
+        });
+    }
+
+    private void Post(Action action)
+    {
+        try
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            BeginInvoke(action);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Dialog closed while the probe was in flight.
+        }
+    }
+
+    private void ApplyDetect(int gen, JsonNode? node, string? error)
+    {
+        if (IsDisposed || gen != _detectGen) return;
+        _detect.Enabled = _engine is not null;
+        if (error is not null)
+        {
+            _detectStatus.ForeColor = Theme.TextMuted;
+            _detectStatus.Text = Loc.T("locale.detect.fail", error);
+            return;
+        }
+        if (node is null) return;
+
+        string ip = node["ip"]?.GetValue<string>() ?? "";
+        string country = node["country"]?.GetValue<string>()
+            ?? node["countryCode"]?.GetValue<string>()
+            ?? "";
+        string timezone = node["timezone"]?.GetValue<string>() ?? "";
+        string language = node["language"]?.GetValue<string>() ?? "";
+        _detectStatus.ForeColor = Theme.TextSecondary;
+        _detectStatus.Text = Loc.T("locale.detect.ok", ip, country, timezone, language);
+        if (_userTouchedRegion) return;
+        if (timezone.Length == 0 && language.Length == 0) return;
+
+        _syncingRegion = true;
+        try
+        {
+            _timezone.Text = timezone;
+            _language.Text = language;
+            SelectMatchingPreset();
+        }
+        finally
+        {
+            _syncingRegion = false;
+        }
+    }
+
+    private bool TryReadProxy(out string? proxy, out string? problem)
+    {
+        problem = null;
+        if (_direct.Checked)
+        {
+            proxy = "direct";
+            return true;
+        }
+        if (_custom.Checked)
+        {
+            string raw = _url.Text.Trim();
+            if (string.IsNullOrEmpty(raw))
+            {
+                proxy = null;
+                problem = Loc.T("proxy.err.empty");
+                return false;
+            }
+            proxy = raw;
+            return true;
+        }
+        proxy = null;
+        return true;
+    }
+
     private void SelectMatchingPreset()
     {
+        bool was = _syncingRegion;
         _syncingRegion = true;
         try
         {
@@ -222,7 +376,7 @@ internal sealed class ProxyEditDialog : Form
         }
         finally
         {
-            _syncingRegion = false;
+            _syncingRegion = was;
         }
     }
 
@@ -246,6 +400,7 @@ internal sealed class ProxyEditDialog : Form
     private void MarkCustomIfEdited()
     {
         if (_syncingRegion) return;
+        _userTouchedRegion = true;
         if (_region.SelectedItem is RegionChoice choice
             && choice.Key != "custom"
             && Same(choice.Timezone, EmptyToNull(_timezone.Text))
@@ -262,6 +417,23 @@ internal sealed class ProxyEditDialog : Form
         {
             _syncingRegion = false;
         }
+    }
+
+    private static string DescribeEngine(Exception ex)
+    {
+        if (ex is EngineException ee)
+        {
+            try
+            {
+                if (JsonNode.Parse(ee.Json)?["error"]?["message"]?.GetValue<string>() is { Length: > 0 } m)
+                    return m;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Fall through to the exception text.
+            }
+        }
+        return ex.Message;
     }
 
     private static string? EmptyToNull(string? s)

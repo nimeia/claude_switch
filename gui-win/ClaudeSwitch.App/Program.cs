@@ -193,6 +193,7 @@ sealed class MainForm : Form
     private readonly ToolStripButton _btnAdd;
     private readonly ToolStripMenuItem _btnProjects;
     private readonly ToolStripMenuItem _btnOverview;
+    private readonly ToolStripMenuItem _btnRelocate;
     private readonly ToolStripDropDownButton _btnTools;
     private readonly ToolStripDropDownButton _btnRuns;
 
@@ -470,8 +471,19 @@ sealed class MainForm : Form
         };
         _btnLang = BuildLanguageButton();
         _btnTools = MakeStripDrop(Loc.T("toolbar.tools"), Loc.T("toolbar.tools.tip"));
+        var appProxyItem = new ToolStripMenuItem(Loc.T("menu.appProxy"))
+        {
+            ToolTipText = Loc.T("menu.appProxy.tip"),
+        };
+        appProxyItem.Click += (_, _) => DoEditAppProxy();
+        _btnRelocate = new ToolStripMenuItem(Loc.T("menu.relocate"))
+        {
+            ToolTipText = Loc.T("menu.relocate.tip"),
+        };
+        _btnRelocate.Click += (_, _) => DoRelocate();
         _btnTools.DropDownItems.AddRange([
-            _btnProjects, _btnOverview, new ToolStripSeparator(), _btnTheme, _btnLang,
+            _btnProjects, _btnOverview, new ToolStripSeparator(),
+            _btnRelocate, appProxyItem, _btnTheme, _btnLang,
         ]);
         _search = new ToolStripTextBox("search")
         {
@@ -1411,6 +1423,12 @@ sealed class MainForm : Form
                 _search.Text = "e";
             }));
             LayoutProbe.Overlays.Add(("gui-tools-menu.png", () => _btnTools.ShowDropDown()));
+            LayoutProbe.ExtraWindows.Add(("gui-relocate.png", () =>
+            {
+                var dlg = new RelocateDialog(_engine);
+                dlg.Show(this);
+                return dlg;
+            }));
         }
         // Dark is a full second palette, and the colour roles — green for the
         // account in use, slate for focus, amber for attention — have to survive
@@ -1635,6 +1653,8 @@ sealed class MainForm : Form
         _btnProjects.ToolTipText = Loc.T("toolbar.projects.tip");
         _btnOverview.Text = Loc.T("toolbar.overview");
         _btnOverview.ToolTipText = Loc.T("toolbar.overview.tip");
+        _btnRelocate.Text = Loc.T("menu.relocate");
+        _btnRelocate.ToolTipText = Loc.T("menu.relocate.tip");
         _btnTheme.Text = ThemeToggleText();
         _btnTheme.ToolTipText = Loc.T("toolbar.theme.tip");
         // Both of these carry live state in their label, so they are written by
@@ -4385,6 +4405,7 @@ sealed class MainForm : Form
                     Proxy = a["proxy"]?.GetValue<string>(),
                     Timezone = a["timezone"]?.GetValue<string>(),
                     Language = a["language"]?.GetValue<string>(),
+                    AppProxy = snap["proxy"]?.GetValue<string>(),
                     Active = active,
                     Disabled = disabled,
                     LiveSessions = a["liveSessions"]?.GetValue<int>() ?? 0,
@@ -4934,6 +4955,45 @@ sealed class MainForm : Form
         }
     }
 
+    private void DoRelocate()
+    {
+        _pollTimer.Stop();
+        _stalledTimer.Stop();
+        try
+        {
+            using var dlg = new RelocateDialog(_engine);
+            dlg.ShowDialog(this);
+        }
+        finally
+        {
+            _pollTimer.Start();
+            _stalledTimer.Start();
+        }
+    }
+
+    private void DoEditAppProxy()
+    {
+        string? current = null;
+        try { current = _engine.Snapshot()["proxy"]?.GetValue<string>(); }
+        catch (Exception) { /* dialog still works with an empty starting value */ }
+        if (!AppProxyDialog.TryEdit(this, _engine, current, out var proxy))
+            return;
+        try
+        {
+            _engine.Call("set_app_proxy", new { proxy = proxy ?? "" });
+            _status.Text = proxy is null
+                ? Loc.T("appProxy.set.system")
+                : string.Equals(proxy, "direct", StringComparison.OrdinalIgnoreCase)
+                    ? Loc.T("appProxy.set.direct")
+                    : Loc.T("appProxy.set.url", proxy);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, Loc.T("proxy.saveFailed"),
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
     private void DoEditProxy()
     {
         if (_selected is null)
@@ -4943,7 +5003,7 @@ sealed class MainForm : Form
             return;
         }
         var m = _selected.Model;
-        if (!ProxyEditDialog.TryEdit(this, m, out var edit))
+        if (!ProxyEditDialog.TryEdit(this, _engine, m, out var edit))
             return;
         try
         {

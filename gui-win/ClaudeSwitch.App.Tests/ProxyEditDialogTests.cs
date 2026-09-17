@@ -50,7 +50,7 @@ public class ProxyEditDialogTests
             "URL should sit indented under the custom option");
 
         var labels = dlg.Controls.OfType<Label>().OrderBy(c => c.Top).ToList();
-        Assert.Contains(labels, l => l.Text.Contains("没有全局代理", StringComparison.Ordinal));
+        Assert.Contains(labels, l => l.Text.Contains("全局代理", StringComparison.Ordinal));
         Assert.Contains(labels, l => l.Text.Contains("生效时机", StringComparison.Ordinal));
         var intro = labels.Where(l => l.Bottom <= radios[0].Top).ToList();
         Assert.True(intro.Count >= 4, "title, email, hint and when must sit above the radios");
@@ -104,6 +104,15 @@ public class ProxyEditDialogTests
         var combo = dlg.Controls.OfType<ComboBox>().Single();
         var selected = Assert.IsType<ProxyEditDialog.RegionChoice>(combo.SelectedItem);
         Assert.Equal("jp", selected.Key);
+    }
+
+    [Fact]
+    public void Detect_button_is_on_the_dialog()
+    {
+        using var dlg = new ProxyEditDialog(new AccountCardModel { Number = 1, Email = "a@b.c" });
+        var detect = dlg.Controls.OfType<Button>().First(b => b.Name == "detect");
+        Assert.Equal(Loc.T("locale.detect"), detect.Text);
+        Assert.False(detect.Enabled, "no engine in this test, so probing is off");
     }
 
     [Fact]

@@ -126,37 +126,68 @@ impl HttpClient for NoopHttp {
 
 /// Production HTTP client (ureq, blocking).
 pub struct UreqHttp {
-    agent: ureq::Agent,
+    host: String,
+    /// App-wide stored proxy; `None` inside means follow the machine.
+    app_proxy: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
+    cache: parking_lot::Mutex<(Option<String>, ureq::Agent)>,
 }
 
 impl UreqHttp {
     #[must_use]
     pub fn new() -> Self {
-        Self::for_host("api.anthropic.com")
+        Self::with_app_proxy(std::sync::Arc::new(parking_lot::Mutex::new(None)))
     }
 
-    /// Build an agent routed the way the machine routes `host`.
+    /// Build a client that re-reads `app_proxy` so a settings change takes
+    /// effect on the next request without reconstructing the engine.
+    #[must_use]
+    pub fn with_app_proxy(app_proxy: std::sync::Arc<parking_lot::Mutex<Option<String>>>) -> Self {
+        Self::for_host("api.anthropic.com", app_proxy)
+    }
+
+    /// Build an agent routed the way this app routes `host`.
     ///
     /// ureq does not read proxy settings on its own. Skipping them is not a
     /// missing nicety: on a proxied network the direct request is answered with
     /// `403 "Request not allowed"`, which reads as a broken credential and is
     /// not one (Claude Code works there because it honors the same proxy).
     #[must_use]
-    pub fn for_host(host: &str) -> Self {
-        let mut builder = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_secs(5))
-            .timeout_read(Duration::from_secs(10));
-        if let Some(url) = crate::proxy::resolve_for(host) {
-            // Unsupported scheme (e.g. socks without the feature): stay direct
-            // rather than failing to construct a client at all.
-            if let Ok(p) = ureq::Proxy::new(&url) {
-                builder = builder.proxy(p);
-            }
-        }
+    pub fn for_host(
+        host: &str,
+        app_proxy: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
+    ) -> Self {
+        let url = crate::proxy::resolve_app(app_proxy.lock().as_deref(), host);
+        let agent = build_agent(url.as_deref());
         Self {
-            agent: builder.build(),
+            host: host.to_string(),
+            app_proxy,
+            cache: parking_lot::Mutex::new((url, agent)),
         }
     }
+
+    fn agent(&self) -> ureq::Agent {
+        let url = crate::proxy::resolve_app(self.app_proxy.lock().as_deref(), &self.host);
+        let mut cache = self.cache.lock();
+        if cache.0 != url {
+            cache.1 = build_agent(url.as_deref());
+            cache.0 = url;
+        }
+        cache.1.clone()
+    }
+}
+
+fn build_agent(proxy_url: Option<&str>) -> ureq::Agent {
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(10));
+    if let Some(url) = proxy_url {
+        // Unsupported scheme (e.g. socks without the feature): stay direct
+        // rather than failing to construct a client at all.
+        if let Ok(p) = ureq::Proxy::new(url) {
+            builder = builder.proxy(p);
+        }
+    }
+    builder.build()
 }
 
 impl Default for UreqHttp {
@@ -167,7 +198,7 @@ impl Default for UreqHttp {
 
 impl HttpClient for UreqHttp {
     fn get_json(&self, url: &str, headers: &[(&str, &str)]) -> Result<Value> {
-        let mut req = self.agent.get(url);
+        let mut req = self.agent().get(url);
         for (k, v) in headers {
             req = req.set(k, v);
         }
@@ -181,7 +212,7 @@ impl HttpClient for UreqHttp {
     }
 
     fn post_json(&self, url: &str, headers: &[(&str, &str)], body: &Value) -> Result<Value> {
-        let mut req = self.agent.post(url);
+        let mut req = self.agent().post(url);
         for (k, v) in headers {
             req = req.set(k, v);
         }

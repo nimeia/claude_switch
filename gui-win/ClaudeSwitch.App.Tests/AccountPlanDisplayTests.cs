@@ -77,6 +77,62 @@ public class AccountPlanDisplayTests
     }
 
     [Fact]
+    public void Locale_line_shows_system_defaults()
+    {
+        using var lang = Chinese();
+        var line = AccountCard.BuildLocaleLine(new AccountCardModel { Number = 1, Email = "a@b.c" });
+        Assert.Equal("系统 · 系统时区 · 跟随对话", line);
+    }
+
+    [Fact]
+    public void Locale_line_shows_custom_proxy_timezone_and_language()
+    {
+        using var lang = Chinese();
+        var line = AccountCard.BuildLocaleLine(new AccountCardModel
+        {
+            Number = 1,
+            Email = "a@b.c",
+            Proxy = "http://127.0.0.1:7897",
+            Timezone = "Asia/Tokyo",
+            Language = "japanese",
+        });
+        Assert.Equal("127.0.0.1:7897 · Asia/Tokyo · 日语", line);
+    }
+
+    [Fact]
+    public void Locale_line_follows_the_app_proxy_when_the_account_uses_system()
+    {
+        using var lang = Chinese();
+        var line = AccountCard.BuildLocaleLine(new AccountCardModel
+        {
+            Number = 1,
+            Email = "a@b.c",
+            AppProxy = "http://192.168.1.54:7897",
+        });
+        Assert.Equal("全局 192.168.1.54:7897 · 系统时区 · 跟随对话", line);
+    }
+
+    [Fact]
+    public void Locale_line_direct_and_app_direct()
+    {
+        using var lang = Chinese();
+        Assert.StartsWith(
+            "直连",
+            AccountCard.BuildLocaleLine(new AccountCardModel { Proxy = "direct" }));
+        Assert.StartsWith(
+            "全局直连",
+            AccountCard.BuildLocaleLine(new AccountCardModel { AppProxy = "direct" }));
+    }
+
+    [Fact]
+    public void ShortProxyUrl_strips_scheme_and_userinfo()
+    {
+        Assert.Equal("127.0.0.1:7897", AccountCard.ShortProxyUrl("http://127.0.0.1:7897"));
+        Assert.Equal("proxy.example:8080", AccountCard.ShortProxyUrl("http://user:secret@proxy.example:8080"));
+        Assert.Equal("10.0.0.1:1", AccountCard.ShortProxyUrl("10.0.0.1:1"));
+    }
+
+    [Fact]
     public void Badge_shows_only_with_a_label()
     {
         Assert.True(ProAccount().HasPlanBadge);

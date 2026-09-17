@@ -27,6 +27,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # without it a proxied network gets 403s that look like auth failures.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# Directory junctions (mklink /J) — no admin / Developer Mode, unlike symlinks.
+junction = "1.2"
 
 [dev-dependencies]
 tempfile = "3"

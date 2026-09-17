@@ -416,6 +416,8 @@ pub fn spawn_warmup(
     config_dir: Option<&Path>,
     model: &str,
     work_dir: &Path,
+    stored_proxy: Option<&str>,
+    app_proxy: Option<&str>,
 ) -> Result<(), String> {
     std::fs::create_dir_all(work_dir).map_err(|e| format!("warmup work dir: {e}"))?;
 
@@ -440,9 +442,12 @@ pub fn spawn_warmup(
     }
     // A registry-only proxy never reaches a child on its own, and the direct
     // connection comes back as a 403 that looks like a dead login.
-    for (key, value) in crate::proxy::child_env(crate::warmup_cloud::API_HOST) {
-        cmd.env(key, value);
-    }
+    crate::proxy::apply_to_command(
+        &mut cmd,
+        stored_proxy,
+        crate::warmup_cloud::API_HOST,
+        app_proxy,
+    );
 
     // Detached enough that a slow Haiku reply does not block the poll thread.
     #[cfg(windows)]

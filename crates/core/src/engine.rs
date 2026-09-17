@@ -36,8 +36,8 @@ use crate::warmup_cloud::{self, CloudSyncReport, RoutineSpec};
 use chrono::Local;
 use std::time::{Duration, Instant};
 
-/// Bumped to 5 when `accounts[].timezone` / `language` were added (additive).
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 5;
+/// Bumped to 6 when snapshot `proxy` (app-wide) was added (additive).
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 6;
 pub const FFI_SCHEMA_VERSION: u32 = 1;
 
 /// One account a cloud warmup sync touches, and the routines it should end
@@ -104,6 +104,9 @@ pub struct Snapshot {
     pub accounts: Vec<AccountSnapshot>,
     pub autoswitch: AutoSwitchSettings,
     pub warmup: WarmupSettings,
+    /// App-wide proxy: absent = machine, `"direct"`, or an http(s) URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
     pub is_leader: bool,
     /// Seconds until the next adaptive usage poll (from last [`Engine::refresh_usage`]).
     pub next_poll_seconds: f64,
@@ -340,6 +343,8 @@ pub struct Engine {
     plans: PlanCache,
     live: LiveCache,
     http: SharedHttp,
+    /// Same cell [`UreqHttp`] reads, so a saved global proxy is used immediately.
+    app_proxy: Arc<Mutex<Option<String>>>,
     autoswitch: AutoSwitchEngine,
     settings: Mutex<Settings>,
     events: EventSink,
@@ -360,7 +365,7 @@ impl Engine {
     pub fn init_default() -> Result<Self> {
         let env = PathEnv::from_process();
         let paths = Paths::resolve_and_migrate(env)?;
-        Self::with_paths(paths, Arc::new(UreqHttp::new()))
+        Self::with_paths(paths, None)
     }
 
     /// Isolated engine for tests / FFI consumer fixtures.
@@ -375,7 +380,7 @@ impl Engine {
         let _ = std::fs::create_dir_all(env.claude_config_home());
         let paths = Paths::resolve(env);
         let _ = std::fs::create_dir_all(&paths.backup_root);
-        Self::with_paths(paths, http)
+        Self::with_paths(paths, Some(http))
     }
 
     /// Isolated demo engine: mock HTTP pre-seeded for `tok-a` / `tok-b`.
@@ -383,8 +388,10 @@ impl Engine {
         Self::init_isolated(root, Arc::new(MockHttp::with_demo_tokens()))
     }
 
-    fn with_paths(paths: Paths, http: SharedHttp) -> Result<Self> {
+    fn with_paths(paths: Paths, http: Option<SharedHttp>) -> Result<Self> {
         let settings = Settings::load(&paths.settings_file)?;
+        let app_proxy = Arc::new(Mutex::new(settings.proxy.clone()));
+        let http = http.unwrap_or_else(|| Arc::new(UreqHttp::with_app_proxy(app_proxy.clone())));
         let switcher = Switcher::new(paths.clone());
         Ok(Self {
             paths,
@@ -393,6 +400,7 @@ impl Engine {
             plans: PlanCache::default(),
             live: LiveCache::default(),
             http,
+            app_proxy,
             autoswitch: AutoSwitchEngine::new(),
             settings: Mutex::new(settings),
             events: Arc::new(Mutex::new(Vec::new())),
@@ -704,6 +712,7 @@ impl Engine {
             accounts,
             autoswitch: settings.autoswitch,
             warmup: settings.warmup,
+            proxy: settings.proxy.clone(),
             is_leader: *self.is_leader.lock(),
             next_poll_seconds: self.next_poll.lock().as_secs_f64(),
         })
@@ -873,7 +882,7 @@ impl Engine {
         // live account rather than the recorded one, so a `/login` outside this
         // tool cannot make us open a redundant profile.
         if self.resolve_active(&seq).number == Some(num) {
-            let (extra_env, scrub_env, _) = Self::launch_env_for(rec);
+            let (extra_env, scrub_env, _) = self.launch_env_for(rec);
             self.write_launch_settings_file(&self.paths.claude_settings, rec);
             return Ok(SessionLaunch {
                 config_dir: String::new(),
@@ -930,7 +939,7 @@ impl Engine {
         // After the share copy, which would otherwise overwrite a previous
         // per-account env block with the default profile's settings.json.
         self.write_launch_settings_file(&dir.join("settings.json"), rec);
-        let (extra_env, proxy_scrub, _) = Self::launch_env_for(rec);
+        let (extra_env, proxy_scrub, _) = self.launch_env_for(rec);
         let mut scrub_env: Vec<String> = session::AUTH_OVERRIDE_ENV_VARS
             .iter()
             .map(|s| (*s).to_string())
@@ -1365,10 +1374,14 @@ impl Engine {
 
     /// Env a child Claude Code / adapter should get for this account.
     fn launch_env_for(
+        &self,
         rec: &crate::sequence::AccountRecord,
     ) -> (BTreeMap<String, String>, Vec<String>, Option<String>) {
-        let (mut env, mut scrub, url) =
-            crate::proxy::launch_env(rec.proxy.as_deref(), crate::proxy::ANTHROPIC_API_HOST);
+        let (mut env, mut scrub, url) = crate::proxy::launch_env_in(
+            rec.proxy.as_deref(),
+            crate::proxy::ANTHROPIC_API_HOST,
+            self.app_proxy_stored().as_deref(),
+        );
         let (locale_env, locale_scrub) =
             crate::locale::launch_env(rec.timezone.as_deref(), rec.language.as_deref());
         env.extend(locale_env);
@@ -1385,8 +1398,11 @@ impl Engine {
         settings_path: &Path,
         rec: &crate::sequence::AccountRecord,
     ) {
-        let url =
-            crate::proxy::resolve_stored(rec.proxy.as_deref(), crate::proxy::ANTHROPIC_API_HOST);
+        let url = crate::proxy::resolve_stored_in(
+            rec.proxy.as_deref(),
+            crate::proxy::ANTHROPIC_API_HOST,
+            self.app_proxy_stored().as_deref(),
+        );
         if let Err(e) = crate::proxy::apply_launch_settings(
             settings_path,
             url.as_deref(),
@@ -1422,6 +1438,32 @@ impl Engine {
 
     pub fn get_settings(&self) -> Settings {
         self.settings.lock().clone()
+    }
+
+    fn app_proxy_stored(&self) -> Option<String> {
+        self.app_proxy.lock().clone()
+    }
+
+    /// Store the app-wide proxy and rewrite every account that inherits it.
+    pub fn set_app_proxy(&self, proxy: Option<String>) -> Result<()> {
+        let stored = crate::proxy::normalize_stored(proxy.as_deref())?;
+        {
+            let mut s = self.settings.lock();
+            s.proxy = stored.clone();
+            s.save(&self.paths.settings_file)?;
+        }
+        *self.app_proxy.lock() = stored;
+        if let Ok(seq) = self.switcher.load_sequence() {
+            for &num in &seq.sequence {
+                if let Some(rec) = seq.account(num) {
+                    if rec.proxy.is_none() {
+                        self.write_launch_settings(num, rec);
+                    }
+                }
+            }
+        }
+        self.emit(CoreEvent::SnapshotUpdated);
+        Ok(())
     }
 
     pub fn set_autoswitch(&self, auto: AutoSwitchSettings) -> Result<()> {
@@ -1790,7 +1832,16 @@ impl Engine {
         let work = std::env::temp_dir().join(format!("cswitch-warm-{num}"));
         // None → the default login, and no config dir to report.
         let shown = profile.as_ref().map(|p| p.to_string_lossy().into_owned());
-        match warmup::spawn_warmup(claude, profile.as_deref(), model, &work) {
+        let stored = seq.account(num).and_then(|r| r.proxy.clone());
+        let app = self.app_proxy_stored();
+        match warmup::spawn_warmup(
+            claude,
+            profile.as_deref(),
+            model,
+            &work,
+            stored.as_deref(),
+            app.as_deref(),
+        ) {
             Ok(()) => WarmupFireResult {
                 number: num,
                 email: email.to_string(),
@@ -1899,6 +1950,8 @@ impl Engine {
                 .into_iter()
                 .map(|(target, dir)| {
                     let claude = &claude;
+                    let stored = seq.account(target.number).and_then(|r| r.proxy.clone());
+                    let app = self.app_proxy_stored();
                     scope.spawn(move || {
                         let work =
                             std::env::temp_dir().join(format!("cswitch-cloud-{}", target.number));
@@ -1909,6 +1962,8 @@ impl Engine {
                             &work,
                             &prompt,
                             warmup_cloud::SYNC_TIMEOUT,
+                            stored.as_deref(),
+                            app.as_deref(),
                         )
                         .and_then(|out| warmup_cloud::verify_report(&out, &target.plan));
                         (target.number, target.email, outcome)
@@ -2817,6 +2872,32 @@ impl Engine {
                 );
                 Ok(serde_json::to_value(outcome).map_err(|e| Error::Internal(e.to_string()))?)
             }
+            // Move ~/.claude and the backup tree onto another drive by copying
+            // then linking the original paths (junction on Windows). Does not
+            // set CLAUDE_CONFIG_DIR — that variable is already the session
+            // isolation mechanism.
+            "relocate_scan" => {
+                let s = crate::relocate::scan(&self.paths.env);
+                Ok(serde_json::to_value(s).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "relocate_plan" => {
+                let dest = str_param(params, "destRoot")?;
+                let p = crate::relocate::plan(&self.paths.env, Path::new(dest))?;
+                Ok(serde_json::to_value(p).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "relocate_apply" => {
+                let dest = str_param(params, "destRoot")?;
+                let o = crate::relocate::apply(&self.paths.env, Path::new(dest))?;
+                Ok(serde_json::to_value(o).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "relocate_restore" => {
+                let o = crate::relocate::restore(&self.paths.env)?;
+                Ok(serde_json::to_value(o).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "relocate_delete_backups" => {
+                let o = crate::relocate::delete_backups(&self.paths.env)?;
+                Ok(serde_json::to_value(o).map_err(|e| Error::Internal(e.to_string()))?)
+            }
             // Session mode: one account per terminal, in parallel.
             "session_prepare" => {
                 let id = str_param(params, "id")?;
@@ -3137,7 +3218,11 @@ impl Engine {
                 } else {
                     "system"
                 };
-                let (mut env, mut scrub, url) = crate::proxy::launch_env(stored.as_deref(), host);
+                let (mut env, mut scrub, url) = crate::proxy::launch_env_in(
+                    stored.as_deref(),
+                    host,
+                    self.app_proxy_stored().as_deref(),
+                );
                 if let Some(rec) = rec.as_ref() {
                     let (locale_env, locale_scrub) =
                         crate::locale::launch_env(rec.timezone.as_deref(), rec.language.as_deref());
@@ -3178,6 +3263,37 @@ impl Engine {
                 };
                 self.set_locale(id, opt("proxy"), opt("timezone"), opt("language"))?;
                 Ok(json!({ "ok": true }))
+            }
+            "set_app_proxy" => {
+                let proxy = params
+                    .get("proxy")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                self.set_app_proxy(proxy)?;
+                Ok(json!({ "ok": true }))
+            }
+            "locale_detect" => {
+                let proxy = params.get("proxy").and_then(|v| v.as_str());
+                let stored = crate::proxy::normalize_stored(proxy)?;
+                let os_only = params
+                    .get("osOnly")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let app = if os_only {
+                    None
+                } else {
+                    self.app_proxy_stored()
+                };
+                let loc = crate::locale::detect_exit(stored.as_deref(), app.as_deref())?;
+                Ok(json!({
+                    "ip": loc.ip,
+                    "countryCode": loc.country_code,
+                    "country": loc.country,
+                    "timezone": loc.timezone,
+                    "language": loc.language,
+                }))
             }
             "schema_version" => Ok(json!({"ffiSchemaVersion": FFI_SCHEMA_VERSION})),
             other => Err(Error::Validation(format!("invalid-method: {other}"))),
@@ -5214,6 +5330,54 @@ mod tests {
     }
 
     #[test]
+    fn locale_detect_refuses_a_socks_proxy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        assert!(eng
+            .call_json(
+                "locale_detect",
+                &json!({ "proxy": "socks5://127.0.0.1:1080" })
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn app_proxy_is_inherited_by_accounts_on_system() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        eng.set_app_proxy(Some("http://127.0.0.1:7897".into()))
+            .unwrap();
+        assert_eq!(
+            eng.snapshot().unwrap().proxy.as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
+
+        let launch = eng.session_prepare("2", true).unwrap();
+        assert_eq!(
+            launch.extra_env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7897")
+        );
+
+        eng.set_proxy("2", Some("http://10.0.0.1:1".into()))
+            .unwrap();
+        let launch = eng.session_prepare("2", true).unwrap();
+        assert_eq!(
+            launch.extra_env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://10.0.0.1:1")
+        );
+
+        eng.set_proxy("2", Some("direct".into())).unwrap();
+        let launch = eng.session_prepare("2", true).unwrap();
+        assert!(launch.scrub_env.iter().any(|k| k == "HTTPS_PROXY"));
+
+        eng.set_app_proxy(Some("direct".into())).unwrap();
+        eng.set_proxy("2", None).unwrap();
+        let launch = eng.session_prepare("2", true).unwrap();
+        assert!(launch.scrub_env.iter().any(|k| k == "HTTPS_PROXY"));
+        assert!(launch.extra_env.get("HTTPS_PROXY").is_none());
+    }
+
+    #[test]
     fn a_profile_logged_into_another_account_is_re_seeded() {
         let tmp = tempfile::tempdir().unwrap();
         let (eng, _m) = engine_with_two_accounts(tmp.path());
@@ -5385,6 +5549,49 @@ mod tests {
             .unwrap();
         assert_eq!(cleared["days"], serde_json::Value::Null);
         assert_eq!(cleared["defaultDays"], json!(30));
+    }
+
+    #[test]
+    fn relocate_runs_through_the_method_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = test_engine_with_mock(tmp.path().to_path_buf()).unwrap();
+        let claude = eng.paths.env.home.join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(claude.join("settings.json"), b"{\"x\":1}").unwrap();
+
+        let scan = eng.call_json("relocate_scan", &json!({})).unwrap();
+        assert!(scan["trees"].as_array().unwrap().len() >= 2);
+        assert_eq!(scan["relocated"], json!(false));
+
+        let dest = tmp.path().join("offload");
+        let dest_s = dest.to_string_lossy().to_string();
+        let planned = eng
+            .call_json("relocate_plan", &json!({ "destRoot": dest_s }))
+            .unwrap();
+        assert!(planned["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p != "dest-not-absolute"));
+
+        let done = eng
+            .call_json("relocate_apply", &json!({ "destRoot": dest_s }))
+            .unwrap();
+        assert!(done["linked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "claude"));
+        assert_eq!(
+            std::fs::read_to_string(claude.join("settings.json")).unwrap(),
+            "{\"x\":1}"
+        );
+
+        let scan2 = eng.call_json("relocate_scan", &json!({})).unwrap();
+        assert_eq!(scan2["relocated"], json!(true));
+
+        eng.call_json("relocate_restore", &json!({})).unwrap();
+        assert!(claude.is_dir());
     }
 
     #[test]

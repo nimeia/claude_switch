@@ -6,11 +6,13 @@
 //! (Anthropic answers blocked networks with `403 "Request not allowed"`, which
 //! looks exactly like an auth failure and is nothing of the sort).
 //!
-//! Resolution order matches what CLI tools and browsers do:
-//! 1. `HTTPS_PROXY` / `https_proxy`, then `ALL_PROXY` / `all_proxy`
-//! 2. Windows Internet Settings (`ProxyEnable` + `ProxyServer`)
+//! Resolution order for a **system** choice (account or app):
+//! 1. This app's global proxy, when set (`settings.json` `proxy`)
+//! 2. `HTTPS_PROXY` / `https_proxy`, then `ALL_PROXY` / `all_proxy`
+//! 3. Windows Internet Settings (`ProxyEnable` + `ProxyServer`)
 //!
-//! `NO_PROXY` (and the Windows `ProxyOverride` list) short-circuit both.
+//! `NO_PROXY` (and the Windows `ProxyOverride` list) short-circuit the
+//! machine sources. An explicit URL (app or account) is used as given.
 //!
 //! Claude Code's HTTP stack reads only those environment variables (and
 //! `settings.json` `env`), never WinINET. A child we spawn has to have them
@@ -49,9 +51,9 @@ const DIRECT_SCRUB: &[&str] = &[
     "CLAUDE_CODE_PROXY_RESOLVES_HOSTS",
 ];
 
-/// Proxy URL to use for `host`, or `None` to connect directly.
+/// Proxy URL the machine would use for `host`, ignoring this app's setting.
 #[must_use]
-pub fn resolve_for(host: &str) -> Option<String> {
+pub fn resolve_os(host: &str) -> Option<String> {
     if let Some(list) = env_any(&["NO_PROXY", "no_proxy"]) {
         if bypasses(&list, host) {
             return None;
@@ -61,6 +63,30 @@ pub fn resolve_for(host: &str) -> Option<String> {
         return normalize(&p);
     }
     system_proxy(host)
+}
+
+/// Proxy URL to use for `host`, or `None` to connect directly.
+///
+/// Same as [`resolve_os`]: callers that should honour the app setting use
+/// [`resolve_stored_in`] / [`resolve_app`].
+#[must_use]
+pub fn resolve_for(host: &str) -> Option<String> {
+    resolve_os(host)
+}
+
+/// App-wide stored proxy: `None` = machine, `"direct"` = none, else a URL.
+#[must_use]
+pub fn resolve_app(app: Option<&str>, host: &str) -> Option<String> {
+    if is_direct(app) {
+        return None;
+    }
+    match app
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("system"))
+    {
+        None => resolve_os(host),
+        Some(url) => normalize(url),
+    }
 }
 
 /// Proxy env a child CLI needs to reach `host` the way this app does.
@@ -97,8 +123,8 @@ pub fn child_env_pairs(url: Option<&str>) -> Vec<(&'static str, String)> {
     .unwrap_or_default()
 }
 
-/// Normalise a stored per-account proxy: `None`/`""`/`"system"` → inherit the
-/// machine proxy; `"direct"` → no proxy; anything else must be an http(s) URL.
+/// Normalise a stored proxy (account or app): `None`/`""`/`"system"` → inherit;
+/// `"direct"` → no proxy; anything else must be an http(s) URL.
 pub fn normalize_stored(raw: Option<&str>) -> Result<Option<String>> {
     let s = raw.map(str::trim).filter(|s| !s.is_empty());
     match s {
@@ -125,8 +151,17 @@ pub fn is_direct(stored: Option<&str>) -> bool {
 }
 
 /// Resolve the URL a launch should use, if any.
+///
+/// Account `"system"` (absent) falls through to the machine. Prefer
+/// [`resolve_stored_in`] when the app-wide proxy should sit in between.
 #[must_use]
 pub fn resolve_stored(stored: Option<&str>, host: &str) -> Option<String> {
+    resolve_stored_in(stored, host, None)
+}
+
+/// Like [`resolve_stored`], with the app-wide proxy as the account's `"system"`.
+#[must_use]
+pub fn resolve_stored_in(stored: Option<&str>, host: &str, app: Option<&str>) -> Option<String> {
     if is_direct(stored) {
         return None;
     }
@@ -134,7 +169,7 @@ pub fn resolve_stored(stored: Option<&str>, host: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("system"))
     {
-        None => resolve_for(host),
+        None => resolve_app(app, host),
         Some(url) => normalize(url),
     }
 }
@@ -145,14 +180,24 @@ pub fn launch_env(
     stored: Option<&str>,
     host: &str,
 ) -> (BTreeMap<String, String>, Vec<String>, Option<String>) {
-    if is_direct(stored) {
+    launch_env_in(stored, host, None)
+}
+
+/// Like [`launch_env`], with the app-wide proxy as the account's `"system"`.
+#[must_use]
+pub fn launch_env_in(
+    stored: Option<&str>,
+    host: &str,
+    app: Option<&str>,
+) -> (BTreeMap<String, String>, Vec<String>, Option<String>) {
+    if is_direct(stored) || (stored.is_none() && is_direct(app)) {
         return (
             BTreeMap::new(),
             DIRECT_SCRUB.iter().map(|s| (*s).to_string()).collect(),
             None,
         );
     }
-    match resolve_stored(stored, host) {
+    match resolve_stored_in(stored, host, app) {
         Some(url) => {
             let mut env = BTreeMap::new();
             for (k, v) in child_env_pairs(Some(&url)) {
@@ -161,6 +206,22 @@ pub fn launch_env(
             (env, Vec::new(), Some(url))
         }
         None => (BTreeMap::new(), Vec::new(), None),
+    }
+}
+
+/// Apply [`launch_env_in`] to a child process.
+pub fn apply_to_command(
+    cmd: &mut std::process::Command,
+    stored: Option<&str>,
+    host: &str,
+    app: Option<&str>,
+) {
+    let (env, scrub, _) = launch_env_in(stored, host, app);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    for k in scrub {
+        cmd.env_remove(k);
     }
 }
 
@@ -425,6 +486,32 @@ mod tests {
         assert!(is_direct(Some("DIRECT")));
         assert!(!is_direct(None));
         assert_eq!(resolve_stored(Some("direct"), "api.anthropic.com"), None);
+    }
+
+    #[test]
+    fn account_system_follows_the_app_proxy() {
+        let host = "api.anthropic.com";
+        let app = Some("http://127.0.0.1:7897");
+        assert_eq!(
+            resolve_stored_in(None, host, app).as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
+        assert_eq!(resolve_stored_in(Some("direct"), host, app), None);
+        assert_eq!(
+            resolve_stored_in(Some("http://10.0.0.1:1"), host, app).as_deref(),
+            Some("http://10.0.0.1:1")
+        );
+        assert_eq!(resolve_app(Some("direct"), host), None);
+        let (env, scrub, url) = launch_env_in(None, host, Some("direct"));
+        assert!(url.is_none());
+        assert!(env.is_empty());
+        assert!(scrub.iter().any(|k| k == "HTTPS_PROXY"));
+        let (env, _, url) = launch_env_in(None, host, app);
+        assert_eq!(url.as_deref(), Some("http://127.0.0.1:7897"));
+        assert_eq!(
+            env.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7897")
+        );
     }
 
     #[test]
