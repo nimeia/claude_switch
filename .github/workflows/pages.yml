@@ -1,8 +1,12 @@
 # Publish site/ to GitHub Pages (https://nimeia.github.io/claude_switch/).
 #
-# The site is plain static files, so there is nothing to build: the job copies
-# site/ without its README, checks that every local file the page references
-# is there, and hands the folder to Pages.
+# tools/site/build.py assembles the site: site/ without its README, a Chinese
+# copy of the page at /zh/ for search engines, and sitemap.xml. It fails if a
+# page references a local file that is not there.
+#
+# After deploying, the new URLs are sent to IndexNow (Bing, Yandex, Seznam,
+# Naver, Yep). Google has no such endpoint; it reads sitemap.xml, which is
+# submitted once in Search Console.
 #
 # Only site changes redeploy. The version and download file names on the page
 # are refreshed in the browser from the latest GitHub Release, so a release
@@ -19,6 +23,7 @@ on:
     branches: [master]
     paths:
       - "site/**"
+      - "tools/site/**"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -43,25 +48,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Assemble _site
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir _site
-          cp -R site/. _site/
-          rm -f _site/README.md
-
-          # Every relative src/href must resolve — a renamed screenshot
-          # would otherwise ship as a broken image.
-          missing=0
-          while IFS= read -r ref; do
-            if [ ! -e "_site/$ref" ]; then
-              echo "::error file=site/index.html::references $ref, which is not in site/"
-              missing=1
-            fi
-          done < <(grep -oE '(src|href)="[^"#:?]+"' _site/index.html \
-                     | sed -E 's/^(src|href)="//; s/"$//' | sort -u)
-          exit "$missing"
+      - name: Build _site
+        run: python3 tools/site/build.py _site
 
       - uses: actions/configure-pages@v6
 
@@ -72,3 +60,35 @@ jobs:
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v5
+
+      # A search-engine hiccup must not mark the deployment failed.
+      - name: Notify IndexNow
+        continue-on-error: true
+        shell: bash
+        env:
+          SITE: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          set -euo pipefail
+          # The key is the name (and content) of a 32-hex .txt file in site/.
+          key_file=$(ls site | grep -E '^[0-9a-f]{32}\.txt$' | head -n1)
+          key=${key_file%.txt}
+          site=${SITE%/}/
+          host=${site#https://}; host=${host%%/*}
+
+          # IndexNow fetches the key file to check ownership; wait until the
+          # new deployment serves it.
+          for _ in $(seq 1 12); do
+            [ "$(curl -fsS "$site$key_file" 2>/dev/null || true)" = "$key" ] && break
+            sleep 5
+          done
+
+          body=$(printf '{"host":"%s","key":"%s","keyLocation":"%s","urlList":["%s","%s"]}' \
+            "$host" "$key" "$site$key_file" "$site" "${site}zh/")
+          code=$(curl -sS -o response.txt -w '%{http_code}' \
+            -H 'Content-Type: application/json; charset=utf-8' \
+            -d "$body" https://api.indexnow.org/indexnow)
+          echo "IndexNow answered $code"; cat response.txt || true
+          case "$code" in
+            200|202) ;;
+            *) echo "::warning::IndexNow answered $code"; exit 1 ;;
+          esac

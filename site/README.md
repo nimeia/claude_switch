@@ -36,18 +36,26 @@ The overview and directory windows are only worth photographing with history beh
 
 ## Preview
 
-Open `index.html` directly, or serve the folder so it behaves like the published site:
+Open `index.html` directly for a quick look. To see exactly what gets published, including the Chinese page at `/zh/`, build it and serve the result:
 
 ```powershell
-python -m http.server 8000 -d site    # then http://localhost:8000/
+python tools/site/build.py _site
+python -m http.server 8000 -d _site    # then http://localhost:8000/ and /zh/
 ```
 
 ## Publishing
 
-[`.github/workflows/pages.yml`](../.github/workflows/pages.yml) publishes this folder to GitHub Pages at **https://nimeia.github.io/claude_switch/**. It runs when a push to `master` changes `site/` (or the workflow), and from **Actions → pages → Run workflow**. There is no build: it copies `site/` without this README, fails if `index.html` references a local file that is not here, and deploys.
+[`.github/workflows/pages.yml`](../.github/workflows/pages.yml) publishes this folder to GitHub Pages at **https://nimeia.github.io/claude_switch/**. It runs when a push to `master` changes `site/`, `tools/site/` or the workflow, and from **Actions → pages → Run workflow**. [`tools/site/build.py`](../tools/site/build.py) assembles what is published: `site/` without this README, `zh/index.html` and `sitemap.xml`. It fails if a page references a local file that is not here.
 
 One-time setup, in the repository settings: **Pages → Build and deployment → Source: GitHub Actions**. Until that is set, the run stops at the configure step with "Get Pages site failed".
 
 - **Paths stay relative.** The site lives under `/claude_switch/`, so a path starting with `/` would point outside it. Keep `assets/img/...` style references
 - **The version does not need a redeploy.** The HTML names the release it was written for; on load the page asks the GitHub API for the latest release and replaces the version in the hero and the file names on the download cards (`data-release` / `data-release-file`). If that request fails, the written text stays. Bump it here now and then so a visitor without JavaScript is not far behind
-- **Link previews** use absolute URLs (`canonical`, `og:url`, `og:image` in `<head>`). Update those three if the site moves to a custom domain; the domain itself is set under Settings → Pages, not with a `CNAME` file, when publishing from Actions
+- **Link previews and search engines** use absolute URLs (`canonical`, the `hreflang` alternates, `og:url`, `og:image`, the JSON-LD block, and `BASE` in `build.py`). Update them all if the site moves to a custom domain; the domain itself is set under Settings → Pages, not with a `CNAME` file, when publishing from Actions
+
+## Search engines
+
+- **Two URLs, one page.** `/` is English and `/zh/` is Chinese. `build.py` writes `/zh/` from `index.html`: the `data-zh` attributes in `<head>` supply its Chinese title and descriptions, and it gets its own canonical URL. Both pages list each other as `hreflang` alternates, in `<head>` and in `sitemap.xml`. When you change the title or description, change the `data-zh` text next to it too
+- **Google** is registered in Search Console as the URL-prefix property `https://nimeia.github.io/claude_switch/`, verified by the `google-site-verification` meta tag — keep that tag, or the property loses verification. `sitemap.xml` is submitted there once; Google re-reads it by itself
+- **Bing, Yandex, Seznam, Naver, Yep** get each deployment's URLs through IndexNow, the last step of the workflow. The key is the 32-hex `.txt` file in this folder: its name and content must stay identical. Bing Webmaster Tools can import the Google property in one step if you want Bing's reports too
+- **No `robots.txt`.** It would have to live at `https://nimeia.github.io/robots.txt`, outside this repository, so there is none; everything is crawlable, and the sitemap is submitted directly instead
