@@ -239,6 +239,8 @@ crates/statusline cs-statusline.exe  the status line Claude Code runs on every r
 gui-win/        Windows tray GUI (WinForms) + FfiSmoke + P/Invoke
 gui-win/ClaudeSwitch.App/Strings/    UI catalogs (one JSON per language, embedded)
 site/           the product page: one static HTML file + app screenshots (GitHub Pages)
+tools/site/     builds what Pages publishes (/zh/ page, sitemap)
+tools/promo/    walk-through for announcing a release on X, Facebook and Reddit
 ```
 
 - [docs/design-claude-switch.md](docs/design-claude-switch.md) — architecture, FFI, UI design
