@@ -1,0 +1,47 @@
+name: Bug report
+description: Something in Claude Switch does not work the way the README or the app says it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This app handles Claude Code credentials. **Remove email addresses, tokens and file contents** from anything you paste, and use **Hide emails** in the main window before taking a screenshot.
+
+        A security problem goes to a [private report](https://github.com/nimeia/claude_switch/security/advisories/new) instead of here.
+  - type: input
+    id: version
+    attributes:
+      label: Claude Switch version
+      description: The number in the file you downloaded, e.g. `ClaudeSwitch-0.3.0-win-x64.zip` → 0.3.0.
+      placeholder: 0.3.0
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+  - type: input
+    id: claude-code
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+  - type: textarea
+    id: details
+    attributes:
+      label: Error text or screenshots
+      description: The exact message is more useful than a description of it.

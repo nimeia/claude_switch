@@ -1,8 +1,33 @@
-# Claude Switch
+<p align="center">
+  <img src="site/assets/img/logo.png" width="72" height="72" alt="">
+</p>
 
-A Windows tray app for switching between Claude Code accounts. **When a rate limit is hit, it switches for you — no Claude Code restart, and the session in progress keeps going.**
+<h1 align="center">Claude Switch</h1>
 
-<!-- Screenshot placeholder: main window (account list + activity strip). See docs/screenshots/ -->
+<p align="center">
+  A Windows tray app for switching between Claude Code accounts.<br>
+  <b>When a rate limit is hit, it switches for you — no Claude Code restart, and the session in progress keeps going.</b>
+</p>
+
+<p align="center">
+  <a href="https://github.com/nimeia/claude_switch/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/nimeia/claude_switch?label=release&color=C0603B"></a>
+  <a href="https://github.com/nimeia/claude_switch/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/nimeia/claude_switch/actions/workflows/ci.yml/badge.svg?branch=master"></a>
+  <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows-0078D6">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/nimeia/claude_switch?color=3D7A56"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/nimeia/claude_switch/releases/latest"><b>Download</b></a> ·
+  <a href="https://nimeia.github.io/claude_switch/">Website</a> ·
+  <a href="https://nimeia.github.io/claude_switch/?lang=zh">简体中文介绍</a>
+</p>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/assets/img/app-main-dark.png">
+  <img alt="The Claude Switch window: account cards with 5-hour and 7-day usage meters, automation settings, and recent conversations." src="site/assets/img/app-main-light.png">
+</picture>
+
+<p align="center"><sub>Demo data from the app's own <code>--fixture</code> mode.</sub></p>
 
 ## Install
 
@@ -250,3 +275,5 @@ Windows only for now. The core is cross-platform Rust; macOS / Linux native shel
 ## License
 
 MIT — see [LICENSE](LICENSE). Backup format stays interoperable with claude-swap.
+
+An independent, community-built tool. Not affiliated with, sponsored by, or endorsed by Anthropic. “Claude” and “Claude Code” are Anthropic's trademarks, used here only to say what this tool works with.
