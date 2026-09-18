@@ -1,0 +1,44 @@
+{
+  "x": {
+    "profile": {
+      "name": "X — @sakurawinds"
+    }
+  },
+  "facebook": {
+    "profile": {
+      "name": "Your Facebook profile",
+      "url": "https://www.facebook.com/",
+      "notes": "New posts default to Friends. Switch the audience to Public in the composer if you want it seen widely."
+    },
+    "claude-code-learning": {
+      "name": "Claude Code (Learning Group) — 52K",
+      "url": "https://www.facebook.com/groups/1916542552587686/",
+      "notes": "No posted rules (checked 2026-09-18)."
+    },
+    "claude-code-cowork-design": {
+      "name": "Claude - Code & Cowork & Design — 49K",
+      "url": "https://www.facebook.com/groups/1446813950153460/",
+      "notes": "No posted rules; members share their own open-source projects (checked 2026-09-18)."
+    },
+    "claude-ai-hub": {
+      "name": "Claude AI & Claude Code Hub — 23K",
+      "url": "https://www.facebook.com/groups/1397646101694752/",
+      "notes": "No posted rules; quieter, India-based (checked 2026-09-18)."
+    },
+    "claude-code": {
+      "name": "Claude Code — 207K",
+      "url": "https://www.facebook.com/groups/claudecode/",
+      "blocked": "Group rules ban self-promotion; tools need the admin's prior approval by email (address in the group rules), and links go in the comments. Get approval first."
+    }
+  },
+  "reddit": {
+    "ClaudeCode": {
+      "name": "r/ClaudeCode",
+      "notes": "Rules not verified from here — read the sidebar and pick the flair it asks for."
+    },
+    "ClaudeAI": {
+      "name": "r/ClaudeAI",
+      "notes": "Rules not verified from here — read the sidebar; post a day apart from r/ClaudeCode with a different title."
+    }
+  }
+}
