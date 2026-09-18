@@ -1,0 +1,74 @@
+# Publish site/ to GitHub Pages (https://nimeia.github.io/claude_switch/).
+#
+# The site is plain static files, so there is nothing to build: the job copies
+# site/ without its README, checks that every local file the page references
+# is there, and hands the folder to Pages.
+#
+# Only site changes redeploy. The version and download file names on the page
+# are refreshed in the browser from the latest GitHub Release, so a release
+# does not need a redeploy to show up.
+#
+# One-time setup: Settings → Pages → Build and deployment → Source:
+# "GitHub Actions". Until then the configure step fails with "Get Pages site
+# failed".
+
+name: pages
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push waits rather than cancelling a
+# deployment halfway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: publish site/
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble _site
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir _site
+          cp -R site/. _site/
+          rm -f _site/README.md
+
+          # Every relative src/href must resolve — a renamed screenshot
+          # would otherwise ship as a broken image.
+          missing=0
+          while IFS= read -r ref; do
+            if [ ! -e "_site/$ref" ]; then
+              echo "::error file=site/index.html::references $ref, which is not in site/"
+              missing=1
+            fi
+          done < <(grep -oE '(src|href)="[^"#:?]+"' _site/index.html \
+                     | sed -E 's/^(src|href)="//; s/"$//' | sort -u)
+          exit "$missing"
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5

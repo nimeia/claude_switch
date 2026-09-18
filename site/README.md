@@ -32,6 +32,20 @@ The captures carry a black margin where `PrintWindow` overshoots the window; cro
 
 The overview and directory windows are only worth photographing with history behind them. The fixture seeds three short transcripts; for the shots on this page the demo profiles were filled with a couple of months of synthetic sessions first.
 
+## Preview
+
+Open `index.html` directly, or serve the folder so it behaves like the published site:
+
+```powershell
+python -m http.server 8000 -d site    # then http://localhost:8000/
+```
+
 ## Publishing
 
-`site/` is plain static files — any host works. For GitHub Pages, either move this directory to `docs/` and point Pages at it, or add a workflow that uploads `site/` with `actions/upload-pages-artifact`.
+[`.github/workflows/pages.yml`](../.github/workflows/pages.yml) publishes this folder to GitHub Pages at **https://nimeia.github.io/claude_switch/**. It runs when a push to `master` changes `site/` (or the workflow), and from **Actions → pages → Run workflow**. There is no build: it copies `site/` without this README, fails if `index.html` references a local file that is not here, and deploys.
+
+One-time setup, in the repository settings: **Pages → Build and deployment → Source: GitHub Actions**. Until that is set, the run stops at the configure step with "Get Pages site failed".
+
+- **Paths stay relative.** The site lives under `/claude_switch/`, so a path starting with `/` would point outside it. Keep `assets/img/...` style references
+- **The version does not need a redeploy.** The HTML names the release it was written for; on load the page asks the GitHub API for the latest release and replaces the version in the hero and the file names on the download cards (`data-release` / `data-release-file`). If that request fails, the written text stays. Bump it here now and then so a visitor without JavaScript is not far behind
+- **Link previews** use absolute URLs (`canonical`, `og:url`, `og:image` in `<head>`). Update those three if the site moves to a custom domain; the domain itself is set under Settings → Pages, not with a `CNAME` file, when publishing from Actions

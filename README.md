@@ -213,7 +213,7 @@ crates/ffi      claude_switch.dll    C ABI (cs_engine_*)
 crates/statusline cs-statusline.exe  the status line Claude Code runs on every repaint
 gui-win/        Windows tray GUI (WinForms) + FfiSmoke + P/Invoke
 gui-win/ClaudeSwitch.App/Strings/    UI catalogs (one JSON per language, embedded)
-site/           the product page: one static HTML file + app screenshots
+site/           the product page: one static HTML file + app screenshots (GitHub Pages)
 ```
 
 - [docs/design-claude-switch.md](docs/design-claude-switch.md) — architecture, FFI, UI design
@@ -225,6 +225,8 @@ Version is the root `VERSION` file and must match `Cargo.toml` `[workspace.packa
 ## CI and release
 
 Every push / PR runs a full Windows gate: Rust (fmt / clippy / test) → GUI tests → single-file publish → package (exe + zip + SHA256) → launch smoke. Artifacts are kept as workflow artifacts for 14 days.
+
+The product page is separate: [pages](.github/workflows/pages.yml) publishes `site/` to https://nimeia.github.io/claude_switch/ when a push to master changes it. Setup and details are in [site/README.md](site/README.md#publishing).
 
 **A release is a version bump that reached master.** Bump `VERSION` and the matching `Cargo.toml` `[workspace.package].version`, commit, merge. Once the gate passes, CI asks whether that version already has a tag; if it does not, it calls the [release](.github/workflows/release.yml) workflow, which rebuilds, smokes, creates `v<VERSION>` and publishes a GitHub Release with `ClaudeSwitch-<version>-win-x64.zip` / `.exe` / `SHA256SUMS.txt`.
 

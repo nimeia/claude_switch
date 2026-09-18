@@ -5,6 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Claude Switch</title>
 <meta name="description" content="A Windows tray app that switches Claude Code accounts when a rate limit hits — no restart, and the session in progress keeps going.">
+<!-- Absolute URLs: link previews cannot resolve relative ones. Update them if
+     the site moves to a custom domain. -->
+<link rel="canonical" href="https://nimeia.github.io/claude_switch/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Claude Switch">
+<meta property="og:url" content="https://nimeia.github.io/claude_switch/">
+<meta property="og:title" content="Claude Switch — hit the limit, keep writing">
+<meta property="og:description" content="A Windows tray app that switches Claude Code accounts when a rate limit hits — no restart, and the session in progress keeps going.">
+<meta property="og:image" content="https://nimeia.github.io/claude_switch/assets/img/app-main-light.png">
+<meta property="og:image:width" content="1800">
+<meta property="og:image:height" content="1389">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="assets/img/logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -378,8 +390,8 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
             <span data-l="en">Read the source</span><span data-l="zh">阅读源码</span>
           </a>
         </div>
-        <p class="meta-line" data-l="en">v0.3.0 · one portable .exe · no .NET, no Rust, no installer · MIT</p>
-        <p class="meta-line" data-l="zh">v0.3.0 · 单个绿色 exe · 不装 .NET、不装 Rust、没有安装程序 · MIT</p>
+        <p class="meta-line" data-l="en"><span data-release="version">v0.3.0</span> · one portable .exe · no .NET, no Rust, no installer · MIT</p>
+        <p class="meta-line" data-l="zh"><span data-release="version">v0.3.0</span> · 单个绿色 exe · 不装 .NET、不装 Rust、没有安装程序 · MIT</p>
       </div>
 
       <div class="plate">
@@ -785,7 +797,7 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
         <div class="dl primary">
           <span class="tag" data-l="en">Recommended</span>
           <span class="tag" data-l="zh">推荐</span>
-          <span class="file">ClaudeSwitch-0.3.0-win-x64.zip</span>
+          <span class="file" data-release-file="zip">ClaudeSwitch-0.3.0-win-x64.zip</span>
           <span class="why" data-l="en">Unzip and run. Includes quick-start notes and the licence, and browsers warn less on a zip than on a bare exe.</span>
           <span class="why" data-l="zh">解压即用。里面带快速上手说明和许可证；浏览器对 zip 的警告也比对裸 exe 少。</span>
           <a class="btn btn-primary" href="https://github.com/nimeia/claude_switch/releases" target="_blank" rel="noopener" style="align-self:flex-start">
@@ -793,7 +805,7 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
           </a>
         </div>
         <div class="dl">
-          <span class="file">ClaudeSwitch-0.3.0-win-x64.exe</span>
+          <span class="file" data-release-file="exe">ClaudeSwitch-0.3.0-win-x64.exe</span>
           <span class="why" data-l="en">Just the program. Same build as the zip — one file, ~70 MB, self-contained.</span>
           <span class="why" data-l="zh">只有程序本体。和 zip 里是同一个构建——单文件，约 70 MB，自带运行时。</span>
           <a class="btn btn-ghost" href="https://github.com/nimeia/claude_switch/releases" target="_blank" rel="noopener" style="align-self:flex-start">
@@ -1048,6 +1060,28 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
       });
     });
   });
+
+  /* ── latest release ────────────────────────────────────── */
+  // The HTML names the release it was written for. The site is only
+  // redeployed when site/ changes, so ask GitHub for the newest one; if that
+  // fails (offline, rate limit) the written version simply stays.
+  function each(sel, fn) { Array.prototype.forEach.call(document.querySelectorAll(sel), fn); }
+  if (window.fetch) {
+    fetch('https://api.github.com/repos/nimeia/claude_switch/releases/latest', {
+      headers: { Accept: 'application/vnd.github+json' }
+    })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (rel) {
+        if (!rel || !/^v\d/.test(rel.tag_name || '')) return;
+        each('[data-release="version"]', function (el) { el.textContent = rel.tag_name; });
+        (rel.assets || []).forEach(function (a) {
+          var m = /^ClaudeSwitch-.+-win-x64\.(zip|exe)$/.exec(a.name || '');
+          if (!m) return;
+          each('[data-release-file="' + m[1] + '"]', function (el) { el.textContent = a.name; });
+        });
+      })
+      .catch(function () {});
+  }
 
   /* ── screenshot lightbox ───────────────────────────────── */
   var box = null;
