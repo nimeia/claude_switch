@@ -89,6 +89,85 @@ public class RelocateTests : IDisposable
     }
 
     [Fact]
+    public void ParsePlan_reads_the_link_count()
+    {
+        var plan = RelocateData.ParsePlan(JsonNode.Parse("""
+            {
+              "destRoot": "D:\\ClaudeData",
+              "sameVolume": false,
+              "liveSessions": 0,
+              "copyBytes": 10,
+              "links": 3,
+              "warnings": ["links"],
+              "problems": [],
+              "trees": [{"id":"claude","source":"C:\\a\\.claude","dest":"D:\\ClaudeData\\claude",
+                         "backup":"C:\\a\\.claude.reloc-backup","bytes":10,"skip":false}]
+            }
+            """));
+        Assert.Equal(3, plan.Links);
+        Assert.True(plan.CanApply);
+        Assert.Contains("3", RelocateData.WarningText("links", plan));
+    }
+
+    [Fact]
+    public void Engine_errors_read_as_sentences()
+    {
+        using var lang = Loc.Scoped("en");
+        var plan = RelocatePlanView.Invalid("nothing");
+        var inUse = new EngineException(9, """
+            {"error":{"code":"session-in-use","message":"session in use: relocate: in-use C:\\Users\\a\\.claude"}}
+            """);
+        Assert.Equal(
+            Loc.T("relocate.error.in-use", @"C:\Users\a\.claude"),
+            RelocateData.Describe(inUse, plan));
+
+        var space = new EngineException(3, """
+            {"error":{"code":"validation-failed","message":"validation failed: relocate: not-enough-space need 2048 have 1024"}}
+            """);
+        Assert.Equal(
+            Loc.T("relocate.problem.no-space", HistoryCleanup.FormatBytes(2048), HistoryCleanup.FormatBytes(1024)),
+            RelocateData.Describe(space, plan));
+
+        var live = new EngineException(9, """
+            {"error":{"code":"session-in-use","message":"session in use: 2 live Claude Code session(s)"}}
+            """);
+        Assert.Equal(Loc.T("relocate.problem.live-sessions"), RelocateData.Describe(live, plan));
+    }
+
+    [Fact]
+    public void Undo_stays_available_when_only_one_tree_is_linked()
+    {
+        string swap = Path.Combine(_root, ".claude-swap-backup");
+        Directory.CreateDirectory(swap);
+        File.WriteAllText(Path.Combine(swap, "sequence.json"), "{}");
+        RelocateData.Apply(_engine, Path.Combine(_root, "offload"));
+
+        // Put the swap tree back by hand, as a move that stopped halfway would.
+        Directory.Delete(swap);
+        Directory.Move(swap + ".reloc-backup", swap);
+        var scan = RelocateData.Scan(_engine);
+        Assert.False(scan.Relocated);
+
+        using var dlg = new RelocateDialog(_engine);
+        var undo = dlg.Controls.OfType<Button>().Single(b => b.Name == "relocateRestore");
+        Assert.True(undo.Enabled);
+    }
+
+    [Fact]
+    public void Rows_do_not_overlap_once_the_backup_lines_appear()
+    {
+        RelocateData.Apply(_engine, Path.Combine(_root, "offload"));
+        using var lang = Loc.Scoped("zh-Hans");
+        using var dlg = new RelocateDialog(_engine);
+        var labels = dlg.Controls.OfType<Label>().OrderBy(l => l.Top).ToList();
+        for (int i = 1; i < labels.Count; i++)
+            Assert.True(labels[i - 1].Bottom <= labels[i].Top, $"'{labels[i - 1].Text}' runs into '{labels[i].Text}'");
+        var move = dlg.Controls.OfType<Button>().Single(b => b.Name == "relocateApply");
+        Assert.True(labels[^1].Bottom <= move.Top);
+        Assert.True(move.Bottom <= dlg.ClientSize.Height);
+    }
+
+    [Fact]
     public void The_dialog_stacks_the_destination_row()
     {
         using var lang = Loc.Scoped("zh-Hans");

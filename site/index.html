@@ -378,8 +378,8 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
             <span data-l="en">Read the source</span><span data-l="zh">阅读源码</span>
           </a>
         </div>
-        <p class="meta-line" data-l="en">v0.1.0 · one portable .exe · no .NET, no Rust, no installer · MIT</p>
-        <p class="meta-line" data-l="zh">v0.1.0 · 单个绿色 exe · 不装 .NET、不装 Rust、没有安装程序 · MIT</p>
+        <p class="meta-line" data-l="en">v0.3.0 · one portable .exe · no .NET, no Rust, no installer · MIT</p>
+        <p class="meta-line" data-l="zh">v0.3.0 · 单个绿色 exe · 不装 .NET、不装 Rust、没有安装程序 · MIT</p>
       </div>
 
       <div class="plate">
@@ -601,6 +601,40 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
     </div>
   </section>
 
+  <hr class="rule">
+
+  <!-- ── proxy & region ───────────────────────────────────── -->
+  <section id="proxy">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow" data-l="en">Proxy &amp; region</p>
+        <p class="eyebrow" data-l="zh">代理与地区</p>
+        <h2 data-l="en">Each account on its own exit, in its own time zone</h2>
+        <h2 data-l="zh">每个账号走自己的出口，用自己的时区</h2>
+        <p class="lede" data-l="en">Some accounts only work through one proxy node, and Claude Code shows times in the zone it is told, not the Windows one. Right-click a card → <b>Proxy &amp; region…</b> sets both for that account.</p>
+        <p class="lede" data-l="zh">有的账号只能从某个代理节点出去；而 Claude Code 显示时间用的是配置里告诉它的时区，不是 Windows 的。右键账号卡 →<b>「代理与地区…」</b>，为这个账号把两样都设好。</p>
+      </div>
+      <div class="split" style="margin-top:40px;align-items:start">
+        <div class="col">
+          <ul class="claims">
+            <li data-l="en"><span><strong>System, custom or direct.</strong> System follows the app proxy, then the machine's. Terminals and agents opened as the account get it in their environment, and it goes into the account's <code>settings.json</code> too, so Claude Code's background workers match.</span></li>
+            <li data-l="zh"><span><strong>系统、自定义或直连。</strong>「系统」先跟随本软件的全局代理，没设再用本机的。以该账号打开的终端和 agent 在环境变量里拿到它，账号自己的 <code>settings.json</code> 里也会写入，Claude Code 的后台进程同样生效。</span></li>
+            <li data-l="en"><span><strong>Time zone and language from the exit.</strong> <b>Detect from exit</b> probes the proxy's exit IP and fills them in; presets cover the common regions. They become <code>timeZone</code> and <code>language</code>, plus <code>TZ</code> and <code>LANG</code> for what this app launches.</span></li>
+            <li data-l="zh"><span><strong>按出口定时区和语言。</strong><b>「按出口探测」</b>会探测代理的出口 IP 并自动填好；常见地区也有预设。写入为 <code>timeZone</code> 和 <code>language</code>，本软件启动的进程还会带上 <code>TZ</code> 和 <code>LANG</code>。</span></li>
+          </ul>
+        </div>
+        <div class="col">
+          <ul class="claims">
+            <li data-l="en"><span><strong>Nothing carries over.</strong> <b>Follow the system</b> removes the keys, so one account's region never sticks to the next. When the account is the default login, <code>~/.claude/settings.json</code> gets the same keys, so a <code>claude</code> you start yourself sees them.</span></li>
+            <li data-l="zh"><span><strong>不会串到别的账号。</strong>选<b>「跟随系统」</b>会删掉这些键，上一个账号的地区不会留给下一个。该账号是默认登录时，<code>~/.claude/settings.json</code> 也写入同样的键，你自己敲的 <code>claude</code> 同样能看到。</span></li>
+            <li data-l="en"><span><strong>One app-wide proxy.</strong> <b>Tools → App proxy…</b> covers this app's own requests — usage refresh, exit detection — and every account left on System.</span></li>
+            <li data-l="zh"><span><strong>一个全局代理。</strong><b>「工具 → 全局代理…」</b>管本软件自己的请求（刷新用量、出口探测），以及所有设为「系统」的账号。</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ── status line band ─────────────────────────────────── -->
   <section id="statusline" class="band">
     <div class="wrap">
@@ -667,8 +701,8 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
       <div class="split" style="margin-top:40px">
         <div class="col">
           <ul class="claims">
-            <li data-l="en"><span><strong>Resume runs <code>claude</code> directly.</strong> Not through <code>cmd</code>, so the window is your default terminal app and closes cleanly when Claude exits.</span></li>
-            <li data-l="zh"><span><strong>「继续」直接运行 <code>claude</code>。</strong>不经过 <code>cmd</code>，所以窗口就是你设定的默认终端，Claude 退出时窗口干净地关掉。</span></li>
+            <li data-l="en"><span><strong>Resume opens in the terminal you pick.</strong> <b>Tools → Terminal…</b> — Automatic uses Windows Terminal when it is installed; Warp, WezTerm, Ghostty, Alacritty, Tabby and others can be chosen instead.</span></li>
+            <li data-l="zh"><span><strong>「继续」在你选的终端里打开。</strong><b>「工具 → 终端…」</b>——「自动」在装了 Windows Terminal 时就用它；也可以改选 Warp、WezTerm、Ghostty、Alacritty、Tabby 等。</span></li>
             <li data-l="en"><span><strong>Directories are account-agnostic.</strong> Claude Code does not record which account owned a conversation — the Account column is the binding you set, not a guess.</span></li>
             <li data-l="zh"><span><strong>目录本身与账号无关。</strong>Claude Code 不记录一段对话属于哪个账号——「账号」列是你设的绑定，不是推测。</span></li>
           </ul>
@@ -751,7 +785,7 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
         <div class="dl primary">
           <span class="tag" data-l="en">Recommended</span>
           <span class="tag" data-l="zh">推荐</span>
-          <span class="file">ClaudeSwitch-0.1.0-win-x64.zip</span>
+          <span class="file">ClaudeSwitch-0.3.0-win-x64.zip</span>
           <span class="why" data-l="en">Unzip and run. Includes quick-start notes and the licence, and browsers warn less on a zip than on a bare exe.</span>
           <span class="why" data-l="zh">解压即用。里面带快速上手说明和许可证；浏览器对 zip 的警告也比对裸 exe 少。</span>
           <a class="btn btn-primary" href="https://github.com/nimeia/claude_switch/releases" target="_blank" rel="noopener" style="align-self:flex-start">
@@ -759,7 +793,7 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
           </a>
         </div>
         <div class="dl">
-          <span class="file">ClaudeSwitch-0.1.0-win-x64.exe</span>
+          <span class="file">ClaudeSwitch-0.3.0-win-x64.exe</span>
           <span class="why" data-l="en">Just the program. Same build as the zip — one file, ~70 MB, self-contained.</span>
           <span class="why" data-l="zh">只有程序本体。和 zip 里是同一个构建——单文件，约 70 MB，自带运行时。</span>
           <a class="btn btn-ghost" href="https://github.com/nimeia/claude_switch/releases" target="_blank" rel="noopener" style="align-self:flex-start">
@@ -794,10 +828,10 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
       <div class="section-head">
         <p class="eyebrow" data-l="en">Where your data lives</p>
         <p class="eyebrow" data-l="zh">数据放在哪里</p>
-        <h2 data-l="en">Local files you can read, and one file of Claude Code's it touches</h2>
-        <h2 data-l="zh">全是你能自己打开的本地文件；只动 Claude Code 的一个键</h2>
-        <p class="lede" data-l="en">Usage figures are fetched per account with that account's own token — expired ones are refreshed first, and the token of the account you are logged in as is never rotated, because that would kick your live session. Requests honour <code>HTTPS_PROXY</code>, <code>ALL_PROXY</code> and <code>NO_PROXY</code>, and on Windows the system proxy settings as well.</p>
-        <p class="lede" data-l="zh">用量是用每个账号自己的 token 各自拉取的——过期的会先刷新，而当前登录中的那个账号的 token 永远不轮换，否则会把你正在跑的会话踢掉。请求遵循 <code>HTTPS_PROXY</code>、<code>ALL_PROXY</code>、<code>NO_PROXY</code>，在 Windows 上还会读系统代理设置。</p>
+        <h2 data-l="en">Local files you can read, and a few named keys of Claude Code's</h2>
+        <h2 data-l="zh">全是你能自己打开的本地文件；Claude Code 的配置只动几个指明的键</h2>
+        <p class="lede" data-l="en">Usage figures are fetched per account with that account's own token — expired ones are refreshed first, and the token of the account you are logged in as is never rotated, because that would kick your live session. Requests honour <code>HTTPS_PROXY</code>, <code>ALL_PROXY</code> and <code>NO_PROXY</code>, and on Windows the system proxy settings as well, unless you set an app proxy.</p>
+        <p class="lede" data-l="zh">用量是用每个账号自己的 token 各自拉取的——过期的会先刷新，而当前登录中的那个账号的 token 永远不轮换，否则会把你正在跑的会话踢掉。请求遵循 <code>HTTPS_PROXY</code>、<code>ALL_PROXY</code>、<code>NO_PROXY</code>，在 Windows 上还会读系统代理设置；设了全局代理则以它为准。</p>
       </div>
       <div class="table-wrap">
         <table>
@@ -812,6 +846,10 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
                 <td data-l="en">Per-slot credentials (encrypted)</td><td data-l="zh">每个槽位的凭据（加密）</td></tr>
             <tr><td>~/.claude-swap-backup/configs/</td>
                 <td data-l="en">Per-slot <code>.claude.json</code> snapshots</td><td data-l="zh">每个槽位的 <code>.claude.json</code> 快照</td></tr>
+            <tr><td>~/.claude-swap-backup/sequence.json</td>
+                <td data-l="en">Slot order, current account, each account's proxy &amp; region</td><td data-l="zh">槽位顺序、当前账号、每个账号的代理与地区</td></tr>
+            <tr><td>~/.claude-swap-backup/settings.json</td>
+                <td data-l="en">App settings: auto-switch, warmup, status line, app proxy</td><td data-l="zh">本软件设置：自动切换、预热、状态栏、全局代理</td></tr>
             <tr><td>~/.claude-swap-backup/sessions/</td>
                 <td data-l="en">Per-account session profiles, each with its own history</td><td data-l="zh">每个账号的会话配置目录，各自带历史</td></tr>
             <tr><td>~/.claude-swap-backup/mappings.json</td>
@@ -819,8 +857,8 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
             <tr><td>~/.claude-swap-backup/bin/</td>
                 <td data-l="en">The status-line renderer, written when you turn that on</td><td data-l="zh">状态栏渲染程序，开启该功能时写入</td></tr>
             <tr><td>~/.claude/settings.json</td>
-                <td data-l="en">Claude Code's own file — only its <code>statusLine</code> key is ever touched, and a copy is kept as <code>settings.json.cswitch-bak</code></td>
-                <td data-l="zh">Claude Code 自己的文件——只动 <code>statusLine</code> 这一个键，并留一份 <code>settings.json.cswitch-bak</code> 备份</td></tr>
+                <td data-l="en">Claude Code's own file. Only these keys are ever written: <code>statusLine</code> (a copy is kept as <code>settings.json.cswitch-bak</code>), <code>cleanupPeriodDays</code> for history retention, and — for the default login's proxy &amp; region — <code>timeZone</code>, <code>language</code> and the proxy, <code>TZ</code> and <code>LANG</code> entries under <code>env</code>. Everything else is kept.</td>
+                <td data-l="zh">Claude Code 自己的文件。只会写这几个键：<code>statusLine</code>（并留一份 <code>settings.json.cswitch-bak</code>）、历史保留天数 <code>cleanupPeriodDays</code>，以及默认登录的代理与地区——<code>timeZone</code>、<code>language</code> 和 <code>env</code> 下的代理、<code>TZ</code>、<code>LANG</code>。其余内容原样保留。</td></tr>
             <tr><td>%LOCALAPPDATA%\ClaudeSwitch\</td>
                 <td data-l="en">UI preferences: theme, language, hide-email</td><td data-l="zh">界面偏好：主题、语言、是否隐藏邮箱</td></tr>
           </tbody>
@@ -828,6 +866,90 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
       </div>
       <p class="serif-note" style="margin-top:22px" data-l="en">The layout is compatible with <a href="https://github.com/realiti4/claude-swap" target="_blank" rel="noopener">claude-swap</a>, the Python CLI whose behaviour this follows — both can share one backup tree.</p>
       <p class="serif-note" style="margin-top:22px" data-l="zh">目录结构与 <a href="https://github.com/realiti4/claude-swap" target="_blank" rel="noopener">claude-swap</a>（本项目行为所遵循的 Python CLI）兼容——两者可以共用同一份备份目录。</p>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ── move data ────────────────────────────────────────── -->
+  <section id="relocate">
+    <div class="wrap split">
+      <div class="col">
+        <p class="eyebrow" data-l="en">Move data</p>
+        <p class="eyebrow" data-l="zh">迁移数据</p>
+        <h2 data-l="en">Take Claude's data off a full C: drive</h2>
+        <h2 data-l="zh">C 盘满了？<br>把 Claude 数据搬走</h2>
+        <p class="lede" data-l="en">Transcripts pile up in <code>~/.claude</code>. <b>Tools → Move Claude data…</b> copies it, and this app's own tree, to another drive and leaves a directory junction at each old path — Claude Code, the VS Code extension and this app keep using the paths they know.</p>
+        <p class="lede" data-l="zh">会话记录全堆在 <code>~/.claude</code> 里。<b>「工具 → 迁移 Claude 数据…」</b>把它连同本软件自己的目录拷到另一块盘，并在原路径各留一个目录联接（junction）——Claude Code、VS Code 插件和本软件照旧用原来的路径。</p>
+        <ul class="claims">
+          <li data-l="en"><span><strong>Both folders move, or neither does.</strong> It refuses while Claude Code is running and checks again after copying. The originals are renamed aside only when nothing holds a file open, whatever changed meanwhile is copied again, and any failure puts both back.</span></li>
+          <li data-l="zh"><span><strong>两个文件夹要么一起搬，要么都不动。</strong>Claude Code 在运行时拒绝迁移，拷完还会再查一次。只有没有程序占用文件时才把原文件夹改名挪开，期间的改动会补拷；任何一步失败，两个都放回原处。</span></li>
+          <li data-l="en"><span><strong>Your links come along.</strong> A <code>commands/</code> folder or <code>CLAUDE.md</code> linked from a dotfiles repo is recreated at the new location — not copied, not dropped.</span></li>
+          <li data-l="zh"><span><strong>你的链接一起带走。</strong>从 dotfiles 仓库链接进来的 <code>commands/</code> 或 <code>CLAUDE.md</code> 会在新位置重建——不复制内容，也不丢掉。</span></li>
+          <li data-l="en"><span><strong>Undo brings back today's data.</strong> The C: originals stay until you delete them, and Undo copies the current data back — everything since the move included — before it removes the links.</span></li>
+          <li data-l="zh"><span><strong>还原拿回的是现在的数据。</strong>C 盘上的原文件夹一直留到你删除为止；「还原」会先把当前数据——包括迁移后的全部改动——拷回来，再去掉链接。</span></li>
+          <li data-l="en"><span><strong>A destination that stays put.</strong> An empty folder on a fixed NTFS drive, readable only by you, SYSTEM and Administrators. USB and network drives are refused.</span></li>
+          <li data-l="zh"><span><strong>目标位置不会跑掉。</strong>固定 NTFS 磁盘上的空文件夹，只有你、SYSTEM 和管理员能读。U 盘和网络盘会被拒绝。</span></li>
+        </ul>
+      </div>
+      <div class="col">
+        <figure class="diagram">
+          <svg viewBox="0 0 520 318" role="img" aria-label="~/.claude and ~/.claude-swap-backup on C: become junctions pointing at claude and swap folders on another drive; the originals are kept as .reloc-backup folders until you delete them.">
+            <defs>
+              <marker id="arw-move" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M0 0 L10 5 L0 10 z" fill="#CE7049"></path>
+              </marker>
+            </defs>
+
+            <text x="10" y="24" font-size="11" fill="currentColor" opacity=".6" font-weight="600" letter-spacing="1" data-l="en">C: — SYSTEM DRIVE</text>
+            <text x="10" y="24" font-size="11" fill="currentColor" opacity=".6" font-weight="600" letter-spacing="1" data-l="zh">C 盘 — 系统盘</text>
+            <text x="294" y="24" font-size="11" fill="currentColor" opacity=".6" font-weight="600" letter-spacing="1" data-l="en">D: — ANOTHER DRIVE</text>
+            <text x="294" y="24" font-size="11" fill="currentColor" opacity=".6" font-weight="600" letter-spacing="1" data-l="zh">D 盘 — 另一块盘</text>
+
+            <!-- links on C: -->
+            <rect x="8" y="38" width="218" height="62" rx="10" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+            <text x="22" y="64" font-family="IBM Plex Mono, monospace" font-size="12.5" fill="currentColor">~/.claude</text>
+            <text x="22" y="85" font-size="11.5" fill="currentColor" opacity=".78" data-l="en">now a junction</text>
+            <text x="22" y="85" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">现在是目录联接</text>
+
+            <rect x="8" y="116" width="218" height="62" rx="10" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+            <text x="22" y="142" font-family="IBM Plex Mono, monospace" font-size="12" fill="currentColor">~/.claude-swap-backup</text>
+            <text x="22" y="163" font-size="11.5" fill="currentColor" opacity=".78" data-l="en">now a junction</text>
+            <text x="22" y="163" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">现在是目录联接</text>
+
+            <!-- junction arrows -->
+            <line x1="226" y1="69" x2="290" y2="69" stroke="#CE7049" stroke-width="1.4" marker-end="url(#arw-move)"></line>
+            <line x1="226" y1="147" x2="290" y2="147" stroke="#CE7049" stroke-width="1.4" marker-end="url(#arw-move)"></line>
+
+            <!-- data on D: -->
+            <rect x="294" y="38" width="218" height="62" rx="10" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+            <text x="308" y="64" font-family="IBM Plex Mono, monospace" font-size="12.5" fill="currentColor">ClaudeData\claude</text>
+            <text x="308" y="85" font-size="11.5" fill="currentColor" opacity=".78" data-l="en">transcripts, settings, plugins</text>
+            <text x="308" y="85" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">会话记录、设置、插件</text>
+
+            <rect x="294" y="116" width="218" height="62" rx="10" fill="none" stroke="currentColor" stroke-width="1.2"></rect>
+            <text x="308" y="142" font-family="IBM Plex Mono, monospace" font-size="12.5" fill="currentColor">ClaudeData\swap</text>
+            <text x="308" y="163" font-size="11.5" fill="currentColor" opacity=".78" data-l="en">accounts, profiles, history</text>
+            <text x="308" y="163" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">账号、会话配置、历史</text>
+
+            <!-- kept originals -->
+            <rect x="8" y="214" width="218" height="62" rx="10" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 4" opacity=".7"></rect>
+            <text x="22" y="240" font-family="IBM Plex Mono, monospace" font-size="12" fill="currentColor">*.reloc-backup</text>
+            <text x="22" y="261" font-size="11.5" fill="currentColor" opacity=".78" data-l="en">the originals, until you delete them</text>
+            <text x="22" y="261" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">原文件夹，留到你删除为止</text>
+
+            <text x="244" y="240" font-size="11.5" fill="currentColor" opacity=".78" data-l="en">Undo copies D: back first,</text>
+            <text x="244" y="258" font-size="11.5" fill="currentColor" opacity=".78" data-l="en">then removes the junctions</text>
+            <text x="244" y="240" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">还原：先把 D 盘的数据拷回，</text>
+            <text x="244" y="258" font-size="11.5" fill="currentColor" opacity=".78" data-l="zh">再去掉目录联接</text>
+
+            <text x="10" y="306" font-size="11" fill="currentColor" opacity=".6" data-l="en"><tspan font-family="IBM Plex Mono, monospace">~/.claude.json</tspan> stays on C: — it is small</text>
+            <text x="10" y="306" font-size="11" fill="currentColor" opacity=".6" data-l="zh"><tspan font-family="IBM Plex Mono, monospace">~/.claude.json</tspan> 留在 C 盘——它很小</text>
+          </svg>
+          <figcaption data-l="en">Same paths, different disk. Nothing to reconfigure in Claude Code, VS Code or this app.</figcaption>
+          <figcaption data-l="zh">路径不变，只是换了块盘。Claude Code、VS Code 和本软件都不用改任何设置。</figcaption>
+        </figure>
+      </div>
     </div>
   </section>
 

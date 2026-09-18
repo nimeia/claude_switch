@@ -38,12 +38,22 @@ internal sealed class ProxyEditDialog : Form
     private readonly TextBox _timezone = new();
     private readonly TextBox _language = new();
     private readonly Label _detectStatus = new();
+    private readonly Label _osLine = new();
+    private readonly Label _warn = new();
+    private readonly Label _preview = new();
     private readonly SecondaryButton _detect = new();
     private readonly System.Windows.Forms.Timer _urlDebounce = new() { Interval = 600 };
+    private ThemedButton[] _actions = [];
+    private int _pad;
+    private int _gap;
+    private int _textW;
+    private bool _reflowing;
     private bool _syncingRegion;
     private bool _userTouchedRegion;
     private bool _ready;
     private int _detectGen;
+    private string? _exitCountry;
+    private string? _exitTimezone;
 
     public Result EditResult { get; private set; }
 
@@ -62,6 +72,9 @@ internal sealed class ProxyEditDialog : Form
         Icon = AppIcon.Get();
 
         var layout = new DialogLayout(this, textWidth: 420, pad: 20, gap: 8);
+        _pad = layout.Scale(20);
+        _gap = layout.Scale(8);
+        _textW = layout.TextWidth;
 
         var title = layout.Text(Loc.T("proxy.account", model.Number), Theme.FontHeading, Theme.TextPrimary);
         var email = layout.Text(model.Email, Theme.FontSmall, Theme.TextSecondary);
@@ -106,6 +119,20 @@ internal sealed class ProxyEditDialog : Form
         _language.PlaceholderText = Loc.T("locale.language.placeholder");
         layout.Advance(_language);
 
+        ReserveInfo(_osLine, layout, "osTimezone", Theme.TextMuted, Loc.T("locale.os", "America/Los_Angeles"));
+        ReserveInfo(_warn, layout, "localeWarn", Theme.UsageHigh, Loc.T("locale.warn.follow-system-cn"));
+        // The override line is longer than follow-system and wraps; reserve that
+        // height so a later detect result is not drawn on top of it.
+        ReserveInfo(
+            _preview,
+            layout,
+            "localePreview",
+            Theme.TextMuted,
+            Loc.T(
+                "locale.preview.override",
+                "America/Argentina/Buenos_Aires",
+                Loc.T("locale.preview.lang", "english", "en_US.UTF-8")));
+
         _detectStatus.Name = "detectStatus";
         _detectStatus.Font = Theme.FontSmall;
         _detectStatus.ForeColor = Theme.TextMuted;
@@ -149,8 +176,8 @@ internal sealed class ProxyEditDialog : Form
             if (!_syncingRegion) _userTouchedRegion = true;
             ApplySelectedPreset();
         };
-        _timezone.TextChanged += (_, _) => MarkCustomIfEdited();
-        _language.TextChanged += (_, _) => MarkCustomIfEdited();
+        _timezone.TextChanged += (_, _) => { MarkCustomIfEdited(); RefreshAlignment(); };
+        _language.TextChanged += (_, _) => { MarkCustomIfEdited(); RefreshAlignment(); };
         _url.TextChanged += (_, _) =>
         {
             if (!_ready || !_custom.Checked) return;
@@ -202,13 +229,21 @@ internal sealed class ProxyEditDialog : Form
             title, email, hint, when,
             _system, _direct, _custom, _url,
             regionLabel, regionHint, _region, tzLabel, _timezone, langLabel, _language,
+            _osLine, _warn, _preview,
             _detectStatus, _detect, btnOk, btnCancel,
         ]);
-        layout.ActionRow(_detect, btnOk, btnCancel);
+        _actions = [_detect, btnOk, btnCancel];
+        layout.ActionRow(_actions);
         AcceptButton = btnOk;
         CancelButton = btnCancel;
         ActiveControl = _custom.Checked ? _url : _system;
+        _osLine.TextChanged += (_, _) => ReflowFooter();
+        _warn.TextChanged += (_, _) => ReflowFooter();
+        _preview.TextChanged += (_, _) => ReflowFooter();
+        _detectStatus.TextChanged += (_, _) => ReflowFooter();
         _ready = true;
+        RefreshAlignment();
+        ReflowFooter();
 
         if (_engine is not null)
             Shown += (_, _) => BeginDetect(force: false);
@@ -229,6 +264,77 @@ internal sealed class ProxyEditDialog : Form
             return false;
         result = dlg.EditResult;
         return true;
+    }
+
+    /// <summary>
+    /// Stacks the machine-timezone / warning / preview / detect lines and the
+    /// action row so a wrapping preview cannot sit on the probe result, and
+    /// the buttons stay fully inside the client area.
+    /// </summary>
+    private void ReflowFooter()
+    {
+        if (!_ready || _reflowing || IsDisposed) return;
+        _reflowing = true;
+        try
+        {
+            int y = _language.Bottom + _gap;
+            foreach (var line in new[] { _osLine, _warn, _preview, _detectStatus })
+            {
+                line.MaximumSize = new Size(_textW, 0);
+                line.Location = new Point(_pad, y);
+                if (string.IsNullOrWhiteSpace(line.Text))
+                {
+                    line.AutoSize = false;
+                    line.MinimumSize = Size.Empty;
+                    line.Size = new Size(_textW, 0);
+                    continue;
+                }
+                line.AutoSize = true;
+                var sz = line.GetPreferredSize(new Size(_textW, 0));
+                line.MinimumSize = new Size(0, sz.Height);
+                line.Size = new Size(Math.Max(sz.Width, 1), sz.Height);
+                y = line.Bottom + _gap;
+            }
+
+            int rowY = y + _gap;
+            int rowH = 0;
+            int right = _pad + _textW;
+            int btnGap = Theme.Scale(this, 10);
+            for (int i = _actions.Length - 1; i >= 0; i--)
+            {
+                var b = _actions[i];
+                int w = b.GetPreferredSize(Size.Empty).Width;
+                b.Width = w;
+                b.Location = new Point(right - w, rowY);
+                right -= w + btnGap;
+                rowH = Math.Max(rowH, b.RowHeight);
+            }
+            ClientSize = new Size(_pad + _textW + _pad, rowY + rowH + _pad);
+        }
+        finally
+        {
+            _reflowing = false;
+        }
+    }
+
+    private void ReserveInfo(Label label, DialogLayout layout, string name, Color color, string sample)
+    {
+        StyleInfo(label, layout, name, color);
+        label.Text = sample;
+        label.Size = label.GetPreferredSize(new Size(layout.TextWidth, 0));
+        label.MinimumSize = new Size(0, label.Height);
+        label.Text = "";
+        layout.Advance(label);
+    }
+
+    private static void StyleInfo(Label label, DialogLayout layout, string name, Color color)
+    {
+        label.Name = name;
+        label.Font = Theme.FontSmall;
+        label.ForeColor = color;
+        label.AutoSize = true;
+        label.MaximumSize = new Size(layout.TextWidth, 0);
+        label.Location = new Point(layout.Left, layout.Y);
     }
 
     private void StyleBox(TextBox box, DialogLayout layout, int indent)
@@ -309,7 +415,9 @@ internal sealed class ProxyEditDialog : Form
         string country = node["country"]?.GetValue<string>()
             ?? node["countryCode"]?.GetValue<string>()
             ?? "";
+        _exitCountry = node["countryCode"]?.GetValue<string>() ?? "";
         string timezone = node["timezone"]?.GetValue<string>() ?? "";
+        _exitTimezone = timezone;
         string language = node["language"]?.GetValue<string>() ?? "";
         _detectStatus.ForeColor = Theme.TextSecondary;
         _detectStatus.Text = Loc.T("locale.detect.ok", ip, country, timezone, language);
@@ -327,6 +435,88 @@ internal sealed class ProxyEditDialog : Form
         {
             _syncingRegion = false;
         }
+        RefreshAlignment();
+    }
+
+    private void RefreshAlignment()
+    {
+        if (IsDisposed) return;
+        string? os = OsTimezone.Iana();
+        _osLine.Text = string.IsNullOrWhiteSpace(os)
+            ? Loc.T("locale.os.unknown")
+            : Loc.T("locale.os", os);
+
+        string? tz = EmptyToNull(_timezone.Text);
+        string? lang = EmptyToNull(_language.Text);
+
+        if (_engine is null)
+        {
+            _warn.Text = FollowSystemCnWarning(os, tz);
+            _warn.ForeColor = Theme.UsageHigh;
+            _preview.Text = PreviewText(tz, lang, os, langEnv: null);
+            return;
+        }
+
+        try
+        {
+            var node = _engine.Call("locale_align", new
+            {
+                osTimezone = os ?? "",
+                timezone = tz ?? "",
+                language = lang ?? "",
+                exitCountry = _exitCountry ?? "",
+                exitTimezone = _exitTimezone ?? "",
+            });
+            var warnings = new List<string>();
+            if (node["warnings"] is JsonArray arr)
+            {
+                foreach (var w in arr)
+                {
+                    string? code = w?.GetValue<string>();
+                    if (string.IsNullOrEmpty(code)) continue;
+                    string key = "locale.warn." + code;
+                    string text = Loc.T(key);
+                    warnings.Add(text == key ? code : text);
+                }
+            }
+            _warn.Text = warnings.Count == 0 ? "" : string.Join("\n", warnings);
+            _warn.ForeColor = Theme.UsageHigh;
+
+            bool follow = node["followSystem"]?.GetValue<bool>() ?? tz is null;
+            string? timeZone = node["preview"]?["timeZone"]?.GetValue<string>();
+            string? language = node["preview"]?["language"]?.GetValue<string>();
+            string? langEnv = node["preview"]?["langEnv"]?.GetValue<string>();
+            _preview.Text = follow
+                ? Loc.T("locale.preview.system", os ?? "—")
+                : PreviewText(timeZone, language, os, langEnv);
+        }
+        catch (Exception)
+        {
+            _warn.Text = FollowSystemCnWarning(os, tz);
+            _preview.Text = PreviewText(tz, lang, os, langEnv: null);
+        }
+    }
+
+    internal static string PreviewText(string? timeZone, string? language, string? os, string? langEnv)
+    {
+        if (string.IsNullOrWhiteSpace(timeZone))
+            return Loc.T("locale.preview.system", string.IsNullOrWhiteSpace(os) ? "—" : os);
+        string langBit = string.IsNullOrWhiteSpace(language)
+            ? ""
+            : Loc.T("locale.preview.lang", language, string.IsNullOrWhiteSpace(langEnv) ? language : langEnv);
+        return Loc.T("locale.preview.override", timeZone, langBit);
+    }
+
+    internal static string FollowSystemCnWarning(string? os, string? accountTz)
+    {
+        if (!string.IsNullOrWhiteSpace(accountTz)) return "";
+        if (string.IsNullOrWhiteSpace(os)) return "";
+        string tz = os.Trim();
+        bool cn = tz.Equals("Asia/Shanghai", StringComparison.OrdinalIgnoreCase)
+            || tz.Equals("Asia/Urumqi", StringComparison.OrdinalIgnoreCase)
+            || tz.Equals("Asia/Chongqing", StringComparison.OrdinalIgnoreCase)
+            || tz.Equals("China Standard Time", StringComparison.OrdinalIgnoreCase);
+        return cn ? Loc.T("locale.warn.follow-system-cn") : "";
     }
 
     private bool TryReadProxy(out string? proxy, out string? problem)

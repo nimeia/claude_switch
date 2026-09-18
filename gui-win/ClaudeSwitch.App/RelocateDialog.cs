@@ -25,6 +25,10 @@ internal sealed class RelocateDialog : Form
     private RelocateScanView _scan = RelocateScanView.Empty;
     private RelocatePlanView _plan = RelocatePlanView.Invalid("dest-not-absolute");
     private bool _busy;
+    // Plans walk both trees; only the newest request may repaint.
+    private int _planSeq;
+    private readonly List<(Control[] Row, int Gap)> _stack = [];
+    private int _bottomPad;
 
     public RelocateDialog(Engine engine)
     {
@@ -78,7 +82,13 @@ internal sealed class RelocateDialog : Form
         layout.Y = Math.Max(_dest.Bottom, _browse.Bottom) + layout.Scale(12);
 
         var destHint = layout.Text(Loc.T("relocate.dest.hint"), Theme.FontSmall, Theme.TextMuted);
-        _notes = layout.Text(" ", Theme.FontSmall, Theme.TextMuted);
+
+        _dest.Text = SuggestDest();
+        // The first plan runs inline so the notes start at their real height;
+        // later ones run off the UI thread.
+        try { _plan = RelocateData.Plan(_engine, _dest.Text); }
+        catch (Exception ex) { _plan = PlanFailed(ex); }
+        _notes = layout.Text(NotesText(), Theme.FontSmall, Theme.TextMuted);
         _status = layout.Text(" ", Theme.FontBody, Theme.TextPrimary);
 
         _move = new PrimaryButton { Text = Loc.T("relocate.apply"), Name = "relocateApply" };
@@ -95,10 +105,12 @@ internal sealed class RelocateDialog : Form
             _move, _restore, _deleteBackups, _close,
         ]);
 
-        _dest.Text = SuggestDest();
-        RefreshPlan();
-        layout.Y = Math.Max(_notes.Bottom, _status.Bottom) + layout.Scale(8);
+        layout.Y = _status.Bottom + layout.Scale(8);
         layout.ActionRow(_close, _deleteBackups, _restore, _move);
+        CaptureStack(
+            [_intro], [_trees], [_jsonNote], [_destLabel], [_dest, _browse], [destHint],
+            [_notes], [_status], [_close, _deleteBackups, _restore, _move]);
+        PaintPlan();
 
         _browse.Click += (_, _) => Browse();
         _dest.TextChanged += (_, _) => { _replan.Stop(); _replan.Start(); };
@@ -108,6 +120,9 @@ internal sealed class RelocateDialog : Form
         _deleteBackups.Click += (_, _) => OnDeleteBackups();
         _close.Click += (_, _) => Close();
         CancelButton = _close;
+        // Closing mid-copy would restart the main window's polling while the
+        // trees are still being moved, and drop the outcome.
+        FormClosing += (_, e) => { if (_busy) e.Cancel = true; };
         FormClosed += (_, _) => _replan.Dispose();
     }
 
@@ -119,8 +134,9 @@ internal sealed class RelocateDialog : Form
         }
         catch (Exception ex)
         {
-            _trees.Text = Loc.T("relocate.scan.failed", ex.Message);
+            _trees.Text = Loc.T("relocate.scan.failed", RelocateData.Describe(ex, _plan));
             _move.Enabled = false;
+            Restack();
             return;
         }
         PaintScan();
@@ -152,51 +168,110 @@ internal sealed class RelocateDialog : Form
     private void PaintScan()
     {
         _trees.Text = TreeLines();
-        _trees.Size = _trees.GetPreferredSize(new Size(_trees.MaximumSize.Width, 0));
         _jsonNote.Text = JsonLine();
-        _jsonNote.Size = _jsonNote.GetPreferredSize(new Size(_jsonNote.MaximumSize.Width, 0));
+        Restack();
     }
 
-    private void RefreshPlan()
+    /// <summary>Remember the vertical gaps between rows as first laid out.</summary>
+    private void CaptureStack(params Control[][] rows)
     {
-        if (_busy) return;
+        int prevBottom = 0;
+        foreach (var row in rows)
+        {
+            _stack.Add((row, row.Min(c => c.Top) - prevBottom));
+            prevBottom = row.Max(c => c.Bottom);
+        }
+        _bottomPad = ClientSize.Height - prevBottom;
+    }
+
+    /// <summary>
+    /// Re-measure the labels whose text changes and stack every row again
+    /// with its original gap, so longer notes push the buttons down instead
+    /// of running underneath them.
+    /// </summary>
+    private void Restack()
+    {
+        foreach (var label in new[] { _trees, _jsonNote, _notes, _status })
+            label.Size = label.GetPreferredSize(new Size(label.MaximumSize.Width, 0));
+        if (_stack.Count == 0) return;
+        int y = 0;
+        foreach (var (row, gap) in _stack)
+        {
+            int shift = y + gap - row.Min(c => c.Top);
+            if (shift != 0)
+            {
+                foreach (var c in row)
+                    c.Top += shift;
+            }
+            y = row.Max(c => c.Bottom);
+        }
+        ClientSize = new Size(ClientSize.Width, y + _bottomPad);
+    }
+
+    private async void RefreshPlan()
+    {
+        if (_busy)
+        {
+            PaintButtons();
+            return;
+        }
+        int seq = ++_planSeq;
+        string dest = _dest.Text;
+        _move.Enabled = false;
+        RelocatePlanView plan;
         try
         {
-            _plan = RelocateData.Plan(_engine, _dest.Text);
+            plan = await Task.Run(() => RelocateData.Plan(_engine, dest)).ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            _notes.Text = Loc.T("relocate.scan.failed", ex.Message);
-            _move.Enabled = false;
-            return;
+            plan = PlanFailed(ex);
         }
+        if (seq != _planSeq || IsDisposed || _busy) return;
+        _plan = plan;
+        PaintPlan();
+    }
 
+    /// <summary>An unknown problem code is shown as-is, so this reads as the note.</summary>
+    private RelocatePlanView PlanFailed(Exception ex) =>
+        RelocatePlanView.Invalid(Loc.T("relocate.scan.failed", RelocateData.Describe(ex, _plan)));
+
+    /// <summary>A plan the shell rejected before asking the engine has no count.</summary>
+    private int LiveSessions => _plan.DestRoot.Length > 0 ? _plan.LiveSessions : _scan.LiveSessions;
+
+    private string NotesText()
+    {
         var notes = new List<string>();
-        if (_scan.LiveSessions > 0)
-            notes.Add(Loc.T("relocate.live", _scan.LiveSessions));
+        if (LiveSessions > 0)
+            notes.Add(Loc.T("relocate.live", LiveSessions));
         if (!string.IsNullOrEmpty(_scan.ClaudeConfigDir))
             notes.Add(Loc.T("relocate.configDir", _scan.ClaudeConfigDir));
-        if (_plan.SameVolume)
-            notes.Add(Loc.T("relocate.sameVolume"));
         foreach (var w in _plan.Warnings)
-        {
-            if (w == "same-volume") continue;
-            notes.Add(w);
-        }
+            notes.Add(RelocateData.WarningText(w, _plan));
         foreach (var p in _plan.Problems)
             notes.Add(RelocateData.ProblemText(p, _plan));
-        if (_scan.Relocated)
+        if (_scan.Relocated && _scan.Trees.Any(t => t.BackupExists))
             notes.Add(Loc.T("relocate.warn.keepBackup"));
+        return notes.Count == 0 ? " " : string.Join("\n\n", notes);
+    }
 
-        _notes.Text = notes.Count == 0 ? " " : string.Join("\n\n", notes);
-        _notes.Size = _notes.GetPreferredSize(new Size(_notes.MaximumSize.Width, 0));
-        _notes.ForeColor = _plan.Problems.Count > 0 || _scan.LiveSessions > 0
+    private void PaintPlan()
+    {
+        _notes.Text = NotesText();
+        _notes.ForeColor = _plan.Problems.Count > 0 || LiveSessions > 0
             ? Theme.TextPrimary
             : Theme.TextMuted;
+        PaintButtons();
+        Restack();
+    }
 
+    private void PaintButtons()
+    {
         bool backups = _scan.Trees.Any(t => t.BackupExists);
+        // Any link at all can be undone — including a move that stopped halfway.
+        bool anyLinked = _scan.Trees.Any(t => t.Linked);
         _move.Enabled = !_busy && _plan.CanApply;
-        _restore.Enabled = !_busy && _scan.Relocated;
+        _restore.Enabled = !_busy && anyLinked;
         _deleteBackups.Enabled = !_busy && _scan.Relocated && backups;
         _dest.Enabled = !_busy && !_scan.Relocated;
         _browse.Enabled = _dest.Enabled;
@@ -238,44 +313,53 @@ internal sealed class RelocateDialog : Form
         {
             await Task.Run(() => RelocateData.Apply(_engine, dest)).ConfigureAwait(true);
             _status.Text = Loc.T("relocate.apply.ok");
-            Reload();
         }
         catch (Exception ex)
         {
             _status.Text = "";
             MessageBox.Show(
                 this,
-                Loc.T("relocate.apply.failed", ex.Message),
+                Loc.T("relocate.apply.failed", RelocateData.Describe(ex, _plan)),
                 Loc.T("relocate.title"),
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
         }
         finally
         {
+            // Success or not, show what is on disk now.
+            Reload();
             SetBusy(false, _status.Text);
         }
     }
 
     private async void OnRestore()
     {
-        SetBusy(true, "");
+        SetBusy(true, Loc.T("relocate.restore.busy"));
         try
         {
-            await Task.Run(() => RelocateData.Restore(_engine)).ConfigureAwait(true);
-            _status.Text = Loc.T("relocate.restore.ok");
-            Reload();
+            var back = await Task.Run(() => RelocateData.Restore(_engine)).ConfigureAwait(true);
+            var lines = new List<string> { Loc.T("relocate.restore.ok") };
+            if (back.Stale.Count > 0)
+                lines.Add(Loc.T(
+                    "relocate.restore.stale",
+                    string.Join(", ", back.Stale.Select(RelocateData.TreeTitle))));
+            if (back.Leftover.Count > 0)
+                lines.Add(Loc.T("relocate.restore.leftover", string.Join(", ", back.Leftover)));
+            _status.Text = string.Join("\n", lines);
         }
         catch (Exception ex)
         {
+            _status.Text = "";
             MessageBox.Show(
                 this,
-                Loc.T("relocate.restore.failed", ex.Message),
+                Loc.T("relocate.restore.failed", RelocateData.Describe(ex, _plan)),
                 Loc.T("relocate.title"),
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
         }
         finally
         {
+            Reload();
             SetBusy(false, _status.Text);
         }
     }
@@ -295,19 +379,20 @@ internal sealed class RelocateDialog : Form
         {
             long bytes = await Task.Run(() => RelocateData.DeleteBackups(_engine)).ConfigureAwait(true);
             _status.Text = Loc.T("relocate.deleteBackups.ok", HistoryCleanup.FormatBytes(bytes));
-            Reload();
         }
         catch (Exception ex)
         {
+            _status.Text = "";
             MessageBox.Show(
                 this,
-                Loc.T("relocate.deleteBackups.failed", ex.Message),
+                Loc.T("relocate.deleteBackups.failed", RelocateData.Describe(ex, _plan)),
                 Loc.T("relocate.title"),
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
         }
         finally
         {
+            Reload();
             SetBusy(false, _status.Text);
         }
     }
@@ -316,8 +401,9 @@ internal sealed class RelocateDialog : Form
     {
         _busy = busy;
         UseWaitCursor = busy;
-        _status.Text = status;
+        _status.Text = string.IsNullOrEmpty(status) ? " " : status;
         _close.Enabled = !busy;
+        Restack();
         RefreshPlan();
     }
 }

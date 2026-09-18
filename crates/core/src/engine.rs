@@ -146,6 +146,10 @@ fn refresh_interval_param(params: &serde_json::Value) -> Option<u32> {
         .and_then(|n| u32::try_from(n).ok())
 }
 
+fn purge_options(params: &serde_json::Value) -> crate::purge::PurgeOptions {
+    serde_json::from_value(params.clone()).unwrap_or_default()
+}
+
 /// Required string parameter, named in the error so a typo is obvious.
 fn str_param<'a>(params: &'a serde_json::Value, key: &str) -> Result<&'a str> {
     params
@@ -2910,6 +2914,25 @@ impl Engine {
                 let o = crate::relocate::delete_backups(&self.paths.env)?;
                 Ok(serde_json::to_value(o).map_err(|e| Error::Internal(e.to_string()))?)
             }
+            // Uninstall Claude Code (the program and its runtime files).
+            // Distinct from remove_account: that drops one managed slot.
+            "purge_scan" => {
+                let s = crate::purge::scan(&self.paths.env);
+                Ok(serde_json::to_value(s).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "purge_plan" => {
+                let opts = purge_options(params);
+                let p = crate::purge::plan(&self.paths.env, &opts);
+                Ok(serde_json::to_value(p).map_err(|e| Error::Internal(e.to_string()))?)
+            }
+            "purge_apply" => {
+                let opts = purge_options(params);
+                let o = crate::purge::apply(&self.paths.env, &opts)?;
+                *self.live.inner.lock() = None;
+                self.plans.inner.lock().clear();
+                self.emit(CoreEvent::SnapshotUpdated);
+                Ok(serde_json::to_value(o).map_err(|e| Error::Internal(e.to_string()))?)
+            }
             // Session mode: one account per terminal, in parallel.
             "session_prepare" => {
                 let id = str_param(params, "id")?;
@@ -3269,6 +3292,16 @@ impl Engine {
                 self.set_app_proxy(opt_param(params, "proxy"))?;
                 Ok(json!({ "ok": true }))
             }
+            "locale_align" => {
+                let a = crate::locale::align(
+                    opt_param(params, "osTimezone"),
+                    opt_param(params, "timezone"),
+                    opt_param(params, "language"),
+                    opt_param(params, "exitCountry"),
+                    opt_param(params, "exitTimezone"),
+                );
+                Ok(serde_json::to_value(a).map_err(|e| Error::Internal(e.to_string()))?)
+            }
             "locale_detect" => {
                 let proxy = params.get("proxy").and_then(|v| v.as_str());
                 let stored = crate::proxy::normalize_stored(proxy)?;
@@ -3288,6 +3321,7 @@ impl Engine {
                     "country": loc.country,
                     "timezone": loc.timezone,
                     "language": loc.language,
+                    "osTimezone": crate::locale::os_timezone(),
                 }))
             }
             "schema_version" => Ok(json!({"ffiSchemaVersion": FFI_SCHEMA_VERSION})),
@@ -5334,6 +5368,32 @@ mod tests {
     }
 
     #[test]
+    fn locale_align_runs_through_the_method_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = engine_with_two_accounts(tmp.path());
+        let v = eng
+            .call_json(
+                "locale_align",
+                &json!({
+                    "osTimezone": "Asia/Shanghai",
+                    "timezone": "",
+                    "language": "",
+                    "exitCountry": "US",
+                    "exitTimezone": "America/New_York",
+                }),
+            )
+            .unwrap();
+        let warnings: Vec<&str> = v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect();
+        assert!(warnings.contains(&"follow-system-cn"), "{v}");
+        assert!(v["followSystem"].as_bool().unwrap());
+    }
+
+    #[test]
     fn app_proxy_is_inherited_by_accounts_on_system() {
         let tmp = tempfile::tempdir().unwrap();
         let (eng, _m) = engine_with_two_accounts(tmp.path());
@@ -5582,6 +5642,58 @@ mod tests {
 
         eng.call_json("relocate_restore", &json!({})).unwrap();
         assert!(claude.is_dir());
+    }
+
+    #[test]
+    fn purge_runs_through_the_method_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (eng, _m) = test_engine_with_mock(tmp.path().to_path_buf()).unwrap();
+        let claude = eng.paths.env.claude_config_home();
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(claude.join("settings.json"), b"{\"x\":1}").unwrap();
+        std::fs::write(
+            eng.paths.env.home.join(".claude.json"),
+            b"{\"userID\":\"u\"}",
+        )
+        .unwrap();
+        let bin = eng.paths.env.home.join(".local").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("claude.exe"), b"cli").unwrap();
+        std::fs::write(bin.join("uv.exe"), b"uv").unwrap();
+        std::fs::write(
+            eng.paths.backup_root.join("sequence.json"),
+            b"{\"accounts\":{\"1\":{\"email\":\"a@x.com\"}},\"sequence\":[1]}",
+        )
+        .unwrap();
+
+        let scan = eng.call_json("purge_scan", &json!({})).unwrap();
+        assert_eq!(scan["installKind"], json!("native"));
+        assert!(scan["importedAccounts"].as_u64().unwrap() >= 1);
+
+        let opts = json!({
+            "removeIdeExtension": false,
+            "removeProjectLocals": false,
+            "removeDesktopNested": false,
+            "removeThirdPartyShells": false,
+            "removeManaged": false,
+            "removeImportedAccounts": false,
+        });
+        let planned = eng.call_json("purge_plan", &opts).unwrap();
+        assert!(
+            planned["problems"].as_array().unwrap().is_empty(),
+            "{planned}"
+        );
+        assert!(planned["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w == "accounts-kept-identity-remains"));
+
+        eng.call_json("purge_apply", &opts).unwrap();
+        assert!(!claude.exists());
+        assert!(!bin.join("claude.exe").exists());
+        assert!(bin.join("uv.exe").exists());
+        assert!(eng.paths.backup_root.join("sequence.json").exists());
     }
 
     #[test]

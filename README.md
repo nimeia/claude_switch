@@ -74,11 +74,29 @@ Each account gets its own config directory (`<backup root>/sessions/<slot>-<emai
 - If the target account **is already the default login**, a bare `claude` is started with no second credentials copy
 - Deleting an account removes its session profile and directory bindings; deletion is refused while a terminal is still running
 
+### Terminal app
+
+**Tools → Terminal…** picks which application opens when this tool starts Claude Code (Open terminal, Resume session, Directories). Supervised runs stay inside Claude Switch.
+
+- **Automatic** (default) uses **Windows Terminal** when `wt.exe` is present, otherwise a direct spawn of `claude.exe`
+- **Warp** is listed first among terminals built for coding agents. Env and `claude --resume` are written to a `.cmd` file; Warp only types `cmd.exe /c` that file (its default shell is PowerShell, which cannot parse `"claude.EXE" --resume`)
+- Also: WezTerm, Ghostty, Alacritty, Tabby, ConEmu/Cmder, Windows Console Host, or the system default console
+- Uninstalled apps are shown but not selectable. A named choice that fails to start is reported, not silently replaced
+
+### Proxy and region
+
+Some accounts only work through one proxy node, and Claude Code shows times in the zone it is told, not the Windows one. Right-click a card → **Proxy & region…** sets both, per account.
+
+- **Proxy**: System (the app proxy, else the machine's), a custom HTTP URL, or Direct. Terminals and agents opened as that account get it in their environment, and it goes into the account's `settings.json` `env` so Claude Code's background workers match
+- **Timezone and language** become `timeZone` / `language` in the same `settings.json`, plus `TZ` / `LANG` for processes this app starts. **Detect from exit** probes the proxy's exit IP and fills them in; there are also presets and a custom value. **Follow the system** removes the keys, so another account's region cannot stick
+- When that account is the default login, the same keys go into `~/.claude/settings.json`, so a `claude` you start yourself sees them. Windows already open pick changes up only after you reopen them
+- **Tools → App proxy…** sets the proxy for this app's own requests (usage refresh, exit-IP detection) and for every account left on System
+
 ### Directories and sessions
 
 - The toolbar **Resume session** dropdown and the tray menu list recent sessions per directory — **one step back into the last conversation**
 - The **Directories** window browses every directory and its full session list
-- Resume runs **`claude` directly, not via cmd** — the terminal is whatever your **default terminal app** is set to; when Claude exits the window closes cleanly (no leftover cmd prompt)
+- Resume opens Claude Code in the app chosen under **Tools → Terminal…**. **Automatic** uses Windows Terminal when it is installed; Warp, WezTerm, Ghostty, Alacritty, Tabby, ConEmu/Cmder, Console Host, or the system default console can be selected instead
 - Aggregate token stats run on demand (reads all transcripts, typically a few hundred ms) with visualization
 - **Directories themselves are account-agnostic** — Claude Code does not record which account owned a conversation. The **Account** column is the binding you set for that directory (which account opens from there), not something read from the transcript
 
@@ -119,9 +137,9 @@ Practical note: **English is often 1.5–2× wider than Chinese**. This project 
 
 ## Networking
 
-Requests honor `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, and on Windows also read the system proxy settings — the same path Claude Code uses.
+Requests honor `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, and on Windows also read the system proxy settings — the same path Claude Code uses. **Tools → App proxy…** overrides that for this app and for accounts set to System; an account can also have its own (see [Proxy and region](#proxy-and-region)).
 
-> If your network can only reach Anthropic through a proxy, a direct connection returns `403 "Request not allowed"`. That error **looks like auth failure but is network reachability**. Proxy settings are read at startup; restart after changing them.
+> If your network can only reach Anthropic through a proxy, a direct connection returns `403 "Request not allowed"`. That error **looks like auth failure but is network reachability**. Environment variables are read at startup, so restart after changing them; a proxy set in the app applies to its own requests right away.
 
 ## Where data lives
 
@@ -129,17 +147,35 @@ Requests honor `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, and on Windows also rea
 |---|---|
 | `~/.claude-swap-backup/credentials/` | Per-slot credentials (encrypted) |
 | `~/.claude-swap-backup/configs/` | Per-slot `.claude.json` snapshots |
-| `~/.claude-swap-backup/sequence.json` | Slot order and current account |
+| `~/.claude-swap-backup/sequence.json` | Slot order, current account, and each account's proxy & region |
+| `~/.claude-swap-backup/settings.json` | App settings: auto-switch, warmup, status line, app proxy |
 | `~/.claude-swap-backup/sessions/` | Per-account session profiles (including their own transcript history) |
 | `~/.claude-swap-backup/mappings.json` | Directory → account bindings (machine-local) |
 | `~/.claude-swap-backup/cache/` | Usage-overview cache (safe to delete) |
 | `~/.claude-swap-backup/bin/` | The status-line renderer, written when that feature is enabled |
 | `~/.claude-swap-backup/statusline.json` | What the status line reads (no credentials) |
-| `~/.claude/settings.json` | Claude Code's own file; only its `statusLine` key is ever touched, and a copy is kept as `settings.json.cswitch-bak` |
+| `~/.claude/settings.json` | Claude Code's own file. Only these keys are ever written: `statusLine` (a copy of the file is kept as `settings.json.cswitch-bak`), `cleanupPeriodDays` (history retention), and for the default login's proxy & region `timeZone`, `language` and the proxy / `TZ` / `LANG` entries under `env`. Everything else is kept |
 | `%LOCALAPPDATA%\ClaudeSwitch\ui-prefs.ini` | UI prefs (theme, language, hide email, etc.) |
 | `%TEMP%\.net\ClaudeSwitch\` | Self-extracted single-file runtime |
 
 Layout is compatible with [claude-swap](https://github.com/realiti4/claude-swap) (Python CLI); both can share the same backup tree. Session profile layout matches its `cswap run` layout; only internal marker filenames differ (`.cswitch-*` vs `.cswap-*`) — both can read the same profiles, each managing its own markers.
+
+### Move Claude data to another drive
+
+`~/.claude` grows with every transcript. **Tools → Move Claude data…** moves it, and `~/.claude-swap-backup`, to another drive without changing Windows user folders or `CLAUDE_CONFIG_DIR`. The data is copied to `<folder>\claude` and `<folder>\swap`, and the original paths become directory junctions pointing there, so Claude Code, the VS Code extension and this app keep using the same paths.
+
+- **Close Claude Code first.** The move is refused while a session is running, and checked again after the copy. Then the originals are renamed aside (Windows refuses that while any program has a file open inside), whatever changed during the copy is copied again, and the links are made. If any step fails, both folders are put back — they never end up half-moved
+- **Links inside `~/.claude`** — say `commands/` or `CLAUDE.md` linked from a dotfiles repo — are recreated at the new location, not copied and not dropped
+- **The destination** must be an empty folder, or one this app filled before (recorded in `.claude-switch-relocate.json` there), on a fixed NTFS drive: a USB or network drive can go away and take Claude Code's data with it. The new `claude\` and `swap\` get the same access as your user folder — you, SYSTEM and Administrators
+- The originals stay as `~/.claude.reloc-backup` and `~/.claude-swap-backup.reloc-backup` until you click **Delete C: backups**
+- **Undo** copies the current data back — including everything that changed since the move — and then removes the links. It still works after the backups are deleted. The copy left on the other drive is named so you can delete it
+- `~/.claude.json` stays in your user folder; it is small
+
+### Uninstall Claude Code
+
+**Tools → Remove Claude Code…** deletes the Claude Code program and the files it wrote while running (`~/.claude`, `~/.claude.json`, the native installer under `~/.local`, `claude-cli-nodejs` cache, and so on). It is not the same as deleting one managed account.
+
+Imported accounts are a separate choice: keep `~/.claude-swap-backup` so a later reinstall can switch back into those logins, or delete that tree too. The Claude desktop app, this program, and committed `CLAUDE.md` files in your repos are left alone unless you tick the matching optional boxes.
 
 ## Build from source
 

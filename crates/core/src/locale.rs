@@ -12,6 +12,7 @@
 //! from `settings.json` so a previous account's zone cannot stick, and the
 //! names are scrubbed from the child so an inherited `TZ` cannot leak.
 
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::errors::{Error, Result};
@@ -276,7 +277,9 @@ pub fn parse_geo_json(v: &Value) -> Result<ExitLocale> {
 pub fn language_for_country(cc: &str) -> &'static str {
     match cc.trim().to_ascii_uppercase().as_str() {
         "JP" => "japanese",
-        "CN" | "TW" | "HK" | "MO" => "chinese",
+        "CN" | "HK" | "MO" => "chinese",
+        // Taiwan (TW) falls through to english: it is not on Anthropic's
+        // restriction list, so auto-detect must not fill `chinese`.
         "KR" => "korean",
         "FR" => "french",
         "DE" | "AT" => "german",
@@ -293,6 +296,288 @@ pub fn language_for_country(cc: &str) -> &'static str {
         | "LB" => "arabic",
         _ => "english",
     }
+}
+
+/// Machine timezone Claude Code would see if this account follows the system.
+///
+/// Windows: `tzutil /g` then a compact Windows-id → IANA map. Elsewhere: `TZ`
+/// when it already looks like IANA.
+#[must_use]
+pub fn os_timezone() -> Option<String> {
+    #[cfg(windows)]
+    {
+        windows_os_timezone()
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("TZ")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(|s| windows_id_to_iana(&s).unwrap_or(s))
+            .filter(|s| is_iana(s) || !s.is_empty())
+    }
+}
+
+/// Whether `timezone` (IANA or a Windows id) is a mainland-China zone.
+#[must_use]
+pub fn is_cn_timezone(timezone: &str) -> bool {
+    matches!(tz_region(timezone), GeoRegion::Cn)
+}
+
+/// What the dialog should warn about and what launch would write.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocaleAlignment {
+    pub os_timezone: Option<String>,
+    pub follow_system: bool,
+    pub warnings: Vec<String>,
+    pub preview: LocalePreview,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalePreview {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tz_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_env: Option<String>,
+}
+
+/// Compare the account's timezone/language with the machine zone and last exit.
+#[must_use]
+pub fn align(
+    os_timezone: Option<&str>,
+    account_timezone: Option<&str>,
+    account_language: Option<&str>,
+    exit_country: Option<&str>,
+    exit_timezone: Option<&str>,
+) -> LocaleAlignment {
+    let os = nonempty(os_timezone)
+        .map(str::to_string)
+        .or_else(self::os_timezone);
+    let account_tz = nonempty(account_timezone)
+        .filter(|s| !is_system_token(s))
+        .map(str::to_string);
+    let account_lang = nonempty(account_language)
+        .filter(|s| !is_system_token(s))
+        .map(str::to_string);
+    let follow_system = account_tz.is_none();
+    let effective_tz = account_tz.as_deref().or(os.as_deref());
+
+    let mut warnings = Vec::new();
+    if follow_system {
+        match os.as_deref().map(tz_region) {
+            Some(GeoRegion::Cn) => warnings.push("follow-system-cn".into()),
+            Some(GeoRegion::HkMo) => warnings.push("follow-system-hkmo".into()),
+            _ => {}
+        }
+    } else if account_tz.as_deref().is_some_and(is_cn_timezone) {
+        warnings.push("cn-timezone".into());
+    }
+
+    let exit_cc = nonempty(exit_country).map(str::to_ascii_uppercase);
+    if let (Some(tz), Some(cc)) = (effective_tz, exit_cc.as_deref()) {
+        let tr = tz_region(tz);
+        let cr = country_region(cc);
+        if tr != GeoRegion::Other && cr != GeoRegion::Other && tr != cr {
+            warnings.push("tz-exit-mismatch".into());
+        }
+    }
+    if let (Some(lang), Some(cc)) = (account_lang.as_deref(), exit_cc.as_deref()) {
+        if language_mismatches_country(lang, cc) {
+            warnings.push("lang-exit-mismatch".into());
+        }
+    }
+    // Last detected exit timezone vs the account timezone (when both IANA).
+    if let (Some(acc), Some(exit_tz)) = (effective_tz, nonempty(exit_timezone)) {
+        let a = tz_region(acc);
+        let e = tz_region(exit_tz);
+        if a != GeoRegion::Other
+            && e != GeoRegion::Other
+            && a != e
+            && !warnings.iter().any(|w| w == "tz-exit-mismatch")
+        {
+            warnings.push("tz-exit-mismatch".into());
+        }
+    }
+
+    let lang_env = account_lang.as_deref().and_then(posix_locale);
+    LocaleAlignment {
+        os_timezone: os,
+        follow_system,
+        warnings,
+        preview: LocalePreview {
+            time_zone: account_tz.clone(),
+            tz_env: account_tz,
+            language: account_lang,
+            lang_env,
+        },
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GeoRegion {
+    Cn,
+    HkMo,
+    Tw,
+    Jp,
+    Kr,
+    Us,
+    Gb,
+    Sg,
+    Au,
+    Other,
+}
+
+fn tz_region(timezone: &str) -> GeoRegion {
+    let raw = timezone.trim();
+    let mapped = windows_id_to_iana(raw);
+    let tz = mapped.as_deref().unwrap_or(raw);
+    if matches!(
+        tz,
+        "Asia/Shanghai"
+            | "Asia/Urumqi"
+            | "Asia/Chongqing"
+            | "Asia/Harbin"
+            | "Asia/Kashgar"
+            | "Asia/Chungking"
+            | "PRC"
+    ) {
+        return GeoRegion::Cn;
+    }
+    if matches!(tz, "Asia/Hong_Kong" | "Asia/Macau" | "Asia/Macao") {
+        return GeoRegion::HkMo;
+    }
+    if tz == "Asia/Taipei" {
+        return GeoRegion::Tw;
+    }
+    if tz == "Asia/Tokyo" {
+        return GeoRegion::Jp;
+    }
+    if tz == "Asia/Seoul" {
+        return GeoRegion::Kr;
+    }
+    if tz == "Asia/Singapore" {
+        return GeoRegion::Sg;
+    }
+    if tz == "Europe/London" || tz == "Europe/Belfast" {
+        return GeoRegion::Gb;
+    }
+    if tz.starts_with("Australia/") {
+        return GeoRegion::Au;
+    }
+    if tz.starts_with("America/New_York")
+        || tz.starts_with("America/Chicago")
+        || tz.starts_with("America/Denver")
+        || tz.starts_with("America/Los_Angeles")
+        || tz.starts_with("America/Phoenix")
+        || tz.starts_with("America/Anchorage")
+        || tz.starts_with("America/Detroit")
+        || tz.starts_with("America/Indiana/")
+        || tz.starts_with("America/Kentucky/")
+        || tz.starts_with("America/North_Dakota/")
+        || tz.starts_with("America/Boise")
+        || tz == "Pacific/Honolulu"
+        || tz.starts_with("US/")
+    {
+        return GeoRegion::Us;
+    }
+    GeoRegion::Other
+}
+
+fn country_region(cc: &str) -> GeoRegion {
+    match cc.trim().to_ascii_uppercase().as_str() {
+        "CN" => GeoRegion::Cn,
+        "HK" | "MO" => GeoRegion::HkMo,
+        "TW" => GeoRegion::Tw,
+        "JP" => GeoRegion::Jp,
+        "KR" => GeoRegion::Kr,
+        "US" => GeoRegion::Us,
+        "GB" | "UK" => GeoRegion::Gb,
+        "SG" => GeoRegion::Sg,
+        "AU" => GeoRegion::Au,
+        _ => GeoRegion::Other,
+    }
+}
+
+fn language_mismatches_country(language: &str, cc: &str) -> bool {
+    let key = language.trim().to_ascii_lowercase().replace('_', "-");
+    let cc = cc.trim().to_ascii_uppercase();
+    match key.as_str() {
+        "chinese" | "zh" | "zh-cn" | "zh-hans" | "simplified chinese" => {
+            !matches!(cc.as_str(), "CN" | "HK" | "MO")
+        }
+        "japanese" | "ja" | "jp" => cc != "JP",
+        "korean" | "ko" => cc != "KR",
+        _ => false,
+    }
+}
+
+fn nonempty(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim).filter(|s| !s.is_empty())
+}
+
+#[cfg(windows)]
+fn windows_os_timezone() -> Option<String> {
+    let out = std::process::Command::new("tzutil")
+        .arg("/g")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let key = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if key.is_empty() {
+        return None;
+    }
+    Some(windows_id_to_iana(&key).unwrap_or(key))
+}
+
+/// Map a Windows timezone id (or a value that is already IANA) to IANA.
+#[must_use]
+pub fn windows_id_to_iana(id: &str) -> Option<String> {
+    let id = id.trim();
+    if is_iana(id) {
+        return Some(id.to_string());
+    }
+    Some(
+        match id {
+            "Taipei Standard Time" => "Asia/Taipei",
+            "Tokyo Standard Time" => "Asia/Tokyo",
+            "Korea Standard Time" => "Asia/Seoul",
+            "Singapore Standard Time" => "Asia/Singapore",
+            "Hong Kong Standard Time" => "Asia/Hong_Kong",
+            "Pacific Standard Time" => "America/Los_Angeles",
+            "Mountain Standard Time" => "America/Denver",
+            "US Mountain Standard Time" => "America/Phoenix",
+            "Central Standard Time" => "America/Chicago",
+            "Eastern Standard Time" => "America/New_York",
+            "US Eastern Standard Time" => "America/Indianapolis",
+            "Alaskan Standard Time" => "America/Anchorage",
+            "Hawaiian Standard Time" => "Pacific/Honolulu",
+            "GMT Standard Time" => "Europe/London",
+            "Coordinated Universal Time" => "UTC",
+            "AUS Eastern Standard Time" => "Australia/Sydney",
+            "W. Australia Standard Time" => "Australia/Perth",
+            "India Standard Time" => "Asia/Kolkata",
+            "Russian Standard Time" => "Europe/Moscow",
+            "E. South America Standard Time" => "America/Sao_Paulo",
+            "Canada Central Standard Time" => "America/Regina",
+            "Atlantic Standard Time" => "America/Halifax",
+            "Pacific Standard Time (Mexico)" => "America/Tijuana",
+            "Central Europe Standard Time" => "Europe/Budapest",
+            "W. Europe Standard Time" => "Europe/Berlin",
+            "Romance Standard Time" => "Europe/Paris",
+            "China Standard Time" | "GMT+08" | "UTC+08" => "Asia/Shanghai",
+            _ => return None,
+        }
+        .to_string(),
+    )
 }
 
 fn timezone_for_country(cc: &str) -> Option<&'static str> {
@@ -546,7 +831,82 @@ mod tests {
     fn language_follows_the_country() {
         assert_eq!(language_for_country("jp"), "japanese");
         assert_eq!(language_for_country("CN"), "chinese");
+        assert_eq!(language_for_country("HK"), "chinese");
+        assert_eq!(language_for_country("TW"), "english");
         assert_eq!(language_for_country("GB"), "english");
         assert_eq!(language_for_country("XX"), "english");
+    }
+
+    #[test]
+    fn windows_ids_map_to_iana() {
+        assert_eq!(
+            windows_id_to_iana("China Standard Time").as_deref(),
+            Some("Asia/Shanghai")
+        );
+        assert_eq!(
+            windows_id_to_iana("Pacific Standard Time").as_deref(),
+            Some("America/Los_Angeles")
+        );
+        assert_eq!(
+            windows_id_to_iana("Asia/Tokyo").as_deref(),
+            Some("Asia/Tokyo")
+        );
+        assert!(windows_id_to_iana("Not A Zone").is_none());
+    }
+
+    #[test]
+    fn align_warns_when_follow_system_on_a_cn_machine() {
+        let a = align(
+            Some("Asia/Shanghai"),
+            None,
+            None,
+            Some("US"),
+            Some("America/New_York"),
+        );
+        assert!(a.follow_system);
+        assert!(a.warnings.iter().any(|w| w == "follow-system-cn"), "{a:?}");
+        assert!(a.warnings.iter().any(|w| w == "tz-exit-mismatch"), "{a:?}");
+        assert!(a.preview.time_zone.is_none());
+    }
+
+    #[test]
+    fn align_warns_when_account_tz_is_cn() {
+        let a = align(
+            Some("America/New_York"),
+            Some("Asia/Shanghai"),
+            Some("chinese"),
+            Some("US"),
+            Some("America/Los_Angeles"),
+        );
+        assert!(!a.follow_system);
+        assert!(a.warnings.iter().any(|w| w == "cn-timezone"), "{a:?}");
+        assert!(a.warnings.iter().any(|w| w == "tz-exit-mismatch"), "{a:?}");
+        assert!(
+            a.warnings.iter().any(|w| w == "lang-exit-mismatch"),
+            "{a:?}"
+        );
+        assert_eq!(a.preview.time_zone.as_deref(), Some("Asia/Shanghai"));
+        assert_eq!(a.preview.tz_env.as_deref(), Some("Asia/Shanghai"));
+        assert_eq!(a.preview.lang_env.as_deref(), Some("zh_CN.UTF-8"));
+    }
+
+    #[test]
+    fn align_is_quiet_when_us_exit_matches_override() {
+        let a = align(
+            Some("Asia/Shanghai"),
+            Some("America/New_York"),
+            Some("english"),
+            Some("US"),
+            Some("America/New_York"),
+        );
+        assert_eq!(a.warnings, Vec::<String>::new(), "{a:?}");
+        assert_eq!(a.preview.time_zone.as_deref(), Some("America/New_York"));
+        assert_eq!(a.preview.lang_env.as_deref(), Some("en_US.UTF-8"));
+    }
+
+    #[test]
+    fn align_treats_a_windows_cn_id_as_china() {
+        let a = align(Some("China Standard Time"), None, None, None, None);
+        assert!(a.warnings.iter().any(|w| w == "follow-system-cn"), "{a:?}");
     }
 }

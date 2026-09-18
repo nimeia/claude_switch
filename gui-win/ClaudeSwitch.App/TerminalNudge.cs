@@ -204,7 +204,9 @@ internal static class TerminalNudge
     /// </summary>
     private static readonly HashSet<string> SkipHosts = new(StringComparer.OrdinalIgnoreCase)
     {
-        "warp", "WindowsTerminal", "explorer", "dwm", "winlogon", "services",
+        "warp", "WindowsTerminal", "wezterm", "wezterm-gui", "alacritty",
+        "ghostty", "Tabby", "ConEmu64", "ConEmu", "Cmder",
+        "explorer", "dwm", "winlogon", "services",
         "csrss", "smss", "svchost", "RuntimeBroker", "ApplicationFrameHost",
         "System", "Idle",
     };

@@ -194,6 +194,9 @@ sealed class MainForm : Form
     private readonly ToolStripMenuItem _btnProjects;
     private readonly ToolStripMenuItem _btnOverview;
     private readonly ToolStripMenuItem _btnRelocate;
+    private readonly ToolStripMenuItem _btnPurge;
+    private readonly ToolStripMenuItem _btnAppProxy;
+    private readonly ToolStripMenuItem _btnTerminal;
     private readonly ToolStripDropDownButton _btnTools;
     private readonly ToolStripDropDownButton _btnRuns;
 
@@ -471,19 +474,29 @@ sealed class MainForm : Form
         };
         _btnLang = BuildLanguageButton();
         _btnTools = MakeStripDrop(Loc.T("toolbar.tools"), Loc.T("toolbar.tools.tip"));
-        var appProxyItem = new ToolStripMenuItem(Loc.T("menu.appProxy"))
+        _btnAppProxy = new ToolStripMenuItem(Loc.T("menu.appProxy"))
         {
             ToolTipText = Loc.T("menu.appProxy.tip"),
         };
-        appProxyItem.Click += (_, _) => DoEditAppProxy();
+        _btnAppProxy.Click += (_, _) => DoEditAppProxy();
+        _btnTerminal = new ToolStripMenuItem(Loc.T("menu.terminal"))
+        {
+            ToolTipText = Loc.T("menu.terminal.tip"),
+        };
+        _btnTerminal.Click += (_, _) => DoEditTerminal();
         _btnRelocate = new ToolStripMenuItem(Loc.T("menu.relocate"))
         {
             ToolTipText = Loc.T("menu.relocate.tip"),
         };
         _btnRelocate.Click += (_, _) => DoRelocate();
+        _btnPurge = new ToolStripMenuItem(Loc.T("menu.purge"))
+        {
+            ToolTipText = Loc.T("menu.purge.tip"),
+        };
+        _btnPurge.Click += (_, _) => DoPurge();
         _btnTools.DropDownItems.AddRange([
             _btnProjects, _btnOverview, new ToolStripSeparator(),
-            _btnRelocate, appProxyItem, _btnTheme, _btnLang,
+            _btnRelocate, _btnPurge, _btnAppProxy, _btnTerminal, _btnTheme, _btnLang,
         ]);
         _search = new ToolStripTextBox("search")
         {
@@ -1429,6 +1442,12 @@ sealed class MainForm : Form
                 dlg.Show(this);
                 return dlg;
             }));
+            LayoutProbe.ExtraWindows.Add(("gui-terminal.png", () =>
+            {
+                var dlg = new TerminalDialog();
+                dlg.Show(this);
+                return dlg;
+            }));
         }
         // Dark is a full second palette, and the colour roles — green for the
         // account in use, slate for focus, amber for attention — have to survive
@@ -1655,6 +1674,12 @@ sealed class MainForm : Form
         _btnOverview.ToolTipText = Loc.T("toolbar.overview.tip");
         _btnRelocate.Text = Loc.T("menu.relocate");
         _btnRelocate.ToolTipText = Loc.T("menu.relocate.tip");
+        _btnPurge.Text = Loc.T("menu.purge");
+        _btnPurge.ToolTipText = Loc.T("menu.purge.tip");
+        _btnAppProxy.Text = Loc.T("menu.appProxy");
+        _btnAppProxy.ToolTipText = Loc.T("menu.appProxy.tip");
+        _btnTerminal.Text = Loc.T("menu.terminal");
+        _btnTerminal.ToolTipText = Loc.T("menu.terminal.tip");
         _btnTheme.Text = ThemeToggleText();
         _btnTheme.ToolTipText = Loc.T("toolbar.theme.tip");
         // Both of these carry live state in their label, so they are written by
@@ -4969,6 +4994,38 @@ sealed class MainForm : Form
             _pollTimer.Start();
             _stalledTimer.Start();
         }
+    }
+
+    private void DoPurge()
+    {
+        _pollTimer.Stop();
+        _stalledTimer.Stop();
+        try
+        {
+            using var dlg = new PurgeDialog(_engine);
+            dlg.ShowDialog(this);
+            if (dlg.Changed)
+            {
+                _status.Text = dlg.AccountsKept
+                    ? Loc.T("purge.status.gone")
+                    : Loc.T("purge.status.goneEmpty");
+                Reload();
+            }
+        }
+        finally
+        {
+            _pollTimer.Start();
+            _stalledTimer.Start();
+        }
+    }
+
+    private void DoEditTerminal()
+    {
+        if (!TerminalDialog.TryEdit(this, out var kind))
+            return;
+        UiPrefs.Terminal = kind.Id();
+        UiPrefs.Save();
+        _status.Text = Loc.T("terminal.saved", TerminalHost.DisplayName(kind));
     }
 
     private void DoEditAppProxy()

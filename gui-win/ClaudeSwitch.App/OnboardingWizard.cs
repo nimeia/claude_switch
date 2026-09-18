@@ -289,6 +289,12 @@ internal static class UiPrefs
     /// </remarks>
     public static bool TasksExpanded { get; set; } = true;
 
+    /// <summary>
+    /// Which terminal app starts Claude Code. Empty means Automatic
+    /// (Windows Terminal if installed, otherwise a direct spawn).
+    /// </summary>
+    public static string Terminal { get; set; } = "";
+
     private static string Path =>
         System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -315,6 +321,8 @@ internal static class UiPrefs
                 // which must keep the expanded default rather than read as off.
                 if (line.StartsWith("tasks_expanded=", StringComparison.OrdinalIgnoreCase))
                     TasksExpanded = line.Contains('1') || line.Contains("true", StringComparison.OrdinalIgnoreCase);
+                if (line.StartsWith("terminal=", StringComparison.OrdinalIgnoreCase))
+                    Terminal = line["terminal=".Length..].Trim();
             }
         }
         catch { /* ignore */ }
@@ -335,7 +343,8 @@ internal static class UiPrefs
                 $"hide_email={(HideEmail ? "1" : "0")}\n" +
                 $"settings_expanded={(SettingsExpanded ? "1" : "0")}\n" +
                 $"tasks_expanded={(TasksExpanded ? "1" : "0")}\n" +
-                $"language={Language}\n");
+                $"language={Language}\n" +
+                $"terminal={Terminal}\n");
         }
         catch { /* ignore */ }
     }

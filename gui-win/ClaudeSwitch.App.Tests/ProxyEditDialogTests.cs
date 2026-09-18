@@ -107,6 +107,97 @@ public class ProxyEditDialogTests
     }
 
     [Fact]
+    public void PreviewText_describes_follow_system_and_an_override()
+    {
+        using var lang = Loc.Scoped("en");
+        Assert.Contains("this machine", ProxyEditDialog.PreviewText(null, null, "Asia/Shanghai", null), StringComparison.OrdinalIgnoreCase);
+        string over = ProxyEditDialog.PreviewText("America/New_York", "english", "Asia/Shanghai", "en_US.UTF-8");
+        Assert.Contains("America/New_York", over, StringComparison.Ordinal);
+        Assert.Contains("english", over, StringComparison.Ordinal);
+        Assert.Contains("en_US.UTF-8", over, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FollowSystemCnWarning_only_when_the_machine_is_china_and_unset()
+    {
+        using var lang = Loc.Scoped("en");
+        Assert.NotEmpty(ProxyEditDialog.FollowSystemCnWarning("Asia/Shanghai", null));
+        Assert.Empty(ProxyEditDialog.FollowSystemCnWarning("Asia/Shanghai", "America/New_York"));
+        Assert.Empty(ProxyEditDialog.FollowSystemCnWarning("America/New_York", null));
+    }
+
+    [Fact]
+    public void Dialog_shows_the_machine_timezone_and_a_preview()
+    {
+        using var lang = Loc.Scoped("zh-Hans");
+        using var dlg = new ProxyEditDialog(new AccountCardModel
+        {
+            Number = 1,
+            Email = "a@b.c",
+            Timezone = "America/New_York",
+            Language = "english",
+        });
+        var os = dlg.Controls.OfType<Label>().Single(l => l.Name == "osTimezone");
+        Assert.Contains("本机时区", os.Text, StringComparison.Ordinal);
+        var preview = dlg.Controls.OfType<Label>().Single(l => l.Name == "localePreview");
+        Assert.Contains("timeZone=America/New_York", preview.Text, StringComparison.Ordinal);
+        var warn = dlg.Controls.OfType<Label>().Single(l => l.Name == "localeWarn");
+        Assert.Equal("", warn.Text);
+    }
+
+    [Fact]
+    public void Long_preview_and_detect_result_stay_stacked_inside_the_dialog()
+    {
+        using var lang = Loc.Scoped("zh-Hans");
+        using var dlg = new ProxyEditDialog(new AccountCardModel
+        {
+            Number = 2,
+            Email = "liutong.pub@gmail.com",
+            Timezone = "America/New_York",
+            Language = "english",
+        });
+
+        var preview = dlg.Controls.OfType<Label>().Single(l => l.Name == "localePreview");
+        var detect = dlg.Controls.OfType<Label>().Single(l => l.Name == "detectStatus");
+        var os = dlg.Controls.OfType<Label>().Single(l => l.Name == "osTimezone");
+        detect.Text = Loc.T(
+            "locale.detect.ok",
+            "130.130.102.112",
+            "United States",
+            "America/New_York",
+            "english");
+
+        Assert.Contains("timeZone=America/New_York", preview.Text, StringComparison.Ordinal);
+        Assert.True(preview.Height > 0);
+        Assert.True(detect.Height > 0);
+        Assert.True(
+            detect.Top >= preview.Bottom,
+            $"detect top {detect.Top} overlaps preview bottom {preview.Bottom}");
+        Assert.True(
+            preview.Top >= os.Bottom,
+            $"preview top {preview.Top} overlaps os bottom {os.Bottom}");
+
+        // Child.Visible is false until the form is shown; Location is still set.
+        var buttons = dlg.Controls.OfType<Button>().Where(b => b.Name == "detect" || b is PrimaryButton or SecondaryButton).ToList();
+        Assert.NotEmpty(buttons);
+        int buttonsTop = buttons.Min(b => b.Top);
+        Assert.True(
+            buttonsTop >= detect.Bottom,
+            $"buttons top {buttonsTop} overlap detect bottom {detect.Bottom}");
+        foreach (var b in buttons)
+        {
+            Assert.True(
+                b.Bottom <= dlg.ClientSize.Height,
+                $"{b.Name} bottom {b.Bottom} is clipped by client {dlg.ClientSize.Height}");
+            Assert.True(
+                b.Right <= dlg.ClientSize.Width,
+                $"{b.Name} right {b.Right} is clipped by client {dlg.ClientSize.Width}");
+        }
+        Assert.True(preview.Bottom <= dlg.ClientSize.Height);
+        Assert.True(detect.Bottom <= dlg.ClientSize.Height);
+    }
+
+    [Fact]
     public void Detect_button_is_on_the_dialog()
     {
         using var dlg = new ProxyEditDialog(new AccountCardModel { Number = 1, Email = "a@b.c" });

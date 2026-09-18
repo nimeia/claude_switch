@@ -12,14 +12,17 @@ namespace ClaudeSwitch.App;
 /// WinForms process (no console of its own) used to hand it a bare console
 /// without truecolor / WT profile → Claude Code's UI icons rendered monochrome.
 ///
-/// Prefer Windows Terminal (<c>wt.exe</c>) when installed, and always seed the
-/// colour env vars apps use to detect 24-bit colour. Fall back to a direct
-/// spawn with the same env when WT is missing.
+/// The host is the one chosen under Tools → Terminal. Automatic still prefers
+/// Windows Terminal (<c>wt.exe</c>) for a colour profile + ConPTY truecolor,
+/// and always seeds the colour env vars apps use to detect 24-bit colour.
+/// Other hosts wrap Claude in <c>cmd /c</c> so proxy and
+/// <c>CLAUDE_CONFIG_DIR</c> reach the pane (WT does not inherit this process's
+/// environment). Direct spawn is the fallback when no host is installed.
 /// </remarks>
 internal static class ClaudeCli
 {
     /// <summary>Env vars that force colour-capable rendering when the host supports it.</summary>
-    private static readonly (string Name, string Value)[] ColorEnv =
+    internal static readonly (string Name, string Value)[] ColorEnv =
     [
         ("COLORTERM", "truecolor"),
         ("TERM", "xterm-256color"),
@@ -203,16 +206,11 @@ internal static class ClaudeCli
 
         try
         {
-            // Prefer Windows Terminal: full colour profile + ConPTY truecolor.
-            if (FindWindowsTerminal() is { } wt)
-            {
-                if (TryStartViaWindowsTerminal(wt, claudeExe, workingDirectory, sessionId, configDir, scrub, extra))
-                    return null;
-            }
-
-            // Fallback: direct spawn (default-terminal handoff) with colour env.
-            StartDirect(claudeExe, workingDirectory, sessionId, configDir, scrub, extra);
-            return null;
+            var launch = new TerminalLaunch(
+                claudeExe, workingDirectory, sessionId, configDir, scrub, extra);
+            if (TerminalHost.TryLaunch(launch))
+                return null;
+            return Loc.T("terminal.startFailed", TerminalHost.DisplayName(TerminalHost.Preferred));
         }
         catch (Exception ex)
         {
@@ -224,7 +222,7 @@ internal static class ClaudeCli
     /// <c>wt -d dir -- cmd /d /s /c "set … &amp;&amp; claude …"</c> so env vars
     /// actually reach Claude (WT does not reliably inherit our Process env into the pane).
     /// </summary>
-    private static bool TryStartViaWindowsTerminal(
+    internal static bool TryStartViaWindowsTerminal(
         string wtExe,
         string claudeExe,
         string workingDirectory,
@@ -242,18 +240,8 @@ internal static class ClaudeCli
                 // wt itself does not need the work dir; -d sets the tab's.
                 WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             };
-            // Open as a tab when a window exists; otherwise a new window.
-            psi.ArgumentList.Add("-w");
-            psi.ArgumentList.Add("0");
-            psi.ArgumentList.Add("nt");
-            psi.ArgumentList.Add("-d");
-            psi.ArgumentList.Add(workingDirectory);
-            // Explicit commandline after options: cmd carries env then execs claude.
-            psi.ArgumentList.Add("cmd.exe");
-            psi.ArgumentList.Add("/d");
-            psi.ArgumentList.Add("/s");
-            psi.ArgumentList.Add("/c");
-            psi.ArgumentList.Add(script);
+            foreach (string arg in TerminalHost.WindowsTerminalArgs(workingDirectory, script))
+                psi.ArgumentList.Add(arg);
             ApplyColorEnv(psi);
             Process.Start(psi);
             return true;
@@ -264,7 +252,7 @@ internal static class ClaudeCli
         }
     }
 
-    private static void StartDirect(
+    internal static void StartDirect(
         string claudeExe,
         string workingDirectory,
         string? sessionId,
@@ -291,9 +279,6 @@ internal static class ClaudeCli
         Process.Start(psi);
     }
 
-    /// <summary>
-    /// cmd.exe script: set colour + session env, clear scrubbed keys, run claude.
-    /// </summary>
     /// <summary>
     /// cmd.exe script: set colour + session + proxy env, clear scrubbed keys, run claude.
     /// </summary>
@@ -352,7 +337,7 @@ internal static class ClaudeCli
     /// <summary>
     /// Mark the child as truecolor-capable and drop NO_COLOR so icons stay coloured.
     /// </summary>
-    private static void ApplyColorEnv(ProcessStartInfo psi)
+    internal static void ApplyColorEnv(ProcessStartInfo psi)
     {
         foreach (var (name, value) in ColorEnv)
             psi.Environment[name] = value;
