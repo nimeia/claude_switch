@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/nimeia/claude_switch/security/advisories/new
+    about: Anything that could expose or damage credentials — privately, not as an issue.
+  - name: Read the docs
+    url: https://github.com/nimeia/claude_switch#readme
+    about: Install notes, how switching works, and where data lives.

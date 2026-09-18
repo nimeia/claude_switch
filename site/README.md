@@ -30,6 +30,8 @@ gui-win/ClaudeSwitch.App/bin/Release/net8.0-windows/ClaudeSwitch.exe --skip-onbo
 
 The captures carry a black margin where `PrintWindow` overshoots the window; crop it before use (`ImageChops.difference` against black, then `getbbox`).
 
+`assets/img/social-card.png` (1280×640) is the link-preview image twice over: the site's `og:image`, and the repository's **Settings → Social preview** on GitHub. It is composed from `logo.png` and `app-main-light.png`; after retaking those, rebuild it and upload it in both places.
+
 The overview and directory windows are only worth photographing with history behind them. The fixture seeds three short transcripts; for the shots on this page the demo profiles were filled with a couple of months of synthetic sessions first.
 
 ## Preview

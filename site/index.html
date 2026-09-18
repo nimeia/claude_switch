@@ -13,9 +13,10 @@
 <meta property="og:url" content="https://nimeia.github.io/claude_switch/">
 <meta property="og:title" content="Claude Switch — hit the limit, keep writing">
 <meta property="og:description" content="A Windows tray app that switches Claude Code accounts when a rate limit hits — no restart, and the session in progress keeps going.">
-<meta property="og:image" content="https://nimeia.github.io/claude_switch/assets/img/app-main-light.png">
-<meta property="og:image:width" content="1800">
-<meta property="og:image:height" content="1389">
+<meta property="og:image" content="https://nimeia.github.io/claude_switch/assets/img/social-card.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:image:alt" content="Claude Switch — Hit the limit. Keep writing. A Windows tray app that switches Claude Code accounts when a rate limit hits.">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="assets/img/logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1037,8 +1038,11 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
     root.setAttribute('lang', lang === 'zh' ? 'zh-Hans' : 'en');
     langBtn.textContent = lang === 'zh' ? 'English' : '中文';
   }
-  var lang = null;
-  try { lang = localStorage.getItem('cs-lang'); } catch (e) {}
+  // ?lang=zh / ?lang=en (links from the README) win over the remembered choice.
+  var lang = (/[?&]lang=(zh|en)(&|$)/.exec(location.search) || [])[1] || null;
+  if (!lang) {
+    try { lang = localStorage.getItem('cs-lang'); } catch (e) {}
+  }
   if (lang !== 'zh' && lang !== 'en') {
     lang = (navigator.language || '').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en';
   }
