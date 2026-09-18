@@ -3,21 +3,48 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Claude Switch</title>
-<meta name="description" content="A Windows tray app that switches Claude Code accounts when a rate limit hits — no restart, and the session in progress keeps going.">
-<!-- Absolute URLs: link previews cannot resolve relative ones. Update them if
-     the site moves to a custom domain. -->
+<!-- data-zh holds the Chinese text for /zh/. tools/site/build.py swaps it in
+     when it writes that page, and drops the attribute from both. -->
+<title data-zh="Claude Switch — Claude Code 多账号自动切换工具（Windows）">Claude Switch — auto-switch Claude Code accounts on Windows</title>
+<meta name="description" content="Free, open-source Windows tray app that switches Claude Code accounts when the 5-hour or weekly limit hits — no restart, and the session in progress keeps going. Auto-switch, per-account terminals, proxy &amp; region, usage stats." data-zh="免费开源的 Windows 托盘工具：Claude Code 撞到 5 小时或每周额度上限时，自动切换到余量最多的账号，不用重启，正在进行的会话继续往下写。支持按账号开终端、代理与地区、用量统计和终端状态栏。">
+<meta name="google-site-verification" content="tfiIYpuTug0UZL-6wdlAL10J9dsgmkGquDyvHpP3r9I">
+<!-- Absolute URLs: link previews and search engines cannot resolve relative
+     ones. Update them if the site moves to a custom domain. -->
 <link rel="canonical" href="https://nimeia.github.io/claude_switch/">
+<link rel="alternate" hreflang="en" href="https://nimeia.github.io/claude_switch/">
+<link rel="alternate" hreflang="zh-Hans" href="https://nimeia.github.io/claude_switch/zh/">
+<link rel="alternate" hreflang="x-default" href="https://nimeia.github.io/claude_switch/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Claude Switch">
+<meta property="og:locale" content="en_US">
+<meta property="og:locale:alternate" content="zh_CN">
 <meta property="og:url" content="https://nimeia.github.io/claude_switch/">
-<meta property="og:title" content="Claude Switch — hit the limit, keep writing">
-<meta property="og:description" content="A Windows tray app that switches Claude Code accounts when a rate limit hits — no restart, and the session in progress keeps going.">
+<meta property="og:title" content="Claude Switch — hit the limit, keep writing" data-zh="Claude Switch — 额度撞墙，继续写">
+<meta property="og:description" content="A Windows tray app that switches Claude Code accounts when a rate limit hits — no restart, and the session in progress keeps going." data-zh="Windows 托盘工具：Claude Code 撞到额度上限时自动切换账号，不用重启，正在进行的会话继续往下写。">
 <meta property="og:image" content="https://nimeia.github.io/claude_switch/assets/img/social-card.png">
 <meta property="og:image:width" content="1280">
 <meta property="og:image:height" content="640">
 <meta property="og:image:alt" content="Claude Switch — Hit the limit. Keep writing. A Windows tray app that switches Claude Code accounts when a rate limit hits.">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Claude Switch",
+  "description": "Windows tray app that switches Claude Code accounts when a rate limit hits — no restart, and the session in progress keeps going.",
+  "url": "https://nimeia.github.io/claude_switch/",
+  "downloadUrl": "https://github.com/nimeia/claude_switch/releases/latest",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Windows",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "license": "https://opensource.org/licenses/MIT",
+  "image": "https://nimeia.github.io/claude_switch/assets/img/social-card.png",
+  "screenshot": "https://nimeia.github.io/claude_switch/assets/img/app-main-light.png",
+  "sameAs": ["https://github.com/nimeia/claude_switch"],
+  "inLanguage": ["en", "zh-Hans"]
+}
+</script>
 <link rel="icon" href="assets/img/logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1038,8 +1065,10 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
     root.setAttribute('lang', lang === 'zh' ? 'zh-Hans' : 'en');
     langBtn.textContent = lang === 'zh' ? 'English' : '中文';
   }
-  // ?lang=zh / ?lang=en (links from the README) win over the remembered choice.
+  // The URL wins over the remembered choice: /zh/ is the Chinese page search
+  // engines index, and ?lang=zh / ?lang=en still work for older links.
   var lang = (/[?&]lang=(zh|en)(&|$)/.exec(location.search) || [])[1] || null;
+  if (!lang && /\/zh\/(index\.html)?$/.test(location.pathname)) lang = 'zh';
   if (!lang) {
     try { lang = localStorage.getItem('cs-lang'); } catch (e) {}
   }

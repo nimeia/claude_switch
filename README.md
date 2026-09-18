@@ -19,7 +19,7 @@
 <p align="center">
   <a href="https://github.com/nimeia/claude_switch/releases/latest"><b>Download</b></a> ·
   <a href="https://nimeia.github.io/claude_switch/">Website</a> ·
-  <a href="https://nimeia.github.io/claude_switch/?lang=zh">简体中文介绍</a>
+  <a href="https://nimeia.github.io/claude_switch/zh/">简体中文介绍</a>
 </p>
 
 <picture>
