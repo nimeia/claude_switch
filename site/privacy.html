@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Privacy Policy — Claude Switch</title>
+<meta name="description" content="What Claude Switch reads on your machine, what it sends over the network, and what it does not collect.">
+<link rel="canonical" href="https://nimeia.github.io/claude_switch/privacy.html">
+<meta name="robots" content="index,follow">
+<link rel="icon" href="assets/img/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500&display=swap">
+<style>
+/* Same tokens as the landing page, trimmed to what one text page needs. */
+:root{
+  --bg:#F0EEE6; --surface:#FBFAF7; --ink:#1C1B19; --ink-2:#57534B; --ink-3:#877F72;
+  --line:#E1DBCD; --accent:#C0603B; --accent-ink:#A34E2E;
+  --sans:"IBM Plex Sans","Segoe UI","Microsoft YaHei UI","PingFang SC","Noto Sans SC",system-ui,sans-serif;
+  --serif:"Newsreader",Georgia,"Songti SC","Noto Serif SC",serif;
+  --mono:"IBM Plex Mono","Cascadia Mono",Consolas,"Courier New",monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#181714; --surface:#211F1B; --ink:#EDE9DF; --ink-2:#B6AFA1; --ink-3:#8A8274;
+    --line:#332F28; --accent:#D97A55; --accent-ink:#E28F6D;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#181714; --surface:#211F1B; --ink:#EDE9DF; --ink-2:#B6AFA1; --ink-3:#8A8274;
+  --line:#332F28; --accent:#D97A55; --accent-ink:#E28F6D;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink); font-family:var(--sans);
+  font-size:16px; line-height:1.65; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:720px; margin:0 auto; padding:0 16px}
+header.topbar{border-bottom:1px solid var(--line); padding:18px 0}
+header.topbar .wrap{display:flex; align-items:center; gap:10px}
+header.topbar img{width:28px; height:28px; border-radius:7px}
+header.topbar a{color:var(--ink); text-decoration:none; font-weight:600}
+main{padding:40px 0 64px}
+h1{font-family:var(--serif); font-weight:400; font-size:2.1rem; line-height:1.2; margin:0 0 6px}
+.updated{color:var(--ink-3); font-size:.9rem; margin:0 0 32px}
+h2{font-size:1.06rem; font-weight:600; margin:34px 0 8px}
+p,li{color:var(--ink-2)}
+li{margin:6px 0}
+a{color:var(--accent-ink)}
+code{font-family:var(--mono); font-size:.88em; background:var(--surface); border:1px solid var(--line); border-radius:5px; padding:1px 5px}
+.callout{background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin:22px 0}
+.callout p:last-child{margin-bottom:0}
+.callout p:first-child{margin-top:0}
+footer{border-top:1px solid var(--line); padding:24px 0 48px; color:var(--ink-3); font-size:.88rem}
+footer a{color:var(--ink-3)}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <img src="assets/img/logo.png" alt="">
+    <a href="./">Claude Switch</a>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+
+<h1>Privacy Policy</h1>
+<p class="updated">Last updated 20 September 2026</p>
+
+<p>Claude Switch is a Windows tray application that switches between Claude Code accounts on your own computer. It has no server, no account of its own, and no sign-up. Everything it manages stays on your machine.</p>
+
+<div class="callout">
+  <p><strong>The short version:</strong> the app reads and writes your local Claude Code configuration so it can switch accounts, and it talks to Anthropic's API with your own credentials to read your usage. It collects no analytics, sends nothing to the authors, and has no telemetry of any kind.</p>
+</div>
+
+<h2>What the app reads and writes on your computer</h2>
+<p>To switch accounts without restarting Claude Code, the app manages the files Claude Code itself uses:</p>
+<ul>
+  <li><code>%USERPROFILE%\.claude.json</code> and its backup and lock files — the active account and Claude Code settings</li>
+  <li><code>%USERPROFILE%\.claude\</code> — including <code>.credentials.json</code>, <code>settings.json</code>, <code>settings.local.json</code>, and the <code>projects</code> and <code>sessions</code> folders that the app reads to list your recent conversations</li>
+  <li>Windows Credential Manager entries that Claude Code stores tokens in</li>
+  <li>Its own settings file, holding the accounts you added, their labels, and your preferences</li>
+</ul>
+<p>These files contain personal information: the email address of each Claude account you add, OAuth tokens, and the names and paths of the projects you have worked on. The app reads them to do its job and writes them back when you switch. It does not copy them anywhere else and does not transmit them to the authors or to any third party.</p>
+
+<h2>Network connections the app makes</h2>
+<ul>
+  <li><strong>Anthropic</strong> (<code>api.anthropic.com</code>, <code>platform.claude.com</code>) — using your own account credentials, to sign in and to read the usage figures shown in the 5-hour and 7-day meters. Your use of those services is governed by Anthropic's own privacy policy.</li>
+  <li><strong>IP geolocation services</strong> (<code>ipwho.is</code>, <code>ipapi.co</code>, <code>ip-api.com</code>) — only when you use the proxy and region feature, to show which country a proxy exits from. These requests disclose the exit IP address to the service that answers, which is the point of the check. No account information is sent.</li>
+  <li><strong>GitHub</strong> — to check for a newer release, when you ask it to.</li>
+</ul>
+<p>If you configure a proxy in the app, these requests go through it.</p>
+
+<h2>What is not collected</h2>
+<ul>
+  <li>No analytics, telemetry, crash reporting, or usage statistics</li>
+  <li>No advertising and no advertising identifiers</li>
+  <li>No account, server, or database belonging to this project — there is nowhere for your data to be sent</li>
+  <li>Nothing is shared with, sold to, or disclosed to third parties</li>
+</ul>
+
+<h2>Deleting your data</h2>
+<p>Removing an account in the app removes its stored entry. Uninstalling the app removes the app and its own settings; your Claude Code configuration in <code>%USERPROFILE%\.claude</code> is left alone, because it belongs to Claude Code rather than to this app. You can delete it yourself at any time.</p>
+
+<h2>Children</h2>
+<p>Claude Switch is a developer tool and is not directed at children. It does not knowingly collect information from anyone.</p>
+
+<h2>Changes</h2>
+<p>If this policy changes, the new version is published on this page with a new date above.</p>
+
+<h2>Contact</h2>
+<p>Questions or concerns: open an issue at <a href="https://github.com/nimeia/claude_switch/issues">github.com/nimeia/claude_switch/issues</a>. The source code is public, so every claim on this page can be checked against it.</p>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>Claude Switch is free software under the MIT licence. An independent, community-built tool. Not affiliated with, sponsored by, or endorsed by Anthropic. “Claude” and “Claude Code” are Anthropic's trademarks, used here only to say what this tool works with.</p>
+    <p><a href="./">Back to the site</a> · <a href="https://github.com/nimeia/claude_switch">GitHub</a></p>
+  </div>
+</footer>
+
+</body>
+</html>
