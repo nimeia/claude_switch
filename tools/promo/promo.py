@@ -8,7 +8,8 @@
 
 It prepares every step and leaves the final click to you: X opens with the
 text already in the composer (X's own share-intent link), Facebook and Reddit
-open on the right page with the text on the clipboard. All three forbid
+open on the right page with the text on the clipboard, and a section's images
+open in Explorer so you can drag them in. All three forbid
 scripted posting through their websites, and the same link pushed to several
 places by a script is what their spam systems look for — so the script keeps
 a history and warns before repeating a link too soon.
@@ -24,6 +25,7 @@ import datetime as dt
 import json
 import pathlib
 import re
+import subprocess
 import sys
 import time
 import webbrowser
@@ -38,6 +40,7 @@ URL = re.compile(r"https?://\S+")
 # astroturfing, and Reddit and Facebook groups remove it.
 MAKER = re.compile(r"\b(I|we) (built|made|wrote|created|shipped)\b|\bside project\b|\bmy (own )?(app|tool|project)\b", re.I)
 X_LIMIT = 280
+X_IMAGE_LIMIT = 4
 REDDIT_TITLE_LIMIT = 300
 SAME_LINK_HOURS = 24
 
@@ -48,8 +51,9 @@ SAME_LINK_HOURS = 24
 def load_post(path: pathlib.Path) -> dict:
     """A post file is Markdown: `## x`, `## facebook`, `## reddit` sections.
 
-    Right under a heading, `targets:` and (Reddit) `title:` lines configure the
-    section; the text is everything after them.
+    Right under a heading, `targets:`, `images:` and (Reddit) `title:` lines
+    configure the section; the text is everything after them. Image paths are
+    relative to tools/promo/.
     """
     sections: dict[str, dict] = {}
     current = None
@@ -64,7 +68,7 @@ def load_post(path: pathlib.Path) -> dict:
         if current is None:
             continue
         sec = sections[current]
-        meta = re.match(r"^(targets|title):\s*(.*)$", line)
+        meta = re.match(r"^(targets|title|images):\s*(.*)$", line)
         if sec["in_meta"] and meta:
             sec["meta"][meta.group(1)] = meta.group(2).strip()
             continue
@@ -76,10 +80,12 @@ def load_post(path: pathlib.Path) -> dict:
     post = {"name": path.stem, "sections": {}}
     for platform, sec in sections.items():
         targets = [t.strip() for t in sec["meta"].get("targets", "").split(",") if t.strip()]
+        images = [HERE / i.strip() for i in sec["meta"].get("images", "").split(",") if i.strip()]
         post["sections"][platform] = {
             "text": "\n".join(sec["lines"]).strip(),
             "title": sec["meta"].get("title", ""),
             "targets": targets or (["profile"] if platform == "x" else []),
+            "images": images,
         }
     return post
 
@@ -121,10 +127,15 @@ def check(post: dict, targets: dict) -> tuple[list[str], list[str]]:
                 errors.append(f"{label}: target '{t}' is not in targets.json")
             elif targets[platform][t].get("blocked"):
                 warnings.append(f"{label}/{t}: {targets[platform][t]['blocked']}")
+        for image in sec["images"]:
+            if not image.exists():
+                errors.append(f"{label}: image '{image.name}' is not in tools/promo/{image.parent.name}/")
         if platform == "x":
             n = x_length(sec["text"])
             if n > X_LIMIT:
                 errors.append(f"x: {n} characters as X counts them; the limit is {X_LIMIT}")
+            if len(sec["images"]) > X_IMAGE_LIMIT:
+                errors.append(f"x: {len(sec['images'])} images; X takes {X_IMAGE_LIMIT} per post")
         if platform == "reddit":
             if not sec["title"]:
                 errors.append("reddit: needs a 'title:' line under the heading")
@@ -236,6 +247,22 @@ def indent(text: str, prefix: str = "    │ ") -> str:
     return "\n".join(prefix + line for line in text.splitlines())
 
 
+def show_images(images: list[pathlib.Path]) -> None:
+    """Open the folder with the images selected, so they can be dragged in.
+
+    None of the three sites accepts an image through a URL we can open, so this
+    is as far as automation goes: put the files in front of you.
+    """
+    if not images:
+        return
+    for image in images:
+        print(f"    image: {image}")
+    if sys.platform == "win32":
+        # /select, takes one file; the rest of the folder is visible next to it.
+        subprocess.Popen(["explorer", "/select,", str(images[0])])
+    print(f"    drag {'them' if len(images) > 1 else 'it'} into the composer, in this order")
+
+
 def steps(post: dict, targets: dict, only: set[str]) -> list[dict]:
     out = []
     for platform in PLATFORMS:
@@ -245,21 +272,32 @@ def steps(post: dict, targets: dict, only: set[str]) -> list[dict]:
         for key in sec["targets"]:
             info = targets[platform][key]
             text, title = sec["text"], sec["title"]
+            images = sec["images"]
             if platform == "x":
                 url = "https://x.com/intent/post?text=" + quote(text)
                 how = "The composer opens with the text filled in. Check it, then click Post."
+                if images:
+                    how += (" Drag the images in before you post — the share-intent link cannot "
+                            "carry them, and an image replaces the link preview card.")
             elif platform == "facebook":
                 url = info["url"]
                 how = ("Click 'Write something…' (group) or 'What's on your mind' (profile), "
                        "press Ctrl+V, wait for the link preview, check the audience, click Post.")
+                if images:
+                    how += (" Add the images with Photo/Video, or drag them in; Facebook then drops "
+                            "the link preview, so leave the URL in the text.")
             else:
                 url = (f"https://www.reddit.com/r/{key}/submit?type=TEXT"
                        f"&title={quote(title)}&text={quote(text)}")
                 how = ("Choose Text, check the title and body (paste with Ctrl+V if the body is empty), "
                        "read the sidebar rules, pick the flair they ask for, click Post.")
+                if images:
+                    how += (" Images go inside the body: switch the editor to Rich Text and drop each "
+                            "one after the paragraph it illustrates. Some subreddits do not allow "
+                            "images in a text post — if the drop is refused, post it without them.")
             out.append({"platform": platform, "target": key, "name": info.get("name", key),
                         "notes": info.get("notes", ""), "blocked": info.get("blocked"),
-                        "url": url, "how": how, "text": text, "title": title})
+                        "url": url, "how": how, "text": text, "title": title, "images": images})
     return out
 
 
@@ -309,6 +347,7 @@ def run(post: dict, targets: dict, only: set[str], again: bool) -> None:
             put_on_clipboard(step["text"], "body")
         elif p == "facebook":
             put_on_clipboard(step["text"], "post text")
+        show_images(step["images"])
         webbrowser.open(step["url"])
         print(f"    {step['how']}")
         while True:
@@ -392,7 +431,8 @@ def main() -> None:
     if args.cmd == "check":
         for platform, sec in post["sections"].items():
             extra = f", {x_length(sec['text'])}/{X_LIMIT} as X counts" if platform == "x" else ""
-            print(f"✓ {platform}: {len(sec['text'])} characters{extra} → {', '.join(sec['targets'])}")
+            shots = f", {len(sec['images'])} images" if sec["images"] else ""
+            print(f"✓ {platform}: {len(sec['text'])} characters{extra}{shots} → {', '.join(sec['targets'])}")
         return
     only = {p.strip() for p in args.only.split(",") if p.strip()}
     run(post, targets, only, args.again)
