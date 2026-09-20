@@ -10,6 +10,8 @@ dist/
 
 # Local release packaging output
 /artifacts/
+/artifacts-msix/
+/dist-msix/
 *.user
 
 # Probe / layout-acceptance output

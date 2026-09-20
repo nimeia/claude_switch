@@ -241,9 +241,11 @@ gui-win/ClaudeSwitch.App/Strings/    UI catalogs (one JSON per language, embedde
 site/           the product page: one static HTML file + app screenshots (GitHub Pages)
 tools/site/     builds what Pages publishes (/zh/ page, sitemap)
 tools/promo/    walk-through for announcing a release on X, Facebook and Reddit (posts, images)
+packaging/      what users download: the portable exe + zip, and the Store MSIX
 ```
 
 - [docs/design-claude-switch.md](docs/design-claude-switch.md) — architecture, FFI, UI design
+- [docs/msix.md](docs/msix.md) — the Microsoft Store build: how the package differs from the portable download, and how to build one
 - Behavior is specified by the upstream Python CLI [claude-swap](https://github.com/realiti4/claude-swap) — credentials, three-lock switch transactions, autoswitch, and poll policy follow it.
   For development you can clone it to `reference/claude-swap/` (that path is not version-controlled).
 

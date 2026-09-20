@@ -734,6 +734,8 @@
   "settings.warmup.task.tip": "Windows Task Scheduler starts the app once a day at {0}, only for each account's first round; later rounds need the app running.",
   "settings.warmup.tip": "Claude's 5-hour limit starts counting at your first message and resets 5 hours later.\nWhen on, this app sends one tiny Haiku request at {0} to start that clock early, so resets land inside your work hours.\nAfter each reset it starts the next round automatically until {1}:00; multiple accounts are staggered.\nThe app must be running.",
   "startup.registryFailed": "Cannot open the registry Run key",
+  "startup.blockedByUser": "Windows is blocking this app from starting at logon. Turn it back on in Settings › Apps › Startup, or in Task Manager's Startup apps tab.",
+  "startup.blockedByPolicy": "Starting at logon is disabled by a policy on this machine.",
   "status.active": "In use: {0}",
   "status.autoswitch.off": "Auto-switch: off",
   "status.autoswitch.on": "Auto-switch: on · {0}%",

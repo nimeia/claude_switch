@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX manifest for the Microsoft Store build.
+
+  Identity must match the reservation in Partner Center exactly (Product
+  management -> Product identity). Wrong values are not a warning: the upload
+  is rejected.
+
+      Package/Identity/Name                 xiaoqian.ClaudeSwitch
+      Package/Identity/Publisher            CN=4BA29194-C2B3-4168-A1CB-6B285B39742D
+      Package/Properties/PublisherDisplayName   xiaoqian
+
+  Version's fourth part must be 0 — the Store reserves it. @VERSION@ is filled
+  in from VERSION by packaging/pack-msix.ps1; this file is not valid on its own.
+-->
+<Package
+    xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+    xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+    IgnorableNamespaces="uap uap5 rescap">
+
+  <Identity
+      Name="xiaoqian.ClaudeSwitch"
+      Publisher="CN=4BA29194-C2B3-4168-A1CB-6B285B39742D"
+      Version="@VERSION@"
+      ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Claude Switch</DisplayName>
+    <PublisherDisplayName>xiaoqian</PublisherDisplayName>
+    <Logo>assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <!-- 17763 (Windows 10 1809) matches SupportedOSPlatformVersion in the
+         csproj, so the Store offers the package to exactly the machines the
+         app claims to run on. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+    <Resource Language="zh-cn" />
+  </Resources>
+
+  <Applications>
+    <Application Id="ClaudeSwitch" Executable="ClaudeSwitch.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+          DisplayName="Claude Switch"
+          Description="Switch between Claude Code accounts. When a rate limit is hit, it switches for you — no restart, and the session in progress keeps going."
+          BackgroundColor="transparent"
+          Square150x150Logo="assets\Square150x150Logo.png"
+          Square44x44Logo="assets\Square44x44Logo.png">
+        <uap:DefaultTile ShortName="Claude Switch" />
+      </uap:VisualElements>
+
+      <Extensions>
+        <!-- Launch at logon. The portable build uses the HKCU Run key, which a
+             packaged process cannot write for real; see StartupHelper.cs.
+             TaskId must match StartupHelper.TaskId.
+
+             Enabled="false" means the app is not added to startup behind the
+             user's back — the checkbox in Automation calls RequestEnableAsync,
+             and the user can still veto it in Settings -> Apps -> Startup. -->
+        <uap5:Extension Category="windows.startupTask" Executable="ClaudeSwitch.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap5:StartupTask TaskId="ClaudeSwitchStartup" Enabled="false" DisplayName="Claude Switch" />
+        </uap5:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- A desktop app that manages another program's files in the user profile
+         and starts terminals. Nothing narrower covers that. -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

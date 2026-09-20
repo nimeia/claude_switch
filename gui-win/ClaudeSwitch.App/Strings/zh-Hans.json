@@ -734,6 +734,8 @@
   "settings.warmup.task.tip": "每天 {0} 由 Windows 任务计划程序启动本应用一次，只负责各账号当天的第一轮计时；之后每轮到点续上，需要本应用保持运行。",
   "settings.warmup.tip": "Claude 的 5 小时额度从第一条消息开始计时，5 小时后重置。\n开启后，本应用会在 {0} 发一条极短的 Haiku 请求，提前开始计时，让重置落在上班时间里。\n每轮重置后自动开始下一轮，直到 {1}:00；多个账号会依次错开开始时间。\n需要本应用保持运行。",
   "startup.registryFailed": "无法打开注册表 Run 项",
+  "startup.blockedByUser": "Windows 阻止了本应用开机启动。请在“设置 › 应用 › 启动”或任务管理器的“启动应用”里重新打开。",
+  "startup.blockedByPolicy": "本机的策略禁用了开机启动。",
   "status.active": "当前账号：{0}",
   "status.autoswitch.off": "自动切换：关闭",
   "status.autoswitch.on": "自动切换：开 · {0}%",
