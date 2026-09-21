@@ -39,9 +39,14 @@
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
   </Dependencies>
 
+  <!-- Neutral language tags, matching the app's own catalogues (Strings/en.json,
+       zh-Hans.json). Partner Center turns each tag here into a Store listing it
+       requires: "en-us" would demand an English (United States) listing and
+       leave en-GB falling back, where "en" is one listing covering every
+       English locale. -->
   <Resources>
-    <Resource Language="en-us" />
-    <Resource Language="zh-cn" />
+    <Resource Language="en" />
+    <Resource Language="zh-Hans" />
   </Resources>
 
   <Applications>

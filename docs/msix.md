@@ -56,6 +56,19 @@ must match exactly or the upload is rejected.
 The version comes from `VERSION`, with `.0` appended — the Store reserves the
 fourth part and rejects anything else.
 
+## Language tags are listings
+
+Every `<Resource Language="...">` in the manifest becomes a Store listing
+Partner Center *requires* you to fill in, under "Languages supported in
+packages". Use the neutral tags the app actually ships — `en` and `zh-Hans`,
+matching `Strings/en.json` and `zh-Hans.json`.
+
+`en-us` and `zh-cn` look more precise and are worse twice over: they demand
+separate en-US and zh-CN listings on top of the neutral ones, and they leave
+en-GB or zh-TW customers with no listing at all. Removing a package does not
+remove the listing languages it added — they stay behind as empty, Incomplete
+listings and have to be deleted by hand under **Add/remove languages**.
+
 ## Testing it before submitting
 
 An unsigned package cannot be installed. To try it locally, sign it with a
