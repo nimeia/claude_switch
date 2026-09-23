@@ -13,9 +13,12 @@ internal sealed class OnboardingWizard : Form
     private readonly PrimaryButton _btnNext;
     private readonly SecondaryButton _btnBack;
     private readonly SecondaryButton _btnSkip;
+    private readonly SecondaryButton _btnDemo;
     private readonly Engine _engine;
     private readonly Action _onFinished;
     private Label? _resultLabel;
+    /// <summary>Keeps the demo offer on screen after a failed add.</summary>
+    private bool _addFailed;
 
     private readonly int _pad;
     private readonly int _gap;
@@ -71,6 +74,7 @@ internal sealed class OnboardingWizard : Form
             Enabled = false,
         };
         _btnSkip = new SecondaryButton { Text = Loc.T("wizard.skip") };
+        _btnDemo = new SecondaryButton { Text = Loc.T("wizard.demo") };
         _btnNext = new PrimaryButton { Text = Loc.T("wizard.next") };
 
         _btnBack.Click += (_, _) =>
@@ -82,9 +86,10 @@ internal sealed class OnboardingWizard : Form
             }
         };
         _btnSkip.Click += (_, _) => Finish(skipped: true);
+        _btnDemo.Click += (_, _) => DemoMode.Launch();
         _btnNext.Click += (_, _) => OnNext();
 
-        Controls.AddRange([_stepLabel, _content, _btnBack, _btnSkip, _btnNext]);
+        Controls.AddRange([_stepLabel, _content, _btnBack, _btnDemo, _btnSkip, _btnNext]);
         RenderStep();
     }
 
@@ -121,6 +126,7 @@ internal sealed class OnboardingWizard : Form
                     _resultLabel.Text =
                         Loc.T("wizard.addFailed", ex.Message);
                 }
+                _addFailed = true;
                 _btnNext.Text = Loc.T("wizard.continueAnyway");
                 _step = 3;
                 FitFrame();
@@ -156,6 +162,9 @@ internal sealed class OnboardingWizard : Form
         _content.Controls.Clear();
         _btnBack.Enabled = _step > 0 && _step < 3;
         _btnSkip.Visible = _step < 3;
+        // Offered on the step that asks for an account, and kept there when that
+        // step failed: without Claude Code installed it is the only way on.
+        _btnDemo.Visible = !DemoMode.IsActive && (_step == 2 || _addFailed);
 
         switch (_step)
         {
@@ -246,6 +255,8 @@ internal sealed class OnboardingWizard : Form
         }
         _btnBack.Width = _btnBack.GetPreferredSize(Size.Empty).Width;
         _btnBack.Location = new Point(_pad, rowY);
+        _btnDemo.Width = _btnDemo.GetPreferredSize(Size.Empty).Width;
+        _btnDemo.Location = new Point(_btnBack.Right + Theme.Scale(this, 10), rowY);
 
         ClientSize = new Size(_pad + _contentW + _pad, rowY + _btnNext.RowHeight + _pad);
     }

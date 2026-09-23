@@ -30,6 +30,9 @@ static class Program
                 warmupOnce = true;
         }
 
+        // Everything downstream asks DemoMode rather than passing the flag around.
+        DemoMode.IsActive = !string.IsNullOrWhiteSpace(fixture);
+
         // Layout probe mode always skips onboarding dialog.
         if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CLAUDE_SWITCH_LAYOUT_DIR")))
             skipOnboarding = true;
@@ -194,6 +197,7 @@ sealed class MainForm : Form
     private readonly ToolStripMenuItem _btnProjects;
     private readonly ToolStripMenuItem _btnOverview;
     private readonly ToolStripMenuItem _btnRelocate;
+    private readonly ToolStripMenuItem _btnDemo;
     private readonly ToolStripMenuItem _btnPurge;
     private readonly ToolStripMenuItem _btnAppProxy;
     private readonly ToolStripMenuItem _btnTerminal;
@@ -494,9 +498,16 @@ sealed class MainForm : Form
             ToolTipText = Loc.T("menu.purge.tip"),
         };
         _btnPurge.Click += (_, _) => DoPurge();
+        _btnDemo = new ToolStripMenuItem(Loc.T("menu.demo"))
+        {
+            ToolTipText = Loc.T("menu.demo.tip"),
+            // Pointless inside the demo itself, and it would spawn a third window.
+            Visible = !DemoMode.IsActive,
+        };
+        _btnDemo.Click += (_, _) => DemoMode.Launch();
         _btnTools.DropDownItems.AddRange([
             _btnProjects, _btnOverview, new ToolStripSeparator(),
-            _btnRelocate, _btnPurge, _btnAppProxy, _btnTerminal, _btnTheme, _btnLang,
+            _btnRelocate, _btnPurge, _btnAppProxy, _btnTerminal, _btnDemo, _btnTheme, _btnLang,
         ]);
         _search = new ToolStripTextBox("search")
         {
@@ -1674,6 +1685,8 @@ sealed class MainForm : Form
         _btnOverview.ToolTipText = Loc.T("toolbar.overview.tip");
         _btnRelocate.Text = Loc.T("menu.relocate");
         _btnRelocate.ToolTipText = Loc.T("menu.relocate.tip");
+        _btnDemo.Text = Loc.T("menu.demo");
+        _btnDemo.ToolTipText = Loc.T("menu.demo.tip");
         _btnPurge.Text = Loc.T("menu.purge");
         _btnPurge.ToolTipText = Loc.T("menu.purge.tip");
         _btnAppProxy.Text = Loc.T("menu.appProxy");
@@ -4906,12 +4919,17 @@ sealed class MainForm : Form
         catch (Exception ex)
         {
             Cursor = Cursors.Default;
-            MessageBox.Show(
+            // Yes/No rather than OK: on a machine without Claude Code this is the
+            // first button most people press, and a dead end here reads as a
+            // broken app rather than a missing prerequisite.
+            var answer = MessageBox.Show(
                 this,
-                Loc.T("add.failed", ex.Message + Loc.T("add.failed.hint")),
+                Loc.T("add.failed", ex.Message + Loc.T("add.failed.hint")
+                    + (DemoMode.IsActive ? "" : Loc.T("add.failed.demoPrompt"))),
                 Loc.T("toolbar.add"),
-                MessageBoxButtons.OK,
+                DemoMode.IsActive ? MessageBoxButtons.OK : MessageBoxButtons.YesNo,
                 MessageBoxIcon.Information);
+            if (answer == DialogResult.Yes) DemoMode.Launch();
         }
         finally
         {
