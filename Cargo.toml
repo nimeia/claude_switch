@@ -10,7 +10,7 @@ members = [
 # gui-mac / gui-win are non-Cargo projects (see docs/design-claude-switch.md §3.1).
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/nimeia/claude_switch"
