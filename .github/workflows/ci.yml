@@ -76,8 +76,8 @@ jobs:
         run: |
           $files = Get-ChildItem dist -File
           $files | Format-Table Name, Length
-          if ($files.Count -ne 1 -or $files[0].Name -ne 'ClaudeSwitch.exe') {
-            throw "expected exactly ClaudeSwitch.exe in dist, got: $($files.Name -join ', ')"
+          if ($files.Count -ne 1 -or $files[0].Name -ne 'CCAccountSwitcher.exe') {
+            throw "expected exactly CCAccountSwitcher.exe in dist, got: $($files.Name -join ', ')"
           }
 
       - name: Smoke-run published exe
@@ -88,7 +88,7 @@ jobs:
           CLAUDE_SWITCH_PROBE_SETTLE_MS: "800"
         run: |
           $fixture = Join-Path $env:RUNNER_TEMP 'fixture-home'
-          $p = Start-Process -FilePath dist/ClaudeSwitch.exe `
+          $p = Start-Process -FilePath dist/CCAccountSwitcher.exe `
                  -ArgumentList '--skip-onboarding', '--fixture', $fixture `
                  -PassThru
           if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'exe did not exit within 120s' }
@@ -112,7 +112,7 @@ jobs:
           Expand-Archive (Get-ChildItem artifacts/*.zip)[0].FullName -DestinationPath $out
           Get-ChildItem $out | Format-Table Name, Length
           $fixture = Join-Path $env:RUNNER_TEMP 'fixture-zip'
-          $p = Start-Process -FilePath (Join-Path $out 'ClaudeSwitch.exe') `
+          $p = Start-Process -FilePath (Join-Path $out 'CCAccountSwitcher.exe') `
                  -ArgumentList '--skip-onboarding', '--fixture', $fixture `
                  -WorkingDirectory $out -PassThru
           if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'extracted exe did not exit' }
@@ -123,7 +123,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ClaudeSwitch-win-x64
+          name: CCAccountSwitcher-win-x64
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14

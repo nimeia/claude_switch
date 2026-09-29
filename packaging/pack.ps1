@@ -5,8 +5,8 @@
 .DESCRIPTION
     Produces both shapes users ask for, from one build:
 
-      ClaudeSwitch-<ver>-win-x64.exe   the bare executable
-      ClaudeSwitch-<ver>-win-x64.zip   the same exe plus the notes and licence
+      CCAccountSwitcher-<ver>-win-x64.exe   the bare executable
+      CCAccountSwitcher-<ver>-win-x64.zip   the same exe plus the notes and licence
       SHA256SUMS.txt                   checksums for both
 
     The zip is not about dependencies — the exe already has none. It exists
@@ -17,7 +17,7 @@
     Run after: dotnet publish -p:PublishSingleFileBundle=true -o <PublishDir>
 
 .PARAMETER PublishDir
-    Directory holding the freshly published ClaudeSwitch.exe.
+    Directory holding the freshly published CCAccountSwitcher.exe.
 
 .PARAMETER OutDir
     Where to write the release artifacts.
@@ -33,16 +33,16 @@ Set-StrictMode -Version Latest
 
 $repo = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content (Join-Path $repo 'VERSION') -Raw).Trim()
-$stem = "ClaudeSwitch-$version-win-x64"
+$stem = "CCAccountSwitcher-$version-win-x64"
 
-$exe = Join-Path $PublishDir 'ClaudeSwitch.exe'
+$exe = Join-Path $PublishDir 'CCAccountSwitcher.exe'
 if (-not (Test-Path $exe)) {
     throw "no published exe at $exe — run dotnet publish -p:PublishSingleFileBundle=true first"
 }
 
 # A publish directory with anything else in it means the bundle did not absorb
 # a dependency, and the zip would ship a file the bare .exe download lacks.
-$stray = Get-ChildItem $PublishDir -File | Where-Object Name -ne 'ClaudeSwitch.exe'
+$stray = Get-ChildItem $PublishDir -File | Where-Object Name -ne 'CCAccountSwitcher.exe'
 if ($stray) {
     throw "publish dir has unbundled files: $($stray.Name -join ', ')"
 }
@@ -51,7 +51,7 @@ Remove-Item $OutDir -Recurse -Force -ErrorAction SilentlyContinue
 $staging = Join-Path $OutDir '_staging'
 New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
-Copy-Item $exe (Join-Path $staging 'ClaudeSwitch.exe')
+Copy-Item $exe (Join-Path $staging 'CCAccountSwitcher.exe')
 Copy-Item (Join-Path $repo 'LICENSE') (Join-Path $staging 'LICENSE.txt')
 # Notepad on older Windows guesses the encoding wrong without a BOM, and this
 # file is mostly Chinese — a mojibake quick-start is worse than none.

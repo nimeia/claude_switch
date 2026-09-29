@@ -188,7 +188,7 @@ CLAUDE_CONFIG_DIR 已设置 → <该目录>/.claude.json → oauthAccount.emailA
 实测（Windows 11，release 构建）：**751 KB**；连进程创建在内单次约 **28ms**（PowerShell 管道计时，
 含 spawn 开销，二进制自身远低于此）。链接器把 core 里用不到的 HTTP/TLS 栈都丢掉了，所以体积没有被 `ureq` 拖大。
 
-为什么不是 `ClaudeSwitch.exe --statusline`：
+为什么不是 `CCAccountSwitcher.exe --statusline`：
 
 - `Program.Main` 一进来就 `ApplicationConfiguration.Initialize()` 并抢单实例 mutex，状态栏路径必须在这之前整段绕开，是条脆弱的旁路；
 - .NET 单文件 WinExe 每次重绘启动约 100~250ms，比 Rust 二进制慢一个量级；
@@ -205,7 +205,7 @@ CLAUDE_CONFIG_DIR 已设置 → <该目录>/.claude.json → oauthAccount.emailA
 - **杀软**：新落盘的未签名 exe 可能被 Defender 拦。与现有 `claude_switch.dll` 自解压同性质，README 的 SmartScreen 段落一并说明。
 
 （若后续决定不引入第二个二进制，`--statusline` 旁路是可退回的备选：把 §6 的命令换成
-`"<ClaudeSwitch.exe>" --statusline standard`，其余设计不变。）
+`"<CCAccountSwitcher.exe>" --statusline standard`，其余设计不变。）
 
 ## 6. 写入 `~/.claude/settings.json` 的契约
 

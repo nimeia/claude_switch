@@ -1,12 +1,12 @@
 # Website
 
-The product page for Claude Switch: one static `index.html` with its CSS and JS inline, plus screenshots in `assets/img/`. No build step, no dependencies — open `site/index.html` in a browser and it is the site.
+The product page for CC Account Switcher: one static `index.html` with its CSS and JS inline, plus screenshots in `assets/img/`. No build step, no dependencies — open `site/index.html` in a browser and it is the site.
 
 English and 简体中文 both ship in the HTML; the toggle in the header only decides which copy is hidden, so the page reads correctly with JavaScript off (it falls back to English) and every string is translated in one place. Light and dark follow the viewer's system theme until they pick one; the hero screenshot follows the page theme.
 
 ## Screenshots
 
-Every screenshot is the real app, captured by the layout probe against the built-in `--fixture` demo data — never a mockup. To retake them:
+The screenshots come from the real app, captured by the layout probe against the built-in `--fixture` demo data. The three main screenshots were retouched for the new product name; recapture them when fresh demo history is available. To retake them:
 
 ```powershell
 $shots = "$env:TEMP\cs-shots"
@@ -20,7 +20,7 @@ $env:CLAUDE_SWITCH_PROBE_SESSIONS = "1"
 $env:CLAUDE_SWITCH_PROBE_PROJECTS = "1"
 $env:CLAUDE_SWITCH_PROBE_DETAIL = "1"
 dotnet build gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj -c Release
-gui-win/ClaudeSwitch.App/bin/Release/net8.0-windows/ClaudeSwitch.exe --skip-onboarding --fixture "$env:TEMP\cswitch-site-demo"
+gui-win/ClaudeSwitch.App/bin/Release/net8.0-windows10.0.19041.0/CCAccountSwitcher.exe --skip-onboarding --fixture "$env:TEMP\cswitch-site-demo"
 ```
 
 `CLAUDE_SWITCH_PROBE_FLIPTHEME=1` gives the dark set. Two notes learned the hard way:
@@ -30,7 +30,7 @@ gui-win/ClaudeSwitch.App/bin/Release/net8.0-windows/ClaudeSwitch.exe --skip-onbo
 
 The captures carry a black margin where `PrintWindow` overshoots the window; crop it before use (`ImageChops.difference` against black, then `getbbox`).
 
-`assets/img/social-card.png` (1280×640) is the link-preview image twice over: the site's `og:image`, and the repository's **Settings → Social preview** on GitHub. It is composed from `logo.png` and `app-main-light.png`; after retaking those, rebuild it and upload it in both places.
+`assets/img/social-card.png` is the link-preview image twice over: the site's `og:image`, and the repository's **Settings → Social preview** on GitHub. It is composed from `logo.png` and `app-main-light.png`; after retaking those, rebuild it and upload it in both places.
 
 The overview and directory windows are only worth photographing with history behind them. The fixture seeds three short transcripts; for the shots on this page the demo profiles were filled with a couple of months of synthetic sessions first.
 

@@ -1,5 +1,5 @@
 name: Feature request
-description: Something Claude Switch should do, or do differently.
+description: Something CC Account Switcher should do, or do differently.
 labels: [enhancement]
 body:
   - type: textarea

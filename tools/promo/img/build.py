@@ -86,7 +86,7 @@ def meter(used: int) -> list[tuple[str, str]]:
 def sign(im: Image.Image, d: ImageDraw.ImageDraw, colour: str) -> None:
     """Logo and site, bottom right — so a screenshot that travels keeps its source."""
     logo = Image.open(SHOTS / "logo.png").convert("RGBA").resize((34, 34), Image.LANCZOS)
-    text, font = "Claude Switch · nimeia.github.io/claude_switch", sans(18)
+    text, font = "CC Account Switcher · nimeia.github.io/claude_switch", sans(18)
     w = int(round(font.getlength(text)))
     x, y = im.width - 80 - w - 44, im.height - 62
     im.paste(logo, (x, y - 8), logo)

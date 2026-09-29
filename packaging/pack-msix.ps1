@@ -27,7 +27,7 @@
     AppxManifest.xml, and trust that certificate — see docs/msix.md.
 
 .PARAMETER PublishDir
-    Directory holding the published app (ClaudeSwitch.exe and its runtime).
+    Directory holding the published app (CCAccountSwitcher.exe and its runtime).
 
 .PARAMETER OutDir
     Where to write the .msix.
@@ -54,7 +54,7 @@ if ($version -notmatch '^\d+\.\d+\.\d+$') {
 }
 $packageVersion = "$version.0"
 
-$exe = Join-Path $PublishDir 'ClaudeSwitch.exe'
+$exe = Join-Path $PublishDir 'CCAccountSwitcher.exe'
 if (-not (Test-Path $exe)) {
     throw "no published exe at $exe — see the publish command in this script's help"
 }
@@ -132,7 +132,7 @@ $manifest = (Get-Content (Join-Path $PSScriptRoot 'msix\AppxManifest.xml') -Raw)
 [System.IO.File]::WriteAllText(
     (Join-Path $staging 'AppxManifest.xml'), $manifest, [System.Text.UTF8Encoding]::new($false))
 
-$msix = Join-Path $OutDir "ClaudeSwitch-$version-win-x64.msix"
+$msix = Join-Path $OutDir "CCAccountSwitcher-$version-win-x64.msix"
 & $makeappx pack /o /d $staging /p $msix
 if ($LASTEXITCODE -ne 0) { throw "makeappx pack failed with exit code $LASTEXITCODE" }
 

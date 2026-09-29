@@ -40,7 +40,7 @@ env:
 
 jobs:
   windows:
-    name: ClaudeSwitch.exe (win-x64)
+    name: CCAccountSwitcher.exe (win-x64)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -94,8 +94,8 @@ jobs:
         run: |
           $files = Get-ChildItem dist -File
           $files | Format-Table Name, Length
-          if ($files.Count -ne 1 -or $files[0].Name -ne 'ClaudeSwitch.exe') {
-            throw "expected exactly ClaudeSwitch.exe in dist, got: $($files.Name -join ', ')"
+          if ($files.Count -ne 1 -or $files[0].Name -ne 'CCAccountSwitcher.exe') {
+            throw "expected exactly CCAccountSwitcher.exe in dist, got: $($files.Name -join ', ')"
           }
 
       - name: Smoke-run published exe
@@ -106,7 +106,7 @@ jobs:
           CLAUDE_SWITCH_PROBE_SETTLE_MS: "800"
         run: |
           $fixture = Join-Path $env:RUNNER_TEMP 'fixture-home'
-          $p = Start-Process -FilePath dist/ClaudeSwitch.exe `
+          $p = Start-Process -FilePath dist/CCAccountSwitcher.exe `
                  -ArgumentList '--skip-onboarding', '--fixture', $fixture `
                  -PassThru
           if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'exe did not exit within 120s' }
@@ -129,7 +129,7 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP 'unzip'
           Expand-Archive (Get-ChildItem artifacts/*.zip)[0].FullName -DestinationPath $out
           $fixture = Join-Path $env:RUNNER_TEMP 'fixture-zip'
-          $p = Start-Process -FilePath (Join-Path $out 'ClaudeSwitch.exe') `
+          $p = Start-Process -FilePath (Join-Path $out 'CCAccountSwitcher.exe') `
                  -ArgumentList '--skip-onboarding', '--fixture', $fixture `
                  -WorkingDirectory $out -PassThru
           if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'extracted exe did not exit' }
@@ -140,7 +140,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ClaudeSwitch-win-x64
+          name: CCAccountSwitcher-win-x64
           path: artifacts/*
           if-no-files-found: error
           retention-days: 30
@@ -153,8 +153,8 @@ jobs:
           # the ci.yml path; on a tag push it is the tag already checked out.
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
-            artifacts/ClaudeSwitch-*-win-x64.zip
-            artifacts/ClaudeSwitch-*-win-x64.exe
+            artifacts/CCAccountSwitcher-*-win-x64.zip
+            artifacts/CCAccountSwitcher-*-win-x64.exe
             artifacts/SHA256SUMS.txt
           generate_release_notes: true
           body: |
@@ -164,8 +164,8 @@ jobs:
 
             | 下载 | 适合 |
             |---|---|
-            | `ClaudeSwitch-*-win-x64.zip` | **推荐**。解压即用，附使用说明与许可证。浏览器对 zip 的拦截比 exe 少 |
-            | `ClaudeSwitch-*-win-x64.exe` | 只要程序本身 |
+            | `CCAccountSwitcher-*-win-x64.zip` | **推荐**。解压即用，附使用说明与许可证。浏览器对 zip 的拦截比 exe 少 |
+            | `CCAccountSwitcher-*-win-x64.exe` | 只要程序本身 |
 
             无需安装 .NET 或其它依赖，也没有安装程序——放哪都行，删掉就干净。
 
@@ -173,7 +173,7 @@ jobs:
             点「更多信息」→「仍要运行」。介意的话可以先核对校验和：
 
             ```powershell
-            Get-FileHash ClaudeSwitch-*-win-x64.* -Algorithm SHA256
+            Get-FileHash CCAccountSwitcher-*-win-x64.* -Algorithm SHA256
             ```
 
             与 `SHA256SUMS.txt` 比对，或自行从源码构建（见 README）。

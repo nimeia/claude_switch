@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in Claude Switch does not work the way the README or the app says it should.
+description: Something in CC Account Switcher does not work the way the README or the app says it should.
 labels: [bug]
 body:
   - type: markdown
@@ -11,8 +11,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: Claude Switch version
-      description: The number in the file you downloaded, e.g. `ClaudeSwitch-0.3.0-win-x64.zip` → 0.3.0.
+      label: CC Account Switcher version
+      description: The number in the file you downloaded, e.g. `CCAccountSwitcher-0.3.0-win-x64.zip` → 0.3.0.
       placeholder: 0.3.0
     validations:
       required: true

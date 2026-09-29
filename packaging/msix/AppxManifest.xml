@@ -27,7 +27,7 @@
       ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>Claude Switch</DisplayName>
+    <DisplayName>CC Account Switcher</DisplayName>
     <PublisherDisplayName>xiaoqian</PublisherDisplayName>
     <Logo>assets\StoreLogo.png</Logo>
   </Properties>
@@ -50,14 +50,14 @@
   </Resources>
 
   <Applications>
-    <Application Id="ClaudeSwitch" Executable="ClaudeSwitch.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="ClaudeSwitch" Executable="CCAccountSwitcher.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-          DisplayName="Claude Switch"
+          DisplayName="CC Account Switcher"
           Description="Switch between Claude Code accounts. When a rate limit is hit, it switches for you — no restart, and the session in progress keeps going."
           BackgroundColor="transparent"
           Square150x150Logo="assets\Square150x150Logo.png"
           Square44x44Logo="assets\Square44x44Logo.png">
-        <uap:DefaultTile ShortName="Claude Switch" />
+        <uap:DefaultTile ShortName="CC Account Switcher" />
       </uap:VisualElements>
 
       <Extensions>
@@ -68,8 +68,8 @@
              Enabled="false" means the app is not added to startup behind the
              user's back — the checkbox in Automation calls RequestEnableAsync,
              and the user can still veto it in Settings -> Apps -> Startup. -->
-        <uap5:Extension Category="windows.startupTask" Executable="ClaudeSwitch.exe" EntryPoint="Windows.FullTrustApplication">
-          <uap5:StartupTask TaskId="ClaudeSwitchStartup" Enabled="false" DisplayName="Claude Switch" />
+        <uap5:Extension Category="windows.startupTask" Executable="CCAccountSwitcher.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap5:StartupTask TaskId="ClaudeSwitchStartup" Enabled="false" DisplayName="CC Account Switcher" />
         </uap5:Extension>
       </Extensions>
     </Application>

@@ -4,7 +4,7 @@ using ClaudeSwitch.Core;
 namespace ClaudeSwitch.App;
 
 /// <summary>
-/// App-wide proxy for Claude Switch itself and for accounts set to "system".
+/// App-wide proxy for CC Account Switcher itself and for accounts set to "system".
 /// </summary>
 internal sealed class AppProxyDialog : Form
 {

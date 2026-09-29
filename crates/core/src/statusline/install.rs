@@ -52,7 +52,7 @@ const REFRESH_INTERVAL_RANGE: std::ops::RangeInclusive<u32> = 1..=60;
 ///
 /// A fixed path under `backup_root`, not the app's own folder: this program is
 /// portable, and the command line in `settings.json` is absolute. Someone who
-/// moves `ClaudeSwitch.exe` to another drive would otherwise be left with a
+/// moves `CCAccountSwitcher.exe` to another drive would otherwise be left with a
 /// status line pointing at nothing.
 #[must_use]
 pub fn binary_dir(backup_root: &Path) -> PathBuf {

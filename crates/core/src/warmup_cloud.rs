@@ -52,7 +52,7 @@ pub const SYNC_TIMEOUT: Duration = Duration::from_secs(6 * 60);
 
 /// What each routine run says. Kept trivial: any inference opens the window.
 pub const RUN_PROMPT: &str =
-    "Scheduled keep-alive from Claude Switch. Reply with the single word ok. Do not use any tools.";
+    "Scheduled keep-alive from CC Account Switcher. Reply with the single word ok. Do not use any tools.";
 
 /// Host every warmup request goes to; also what proxy rules are matched on.
 pub const API_HOST: &str = "api.anthropic.com";
@@ -184,7 +184,7 @@ pub fn sync_prompt(planned: &[RoutineSpec], run_model: Option<&str>) -> String {
     let desired = serde_json::to_string(planned).unwrap_or_else(|_| "[]".into());
     let run_prompt = serde_json::to_string(RUN_PROMPT).unwrap_or_default();
     format!(
-        "/schedule This request comes from the Claude Switch desktop app and runs unattended. \
+        "/schedule This request comes from the CC Account Switcher desktop app and runs unattended. \
 The user has already confirmed everything below: do not ask questions, do not wait for \
 confirmation, and do not change anything that is not listed. Use only the RemoteTrigger tool.
 

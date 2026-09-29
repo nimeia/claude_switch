@@ -1,10 +1,10 @@
-Claude Switch — 在多个 Claude Code 账号之间切换
+CC Account Switcher — 在多个 Claude Code 账号之间切换
 ================================================
 
 快速开始
 --------
 
-1. 双击 ClaudeSwitch.exe。没有安装步骤，也不需要装 .NET 或其它运行库。
+1. 双击 CCAccountSwitcher.exe。没有安装步骤，也不需要装 .NET 或其它运行库。
 
 2. 首次运行 Windows 会弹出 SmartScreen 警告：
    「Windows 已保护你的电脑」
@@ -24,7 +24,7 @@ Claude Switch — 在多个 Claude Code 账号之间切换
 
 在 PowerShell 里运行：
 
-    Get-FileHash ClaudeSwitch.exe -Algorithm SHA256
+    Get-FileHash CCAccountSwitcher.exe -Algorithm SHA256
 
 把结果与随附的 SHA256SUMS.txt 比对。
 
@@ -54,7 +54,7 @@ Claude Switch — 在多个 Claude Code 账号之间切换
 卸载
 ----
 
-删掉 ClaudeSwitch.exe 即可。程序不写注册表，也不需要管理员权限。
+删掉 CCAccountSwitcher.exe 即可。程序不写注册表，也不需要管理员权限。
 
 如果开启过「开机自启」，先在程序里取消勾选，或手动删除：
     %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\ 下的快捷方式

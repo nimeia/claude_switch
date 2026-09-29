@@ -2,7 +2,7 @@
   <img src="site/assets/img/logo.png" width="72" height="72" alt="">
 </p>
 
-<h1 align="center">Claude Switch</h1>
+<h1 align="center">CC Account Switcher</h1>
 
 <p align="center">
   A Windows tray app for switching between Claude Code accounts.<br>
@@ -24,7 +24,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="site/assets/img/app-main-dark.png">
-  <img alt="The Claude Switch window: account cards with 5-hour and 7-day usage meters, automation settings, and recent conversations." src="site/assets/img/app-main-light.png">
+  <img alt="The CC Account Switcher window: account cards with 5-hour and 7-day usage meters, automation settings, and recent conversations." src="site/assets/img/app-main-light.png">
 </picture>
 
 <p align="center"><sub>Demo data from the app's own <code>--fixture</code> mode.</sub></p>
@@ -35,14 +35,14 @@ Download from [Releases](../../releases). Either option is the same build:
 
 | Download | Best for |
 |---|---|
-| `ClaudeSwitch-<version>-win-x64.zip` | **Recommended.** Unzip and run; includes quick-start notes and license. Browsers warn less on zip than on bare exe |
-| `ClaudeSwitch-<version>-win-x64.exe` | Just the program |
+| `CCAccountSwitcher-<version>-win-x64.zip` | **Recommended.** Unzip and run; includes quick-start notes and license. Browsers warn less on zip than on bare exe |
+| `CCAccountSwitcher-<version>-win-x64.exe` | Just the program |
 
 No .NET install. No Rust install.
 
 **There is no installer** — it is a portable executable: no registry writes, no admin rights, put it anywhere, delete it to uninstall. Launch-at-login is controlled by a checkbox in the app (current-user Startup shortcut; uncheck to remove).
 
-The one exception: the .NET single-file bundle extracts its runtime on first launch to `%TEMP%\.net\ClaudeSwitch\`. That is normal .NET behavior, not an install.
+The one exception: the .NET single-file bundle extracts its runtime on first launch to `%TEMP%\.net\CCAccountSwitcher\`. That is normal .NET behavior, not an install.
 
 **Windows SmartScreen will warn on first run** — this program is not code-signed (a cert costs hundreds of dollars a year; we have not bought one yet). Click **More info** → **Run anyway**.
 
@@ -51,7 +51,7 @@ Files extracted from the zip also carry the Mark of the Web, so **the zip does n
 If you want to double-check the download, Releases include SHA256 checksums:
 
 ```powershell
-Get-FileHash ClaudeSwitch.exe -Algorithm SHA256
+Get-FileHash CCAccountSwitcher.exe -Algorithm SHA256
 ```
 
 Or [build from source](#build-from-source) — the steps are the same ones CI uses.
@@ -101,7 +101,7 @@ Each account gets its own config directory (`<backup root>/sessions/<slot>-<emai
 
 ### Terminal app
 
-**Tools → Terminal…** picks which application opens when this tool starts Claude Code (Open terminal, Resume session, Directories). Supervised runs stay inside Claude Switch.
+**Tools → Terminal…** picks which application opens when this tool starts Claude Code (Open terminal, Resume session, Directories). Supervised runs stay inside CC Account Switcher.
 
 - **Automatic** (default) uses **Windows Terminal** when `wt.exe` is present, otherwise a direct spawn of `claude.exe`
 - **Warp** is listed first among terminals built for coding agents. Env and `claude --resume` are written to a `.cmd` file; Warp only types `cmd.exe /c` that file (its default shell is PowerShell, which cannot parse `"claude.EXE" --resume`)
@@ -181,7 +181,7 @@ Requests honor `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, and on Windows also rea
 | `~/.claude-swap-backup/statusline.json` | What the status line reads (no credentials) |
 | `~/.claude/settings.json` | Claude Code's own file. Only these keys are ever written: `statusLine` (a copy of the file is kept as `settings.json.cswitch-bak`), `cleanupPeriodDays` (history retention), and for the default login's proxy & region `timeZone`, `language` and the proxy / `TZ` / `LANG` entries under `env`. Everything else is kept |
 | `%LOCALAPPDATA%\ClaudeSwitch\ui-prefs.ini` | UI prefs (theme, language, hide email, etc.) |
-| `%TEMP%\.net\ClaudeSwitch\` | Self-extracted single-file runtime |
+| `%TEMP%\.net\CCAccountSwitcher\` | Self-extracted single-file runtime |
 
 Layout is compatible with [claude-swap](https://github.com/realiti4/claude-swap) (Python CLI); both can share the same backup tree. Session profile layout matches its `cswap run` layout; only internal marker filenames differ (`.cswitch-*` vs `.cswap-*`) — both can read the same profiles, each managing its own markers.
 
@@ -212,7 +212,7 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
   -c Release -p:PublishSingleFileBundle=true -o dist
 ```
 
-Output is a single `dist/ClaudeSwitch.exe`. Order matters — the native engine must be built first, or publish fails hard instead of shipping a binary that dies on launch.
+Output is a single `dist/CCAccountSwitcher.exe`. Order matters — the native engine must be built first, or publish fails hard instead of shipping a binary that dies on launch.
 
 To produce the same artifacts as a Release (exe + zip + checksums):
 
@@ -257,7 +257,7 @@ Every push / PR runs a full Windows gate: Rust (fmt / clippy / test) → GUI tes
 
 The product page is separate: [pages](.github/workflows/pages.yml) publishes `site/` to https://nimeia.github.io/claude_switch/ when a push to master changes it. Setup and details are in [site/README.md](site/README.md#publishing).
 
-**A release is a version bump that reached master.** Bump `VERSION` and the matching `Cargo.toml` `[workspace.package].version`, commit, merge. Once the gate passes, CI asks whether that version already has a tag; if it does not, it calls the [release](.github/workflows/release.yml) workflow, which rebuilds, smokes, creates `v<VERSION>` and publishes a GitHub Release with `ClaudeSwitch-<version>-win-x64.zip` / `.exe` / `SHA256SUMS.txt`.
+**A release is a version bump that reached master.** Bump `VERSION` and the matching `Cargo.toml` `[workspace.package].version`, commit, merge. Once the gate passes, CI asks whether that version already has a tag; if it does not, it calls the [release](.github/workflows/release.yml) workflow, which rebuilds, smokes, creates `v<VERSION>` and publishes a GitHub Release with `CCAccountSwitcher-<version>-win-x64.zip` / `.exe` / `SHA256SUMS.txt`.
 
 The gate is **the absence of the tag**, not the diff of the push — a rerun, a squash, a revert or a force push all converge on one release per version, which a diff-based check does not.
 

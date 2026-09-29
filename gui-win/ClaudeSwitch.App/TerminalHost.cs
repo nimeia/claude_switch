@@ -231,7 +231,7 @@ internal static class TerminalHost
         string directory = launch.WorkingDirectory.Replace('\\', '/');
         string command = WarpLaunchCommand(WarpLaunchBatchPath());
         var sb = new StringBuilder();
-        sb.Append("name = ").AppendLine(TomlString("Claude Switch"));
+        sb.Append("name = ").AppendLine(TomlString("CC Account Switcher"));
         sb.Append("title = ").AppendLine(TomlString("Claude Code"));
         sb.AppendLine();
         sb.AppendLine("[[panes]]");

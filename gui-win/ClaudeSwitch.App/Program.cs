@@ -54,7 +54,7 @@ static class Program
             if (warmupOnce) return;
             MessageBox.Show(
                 Loc.T("app.alreadyRunning"),
-                "Claude Switch",
+                "CC Account Switcher",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
             return;
@@ -274,7 +274,7 @@ sealed class MainForm : Form
 
     public MainForm(string? fixtureRoot)
     {
-        Text = "Claude Switch";
+        Text = "CC Account Switcher";
         Icon = AppIcon.Get();
         // List-only chrome; detail opens in a separate window so nothing is covered.
         // Provisional; ApplyWindowMetrics re-sizes for the display once the
@@ -333,7 +333,7 @@ sealed class MainForm : Form
         _root = root;
 
         // ── Row 0: Header — one line. The window's own title bar already says
-        // "Claude Switch", so this band is the app's *state*, not its name: the
+        // "CC Account Switcher", so this band is the app's *state*, not its name: the
         // wordmark shrinks to a label and the account count sits on the same
         // line, leaving the height for the list instead.
         _header = new Panel { Dock = DockStyle.Fill, Padding = new Padding(Theme.Space4, 0, Theme.Space4, 0), Margin = new Padding(0) };
@@ -361,7 +361,7 @@ sealed class MainForm : Form
         };
         _brand = new Label
         {
-            Text = "Claude Switch",
+            Text = "CC Account Switcher",
             Font = Theme.FontHeading,
             AutoSize = true,
             Margin = new Padding(0, 1, 0, 0),
@@ -1182,7 +1182,7 @@ sealed class MainForm : Form
 
         _tray = new NotifyIcon
         {
-            Text = "Claude Switch",
+            Text = "CC Account Switcher",
             Icon = AppIcon.Get(),
             Visible = true,
             ContextMenuStrip = BuildTrayMenu(),

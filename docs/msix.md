@@ -83,7 +83,7 @@ $cert = New-SelfSignedCertificate -Type Custom -Subject $subject `
 
 $signtool = (Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64\signtool.exe' |
     Sort-Object FullName -Descending)[0].FullName
-& $signtool sign /fd SHA256 /sha1 $cert.Thumbprint artifacts-msix\ClaudeSwitch-*.msix
+& $signtool sign /fd SHA256 /sha1 $cert.Thumbprint artifacts-msix\CCAccountSwitcher-*.msix
 ```
 
 Then export the certificate and import it into

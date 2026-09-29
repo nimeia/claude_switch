@@ -12,17 +12,17 @@
     <ApplicationIcon>app.ico</ApplicationIcon>
     <StartupObject>ClaudeSwitch.App.Program</StartupObject>
     <RootNamespace>ClaudeSwitch.App</RootNamespace>
-    <AssemblyName>ClaudeSwitch</AssemblyName>
+    <AssemblyName>CCAccountSwitcher</AssemblyName>
     <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\..\VERSION').Trim())</Version>
 
     <!-- Shown in Explorer's Properties and in the SmartScreen prompt. Blank
          fields there are one of the things that make an unsigned download look
          untrustworthy, so they are filled deliberately. -->
-    <Product>Claude Switch</Product>
-    <AssemblyTitle>Claude Switch</AssemblyTitle>
+    <Product>CC Account Switcher</Product>
+    <AssemblyTitle>CC Account Switcher</AssemblyTitle>
     <Description>Switch between Claude Code accounts; auto-switch when a rate limit is reached.</Description>
-    <Company>claude-switch contributors</Company>
-    <Copyright>Copyright (c) 2026 claude-switch contributors — MIT</Copyright>
+    <Company>CC Account Switcher contributors</Company>
+    <Copyright>Copyright (c) 2026 CC Account Switcher contributors — MIT</Copyright>
     <!-- Explorer shows InformationalVersion; the default appends the commit hash,
          which turns "0.1.0" into "0.1.0+10f5fcc…" in the Properties dialog. -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>

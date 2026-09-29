@@ -4,18 +4,18 @@ using System.Globalization;
 namespace ClaudeSwitch.App;
 
 /// <summary>
-/// Daily Windows scheduled task that starts Claude Switch headless at the
+/// Daily Windows scheduled task that starts CC Account Switcher headless at the
 /// base warmup anchor so a closed GUI still opens the 5h windows.
 /// </summary>
 /// <remarks>
 /// Uses <c>schtasks</c> under the current user (no elevation). The task runs
-/// <c>ClaudeSwitch.exe --warmup-once</c>, which refreshes usage and fires the
+/// <c>CCAccountSwitcher.exe --warmup-once</c>, which refreshes usage and fires the
 /// guardian once, then exits. If the GUI is already open the second instance
 /// exits silently — the live poll loop covers that case.
 /// </remarks>
 internal static class WarmupTaskHelper
 {
-    public const string TaskName = "ClaudeSwitch-Warmup";
+    public const string TaskName = "CCAccountSwitcher-Warmup";
 
     /// <summary>Whether a daily task with our name is registered.</summary>
     public static bool IsEnabled()
@@ -47,7 +47,7 @@ internal static class WarmupTaskHelper
     /// </summary>
     /// <remarks>
     /// Disable path is the only cleanup: there is no settings.json / registry
-    /// mirror. <c>schtasks /Delete /TN ClaudeSwitch-Warmup /F</c> is the whole
+    /// mirror. <c>schtasks /Delete /TN CCAccountSwitcher-Warmup /F</c> is the whole
     /// teardown. Missing task is success (idempotent).
     /// </remarks>
     public static void SetEnabled(bool enabled, int hour, int minute)

@@ -25,7 +25,7 @@ internal static class StartupHelper
 
     public static string ExePath =>
         Environment.ProcessPath
-        ?? Path.Combine(AppContext.BaseDirectory, "ClaudeSwitch.exe");
+        ?? Path.Combine(AppContext.BaseDirectory, "CCAccountSwitcher.exe");
 
     /// <summary>True when running from an MSIX package.</summary>
     public static bool IsPackaged { get; } = HasPackageIdentity();

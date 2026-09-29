@@ -29,12 +29,12 @@ use claude_switch_core::statusline::{self, Frame, Live, Preset, State};
 const MAX_STDIN: u64 = 1 << 20;
 
 const HELP: &str = "\
-cs-statusline — the Claude Switch status line for Claude Code
+cs-statusline — the CC Account Switcher status line for Claude Code
 
 USAGE:
     cs-statusline [--preset lean|standard|full] [--no-color] [--width <cols>]
 
-Claude Code runs this itself; it is configured from the Claude Switch app
+Claude Code runs this itself; it is configured from the CC Account Switcher app
 (Automation → status line), which writes the command into ~/.claude/settings.json.
 The payload arrives on stdin as JSON.
 

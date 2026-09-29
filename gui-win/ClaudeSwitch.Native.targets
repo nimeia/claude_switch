@@ -78,7 +78,7 @@
       <_ClaudeSwitchNativeSource Condition="'$(_ClaudeSwitchCargoTargetDir)' == ''">Cargo not available; repository target folder</_ClaudeSwitchNativeSource>
     </PropertyGroup>
 
-    <Message Importance="high" Text="Claude Switch engine: $(ClaudeSwitchNativeDll) ($(_ClaudeSwitchNativeSource))" />
-    <Message Importance="high" Text="Claude Switch status line: $(ClaudeSwitchStatuslineExe)" />
+    <Message Importance="high" Text="CC Account Switcher engine: $(ClaudeSwitchNativeDll) ($(_ClaudeSwitchNativeSource))" />
+    <Message Importance="high" Text="CC Account Switcher status line: $(ClaudeSwitchStatuslineExe)" />
   </Target>
 </Project>

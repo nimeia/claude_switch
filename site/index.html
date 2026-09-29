@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <!-- data-zh holds the Chinese text for /zh/. tools/site/build.py swaps it in
      when it writes that page, and drops the attribute from both. -->
-<title data-zh="Claude Switch — Claude Code 多账号自动切换工具（Windows）">Claude Switch — auto-switch Claude Code accounts on Windows</title>
+<title data-zh="CC Account Switcher — Claude Code 多账号自动切换工具（Windows）">CC Account Switcher — auto-switch Claude Code accounts on Windows</title>
 <meta name="description" content="Free, open-source Windows tray app that switches Claude Code accounts when the 5-hour or weekly limit hits — no restart, and the session in progress keeps going. Auto-switch, per-account terminals, proxy &amp; region, usage stats." data-zh="免费开源的 Windows 托盘工具：Claude Code 撞到 5 小时或每周额度上限时，自动切换到余量最多的账号，不用重启，正在进行的会话继续往下写。支持按账号开终端、代理与地区、用量统计和终端状态栏。">
 <meta name="google-site-verification" content="tfiIYpuTug0UZL-6wdlAL10J9dsgmkGquDyvHpP3r9I">
 <!-- Absolute URLs: link previews and search engines cannot resolve relative
@@ -15,22 +15,22 @@
 <link rel="alternate" hreflang="zh-Hans" href="https://nimeia.github.io/claude_switch/zh/">
 <link rel="alternate" hreflang="x-default" href="https://nimeia.github.io/claude_switch/">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="Claude Switch">
+<meta property="og:site_name" content="CC Account Switcher">
 <meta property="og:locale" content="en_US">
 <meta property="og:locale:alternate" content="zh_CN">
 <meta property="og:url" content="https://nimeia.github.io/claude_switch/">
-<meta property="og:title" content="Claude Switch — hit the limit, keep writing" data-zh="Claude Switch — 额度撞墙，继续写">
+<meta property="og:title" content="CC Account Switcher — hit the limit, keep writing" data-zh="CC Account Switcher — 额度撞墙，继续写">
 <meta property="og:description" content="A Windows tray app that switches Claude Code accounts when a rate limit hits — no restart, and the session in progress keeps going." data-zh="Windows 托盘工具：Claude Code 撞到额度上限时自动切换账号，不用重启，正在进行的会话继续往下写。">
 <meta property="og:image" content="https://nimeia.github.io/claude_switch/assets/img/social-card.png">
-<meta property="og:image:width" content="1280">
-<meta property="og:image:height" content="640">
-<meta property="og:image:alt" content="Claude Switch — Hit the limit. Keep writing. A Windows tray app that switches Claude Code accounts when a rate limit hits.">
+<meta property="og:image:width" content="1774">
+<meta property="og:image:height" content="887">
+<meta property="og:image:alt" content="CC Account Switcher — Hit the limit. Keep writing. A Windows tray app that switches Claude Code accounts when a rate limit hits.">
 <meta name="twitter:card" content="summary_large_image">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
-  "name": "Claude Switch",
+  "name": "CC Account Switcher",
   "description": "Windows tray app that switches Claude Code accounts when a rate limit hits — no restart, and the session in progress keeps going.",
   "url": "https://nimeia.github.io/claude_switch/",
   "downloadUrl": "https://github.com/nimeia/claude_switch/releases/latest",
@@ -51,7 +51,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;1,6..72,300&display=swap">
 <style>
 /* ─────────────────────────────────────────────────────────────
-   Claude Switch — site tokens
+   CC Account Switcher — site tokens
    ivory ground / clay accent; the product's green, amber and red
    stay semantic: they only ever describe a quota.
    ───────────────────────────────────────────────────────────── */
@@ -380,7 +380,7 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
 
 <header class="topbar">
   <div class="wrap">
-    <a class="brand" href="#top"><img src="assets/img/logo.png" alt=""> Claude Switch</a>
+    <a class="brand" href="#top"><img src="assets/img/logo.png" alt=""> CC Account Switcher</a>
     <nav class="navlinks">
       <a href="#switch" data-l="en">The switch</a><a href="#switch" data-l="zh">切换</a>
       <a href="#sessions" data-l="en">Parallel sessions</a><a href="#sessions" data-l="zh">并行会话</a>
@@ -407,8 +407,8 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
         <h1 data-l="en">Hit the limit.<br>Keep <em>writing</em>.</h1>
         <h1 data-l="zh">额度撞墙，<br><em>继续写</em>。</h1>
 
-        <p class="lede" data-l="en">Claude Switch watches the 5-hour and 7-day window on every account you own. When one runs dry it hands the work to the account with the most left — while Claude Code is still running, in the session you are in.</p>
-        <p class="lede" data-l="zh">Claude Switch 盯着你每个账号的 5 小时与 7 天窗口。一旦某个账号见底，它把活儿交给余量最多的那个——Claude Code 不用重启，正在进行的会话继续往下写。</p>
+        <p class="lede" data-l="en">CC Account Switcher watches the 5-hour and 7-day window on every account you own. When one runs dry it hands the work to the account with the most left — while Claude Code is still running, in the session you are in.</p>
+        <p class="lede" data-l="zh">CC Account Switcher 盯着你每个账号的 5 小时与 7 天窗口。一旦某个账号见底，它把活儿交给余量最多的那个——Claude Code 不用重启，正在进行的会话继续往下写。</p>
 
         <div class="cta-row">
           <a class="btn btn-primary" href="https://github.com/nimeia/claude_switch/releases" target="_blank" rel="noopener">
@@ -423,7 +423,7 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
       </div>
 
       <div class="plate">
-        <img class="shot only-light" src="assets/img/app-main-light.png" alt="The Claude Switch window: seven accounts, each with a 5-hour and 7-day meter, the automation panel above them and recent conversations below." width="1800" height="1389" loading="eager">
+        <img class="shot only-light" src="assets/img/app-main-light.png" alt="The CC Account Switcher window: seven accounts, each with a 5-hour and 7-day meter, the automation panel above them and recent conversations below." width="1800" height="1389" loading="eager">
         <img class="shot only-dark" src="assets/img/app-main-dark.png" alt="The same window in dark mode." width="1800" height="1189" loading="eager">
       </div>
     </div>
@@ -437,8 +437,8 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
         <p class="eyebrow" data-l="zh">切换这件事</p>
         <h2 data-l="en">A switch that lands on the session you are already in</h2>
         <h2 data-l="zh">切换落在你正在用的那个会话上</h2>
-        <p class="lede" data-l="en">On Windows, Claude Code's credentials are files. Claude Switch takes its three locks, writes the new credentials and the matching <code>.claude.json</code>, and releases them. Your next message goes out on the new account.</p>
-        <p class="lede" data-l="zh">在 Windows 上，Claude Code 的凭据就是文件。Claude Switch 拿到三把锁，写入新的凭据和对应的 <code>.claude.json</code>，然后释放。你发出的下一条消息就走新账号了。</p>
+        <p class="lede" data-l="en">On Windows, Claude Code's credentials are files. CC Account Switcher takes its three locks, writes the new credentials and the matching <code>.claude.json</code>, and releases them. Your next message goes out on the new account.</p>
+        <p class="lede" data-l="zh">在 Windows 上，Claude Code 的凭据就是文件。CC Account Switcher 拿到三把锁，写入新的凭据和对应的 <code>.claude.json</code>，然后释放。你发出的下一条消息就走新账号了。</p>
       </div>
 
       <div class="compare">
@@ -459,8 +459,8 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
           </ol>
         </div>
         <div class="pane after">
-          <h3 data-l="en">With Claude Switch</h3>
-          <h3 data-l="zh">有 Claude Switch</h3>
+          <h3 data-l="en">With CC Account Switcher</h3>
+          <h3 data-l="zh">有 CC Account Switcher</h3>
           <ol class="steps" data-l="en">
             <li><span class="n">01</span><span>Usage crosses the threshold you set.</span></li>
             <li><span class="n">02</span><span>It picks the healthiest account that can actually work.</span></li>
@@ -710,8 +710,8 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
 5h resets 14:30 · 7d resets Fri 09:00 · spare <span class="c">#3 ops</span> <span class="g">8%</span> · auto 90% · $1.24 42m</pre>
           </div>
         </div>
-        <p class="band-note" data-l="en">Model, thinking effort, context and cost come from Claude Code's own payload; the account, the windows and the spare come from Claude Switch. <a href="https://github.com/nimeia/claude_switch/blob/master/docs/statusline.md" target="_blank" rel="noopener">Data sources →</a></p>
-        <p class="band-note" data-l="zh">模型、思考强度、上下文和花费来自 Claude Code 自己的数据；账号、窗口和备用账号来自 Claude Switch。<a href="https://github.com/nimeia/claude_switch/blob/master/docs/statusline.md" target="_blank" rel="noopener">数据来源 →</a></p>
+        <p class="band-note" data-l="en">Model, thinking effort, context and cost come from Claude Code's own payload; the account, the windows and the spare come from CC Account Switcher. <a href="https://github.com/nimeia/claude_switch/blob/master/docs/statusline.md" target="_blank" rel="noopener">Data sources →</a></p>
+        <p class="band-note" data-l="zh">模型、思考强度、上下文和花费来自 Claude Code 自己的数据；账号、窗口和备用账号来自 CC Account Switcher。<a href="https://github.com/nimeia/claude_switch/blob/master/docs/statusline.md" target="_blank" rel="noopener">数据来源 →</a></p>
       </div>
       <ul class="claims band-claims">
         <li data-l="en"><span><strong>No Node, no runtime.</strong> A ~750 KB native binary that reads three local files and exits. No network, no <code>git</code> subprocess.</span></li>
@@ -825,7 +825,7 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
         <div class="dl primary">
           <span class="tag" data-l="en">Recommended</span>
           <span class="tag" data-l="zh">推荐</span>
-          <span class="file" data-release-file="zip">ClaudeSwitch-0.3.0-win-x64.zip</span>
+          <span class="file" data-release-file="zip">CCAccountSwitcher-0.4.2-win-x64.zip</span>
           <span class="why" data-l="en">Unzip and run. Includes quick-start notes and the licence, and browsers warn less on a zip than on a bare exe.</span>
           <span class="why" data-l="zh">解压即用。里面带快速上手说明和许可证；浏览器对 zip 的警告也比对裸 exe 少。</span>
           <a class="btn btn-primary" href="https://github.com/nimeia/claude_switch/releases" target="_blank" rel="noopener" style="align-self:flex-start">
@@ -833,7 +833,7 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
           </a>
         </div>
         <div class="dl">
-          <span class="file" data-release-file="exe">ClaudeSwitch-0.3.0-win-x64.exe</span>
+          <span class="file" data-release-file="exe">CCAccountSwitcher-0.4.2-win-x64.exe</span>
           <span class="why" data-l="en">Just the program. Same build as the zip — one file, ~70 MB, self-contained.</span>
           <span class="why" data-l="zh">只有程序本体。和 zip 里是同一个构建——单文件，约 70 MB，自带运行时。</span>
           <a class="btn btn-ghost" href="https://github.com/nimeia/claude_switch/releases" target="_blank" rel="noopener" style="align-self:flex-start">
@@ -845,11 +845,11 @@ footer .wrap{display:flex;flex-direction:column;gap:14px}
       <div class="notes">
         <p data-l="en"><b>Windows SmartScreen will warn on first run.</b> This program is not code-signed — a certificate costs hundreds of dollars a year and has not been bought. Click <b>More info</b> → <b>Run anyway</b>. Files extracted from the zip carry the Mark of the Web too, so the zip does not skip that prompt.</p>
         <p data-l="zh"><b>首次运行时 Windows SmartScreen 会拦一下。</b>程序没有做代码签名——证书一年要几百美元，暂时没买。点<b>「更多信息」→「仍要运行」</b>。从 zip 解压出来的文件同样带 Mark of the Web，所以 zip 也绕不开这个提示。</p>
-        <p data-l="en"><b>One exception to "no install":</b> the .NET single-file bundle unpacks its runtime to <code>%TEMP%\.net\ClaudeSwitch\</code> on first launch. That is normal .NET behaviour, not an installation.</p>
-        <p data-l="zh"><b>「不安装」的唯一例外：</b>.NET 单文件包会在首次启动时把运行时解压到 <code>%TEMP%\.net\ClaudeSwitch\</code>。这是 .NET 的正常行为，不是安装。</p>
+        <p data-l="en"><b>One exception to "no install":</b> the .NET single-file bundle unpacks its runtime to <code>%TEMP%\.net\CCAccountSwitcher\</code> on first launch. That is normal .NET behaviour, not an installation.</p>
+        <p data-l="zh"><b>「不安装」的唯一例外：</b>.NET 单文件包会在首次启动时把运行时解压到 <code>%TEMP%\.net\CCAccountSwitcher\</code>。这是 .NET 的正常行为，不是安装。</p>
         <p data-l="en">Releases ship SHA256 checksums, so you can check what you downloaded:</p>
         <p data-l="zh">Release 里附了 SHA256 校验值，可以核对下载到的文件：</p>
-        <pre class="code">Get-FileHash ClaudeSwitch.exe -Algorithm SHA256</pre>
+        <pre class="code">Get-FileHash CCAccountSwitcher.exe -Algorithm SHA256</pre>
         <p data-l="en">Or build it yourself — these are the same steps CI runs. The native engine has to be built first, or the publish fails hard instead of shipping a binary that dies on launch.</p>
         <p data-l="zh">或者自己从源码构建——CI 跑的就是这几步。必须先构建原生引擎，否则发布会直接失败，而不是产出一个一启动就死的程序。</p>
         <pre class="code"><span class="cm"># Rust 1.80+ and the .NET 8 SDK</span>
@@ -1024,8 +1024,8 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
       <a href="https://github.com/realiti4/claude-swap" target="_blank" rel="noopener">claude-swap</a>
       <a href="https://nimeia.github.io/claude_switch/privacy.html"><span data-l="en">Privacy</span><span data-l="zh">隐私政策</span></a>
     </div>
-    <p data-l="en">Claude Switch is free software under the MIT licence. Screenshots on this page come from the app's built-in demo data.</p>
-    <p data-l="zh">Claude Switch 是 MIT 许可下的自由软件。本页截图均来自应用内置的演示数据。</p>
+    <p data-l="en">CC Account Switcher is free software under the MIT licence. Screenshots on this page come from the app's built-in demo data.</p>
+    <p data-l="zh">CC Account Switcher 是 MIT 许可下的自由软件。本页截图均来自应用内置的演示数据。</p>
     <p class="disclaimer" data-l="en">An independent, community-built tool. Not affiliated with, sponsored by, or endorsed by Anthropic. “Claude” and “Claude Code” are Anthropic's trademarks, used here only to say what this tool works with.</p>
     <p class="disclaimer" data-l="zh">这是一个独立的社区工具，与 Anthropic 无任何隶属、赞助或背书关系。“Claude”“Claude Code” 是 Anthropic 的商标，此处仅用于说明本工具的适用对象。</p>
   </div>
@@ -1109,7 +1109,7 @@ dotnet publish gui-win/ClaudeSwitch.App/ClaudeSwitch.App.csproj \
         if (!rel || !/^v\d/.test(rel.tag_name || '')) return;
         each('[data-release="version"]', function (el) { el.textContent = rel.tag_name; });
         (rel.assets || []).forEach(function (a) {
-          var m = /^ClaudeSwitch-.+-win-x64\.(zip|exe)$/.exec(a.name || '');
+          var m = /^CCAccountSwitcher-.+-win-x64\.(zip|exe)$/.exec(a.name || '');
           if (!m) return;
           each('[data-release-file="' + m[1] + '"]', function (el) { el.textContent = a.name; });
         });
