@@ -198,9 +198,21 @@ Layout is compatible with [claude-swap](https://github.com/realiti4/claude-swap)
 
 ### Uninstall Claude Code
 
-**Tools → Remove Claude Code…** deletes the Claude Code program and the files it wrote while running (`~/.claude`, `~/.claude.json`, the native installer under `~/.local`, `claude-cli-nodejs` cache, and so on). It is not the same as deleting one managed account.
+**Tools → Remove Claude Code…** deletes the Claude Code program and its runtime files, including old `claude.exe.old.<timestamp>.<pid>` binaries, `~/.cache/claude` installer staging files, configuration and session data, browser native-host files, and the current user's Claude CLI protocol / browser native-host registry entries. It also finds Claude temporary files under the current temp paths and the same Windows user profile on other fixed drives. Residuals can be removed even when the main program is already gone.
 
-Imported accounts are a separate choice: keep `~/.claude-swap-backup` so a later reinstall can switch back into those logins, or delete that tree too. The Claude desktop app, this program, and committed `CLAUDE.md` files in your repos are left alone unless you tick the matching optional boxes.
+The dialog scans in the background and previews every selected path and its total size. Changing options updates the preview immediately. Use **Scan again** after closing an app or changing files; the selected files and running apps are checked again before removal. Optional groups control:
+
+- **IDE extensions and caches** (selected by default): Claude extensions, cached VSIX packages, agent SDK caches and Claude records in shared extension indexes. Other extensions and index entries remain.
+- **Desktop data**: choose nested Claude Code data, or all Claude desktop data, including settings, cookies, login state, caches and logs. These options do not uninstall the desktop app itself.
+- **Browser extension data**: Claude's local extension files and extension-specific storage in Chrome, Edge and Brave profiles. Other extensions, cookies and browser preferences remain. Browser sync can restore the extension; remove it in the browser's extension manager as well when using sync.
+- **Third-party data**: Claude shells, Yunyi's Claude backups, Kimi Claude launchers and Claude-specific status caches.
+- **Project-local files**, **managed settings**, and **imported accounts** retain their separate choices.
+
+Close the affected editors or browsers before cleaning their data. Desktop data cleanup also requires Claude to be closed. Locked files and access failures are reported individually.
+
+If a selected system folder under `ProgramData` needs administrator permission, the dialog offers to retry those failed items through a Windows UAC prompt. This helper only handles the selected Claude system folders. Cancelling leaves those items in place and keeps completed cleanup.
+
+Imported accounts stay in `~/.claude-swap-backup` by default, including any remaining `statusline.json`; select deletion to remove that backup tree too. CC Account Switcher's installation and application data, other tools' Anthropic dependencies, and committed `CLAUDE.md` files are preserved. WSL distributions are outside this Windows cleanup.
 
 ## Build from source
 

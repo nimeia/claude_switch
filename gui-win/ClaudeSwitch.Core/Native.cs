@@ -7,7 +7,7 @@ namespace ClaudeSwitch.Core;
 /// <summary>P/Invoke + JSON-over-the-wire client for claude_switch.dll.</summary>
 public sealed class Engine : IDisposable
 {
-    private IntPtr _handle;
+    private readonly EngineHandle _handle;
     private bool _disposed;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -18,11 +18,12 @@ public sealed class Engine : IDisposable
     public Engine(string? isolatedRoot = null)
     {
         int err = 0;
-        _handle = isolatedRoot is null
+        var handle = isolatedRoot is null
             ? Native.cs_engine_create(null, ref err)
             : Native.cs_engine_create(isolatedRoot, ref err);
-        if (_handle == IntPtr.Zero)
+        if (handle == IntPtr.Zero)
             throw new InvalidOperationException($"cs_engine_create failed: {err} ({Native.ErrorName(err)})");
+        _handle = new EngineHandle(handle);
     }
 
     public JsonNode Call(string method, object? paramsObj = null)
@@ -31,6 +32,19 @@ public sealed class Engine : IDisposable
         var paramsJson = paramsObj is null ? "{}" : JsonSerializer.Serialize(paramsObj);
         IntPtr outPtr = IntPtr.Zero;
         int rc = Native.cs_engine_call(_handle, method, paramsJson, ref outPtr);
+        return ReadResult(rc, outPtr);
+    }
+
+    /// <summary>Stateless helper: fixed ProgramData targets, no user account store.</summary>
+    public static JsonNode PurgeMachine(IReadOnlyList<string> targets)
+    {
+        IntPtr outPtr = IntPtr.Zero;
+        int rc = Native.cs_purge_machine_apply(JsonSerializer.Serialize(targets), ref outPtr);
+        return ReadResult(rc, outPtr);
+    }
+
+    private static JsonNode ReadResult(int rc, IntPtr outPtr)
+    {
         string json = outPtr == IntPtr.Zero ? "{}" : Marshal.PtrToStringUTF8(outPtr) ?? "{}";
         if (outPtr != IntPtr.Zero)
             Native.cs_string_free(outPtr);
@@ -47,12 +61,20 @@ public sealed class Engine : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        if (_handle != IntPtr.Zero)
-        {
-            Native.cs_engine_free(_handle);
-            _handle = IntPtr.Zero;
-        }
+        _handle.Dispose();
         GC.SuppressFinalize(this);
+    }
+}
+
+/// <summary>Keep the engine alive until an in-flight P/Invoke has returned.</summary>
+internal sealed class EngineHandle : SafeHandle
+{
+    public EngineHandle(IntPtr value) : base(IntPtr.Zero, ownsHandle: true) => SetHandle(value);
+    public override bool IsInvalid => handle == IntPtr.Zero;
+    protected override bool ReleaseHandle()
+    {
+        Native.cs_engine_free(handle);
+        return true;
     }
 }
 
@@ -83,9 +105,14 @@ internal static class Native
 
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
     public static extern int cs_engine_call(
-        IntPtr eng,
+        EngineHandle eng,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string methodUtf8,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string paramsJsonUtf8,
+        ref IntPtr outJsonUtf8);
+
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int cs_purge_machine_apply(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string targetsJsonUtf8,
         ref IntPtr outJsonUtf8);
 
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]

@@ -63,6 +63,29 @@ pub unsafe extern "C" fn cs_engine_create(
     }
 }
 
+/// Stateless cleanup used only by the UAC helper. Accepts a JSON array of fixed
+/// target keys; never accepts a path or initializes a user's account store.
+#[no_mangle]
+pub unsafe extern "C" fn cs_purge_machine_apply(
+    targets_json_utf8: *const c_char,
+    out_json_utf8: *mut *mut c_char,
+) -> i32 {
+    if targets_json_utf8.is_null() || out_json_utf8.is_null() {
+        return ErrorCode::NullPointer as i32;
+    }
+    *out_json_utf8 = ptr::null_mut();
+    let result = (|| {
+        let text = CStr::from_ptr(targets_json_utf8)
+            .to_str()
+            .map_err(|e| Error::Validation(e.to_string()))?;
+        let targets: Vec<claude_switch_core::purge::machine::Target> =
+            serde_json::from_str(text).map_err(|e| Error::Validation(e.to_string()))?;
+        let outcome = claude_switch_core::purge::machine::apply(&targets)?;
+        serde_json::to_value(outcome).map_err(|e| Error::Internal(e.to_string()))
+    })();
+    write_result(result, out_json_utf8)
+}
+
 /// # Safety
 /// `eng` must be from `cs_engine_create` or null.
 #[no_mangle]
@@ -112,7 +135,27 @@ pub unsafe extern "C" fn cs_engine_call(
     };
 
     let engine = &*eng;
-    let result = engine.inner.lock().call_json(method, &params);
+    let result = if matches!(method, "purge_scan" | "purge_plan") {
+        // These calls only read files. Keep directory walks and process queries
+        // out of the engine mutex so main-window callbacks remain responsive.
+        let paths = engine.inner.lock().paths().env.clone();
+        let value = if method == "purge_scan" {
+            serde_json::to_value(claude_switch_core::purge::scan(&paths))
+        } else {
+            let opts = serde_json::from_value(params.clone()).unwrap_or_default();
+            serde_json::to_value(claude_switch_core::purge::plan(&paths, &opts))
+        };
+        value.map_err(|e| Error::Internal(e.to_string()))
+    } else {
+        engine.inner.lock().call_json(method, &params)
+    };
+    write_result(result, out_json_utf8)
+}
+
+unsafe fn write_result(
+    result: Result<serde_json::Value, Error>,
+    out_json_utf8: *mut *mut c_char,
+) -> i32 {
     match result {
         Ok(v) => {
             let s = v.to_string();
@@ -182,6 +225,20 @@ pub extern "C" fn cs_error_code_string(code: i32) -> *const c_char {
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    #[test]
+    fn machine_retry_rejects_paths_and_empty_requests_without_an_engine() {
+        for json in [r#"["C:\\ProgramData"]"#, r#"["../../Users"]"#, "[]", "{}"] {
+            let input = CString::new(json).unwrap();
+            let mut out = ptr::null_mut();
+            let rc = unsafe { cs_purge_machine_apply(input.as_ptr(), &mut out) };
+            assert_eq!(rc, ErrorCode::ValidationFailed as i32);
+            assert!(!out.is_null());
+            unsafe {
+                cs_string_free(out);
+            }
+        }
+    }
 
     #[test]
     fn ffi_create_add_snapshot_switch() {

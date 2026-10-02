@@ -9,6 +9,11 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        if (args.Contains(PurgeElevation.Command))
+        {
+            Environment.ExitCode = PurgeElevation.RunCommand(args);
+            return;
+        }
         ApplicationConfiguration.Initialize();
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);

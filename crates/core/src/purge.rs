@@ -23,6 +23,9 @@ use crate::paths::PathEnv;
 use crate::sequence::SequenceData;
 use crate::session;
 
+pub mod machine;
+mod residuals;
+
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
@@ -31,6 +34,8 @@ const GROUP_RUNTIME: &str = "runtime";
 const GROUP_IDE: &str = "ide";
 const GROUP_PROJECT: &str = "project-locals";
 const GROUP_DESKTOP: &str = "desktop";
+const GROUP_DESKTOP_DATA: &str = "desktop-data";
+const GROUP_BROWSER: &str = "browser";
 const GROUP_THIRD: &str = "third-party";
 const GROUP_MANAGED: &str = "managed";
 const GROUP_ACCOUNTS: &str = "accounts";
@@ -60,6 +65,10 @@ pub struct PurgeOptions {
     pub remove_managed: bool,
     /// This app's backup tree (imported accounts).
     pub remove_imported_accounts: bool,
+    /// All Claude Desktop data, including login state; not its installed program.
+    pub remove_desktop_data: bool,
+    /// Claude browser extension files and extension-specific storage.
+    pub remove_browser_extension: bool,
 }
 
 impl Default for PurgeOptions {
@@ -71,6 +80,8 @@ impl Default for PurgeOptions {
             remove_third_party_shells: false,
             remove_managed: false,
             remove_imported_accounts: false,
+            remove_desktop_data: false,
+            remove_browser_extension: false,
         }
     }
 }
@@ -108,6 +119,8 @@ pub struct PurgeScan {
     pub live_sessions: u32,
     pub imported_accounts: u32,
     pub groups: Vec<PurgeGroup>,
+    /// Process checks captured with this inventory, filtered by selected group in the UI.
+    pub app_problems: Vec<String>,
 }
 
 /// What [`apply`] would delete for these options.
@@ -168,17 +181,23 @@ pub fn scan(env: &PathEnv) -> PurgeScan {
         live_sessions: live_session_count(env),
         imported_accounts: imported_account_count(&fs),
         groups,
+        app_problems: residuals::running_app_problems(&fs, &candidates),
     }
 }
 
 /// What would be deleted for `opts`. Problems block apply; warnings do not.
 #[must_use]
 pub fn plan(env: &PathEnv, opts: &PurgeOptions) -> PurgePlan {
+    prepare(env, opts).2
+}
+
+fn prepare(env: &PathEnv, opts: &PurgeOptions) -> (PurgeFs, Vec<Candidate>, PurgePlan) {
     let fs = PurgeFs::from_env(env);
-    let selected = selected_candidates(&fs, opts);
+    let candidates = catalog(&fs);
+    let selected = selected_candidates(&candidates, opts);
     let items: Vec<PurgeItem> = selected
         .iter()
-        .filter(|c| exists(&c.path))
+        .filter(|c| candidate_exists(c))
         .map(to_item)
         .collect();
     let total_bytes = items
@@ -186,7 +205,7 @@ pub fn plan(env: &PathEnv, opts: &PurgeOptions) -> PurgePlan {
         .map(|i| i.bytes)
         .fold(0u64, u64::saturating_add);
     let live_sessions = live_session_count(env);
-    let claude_running = claude_bin_in_use(&catalog(&fs));
+    let claude_running = claude_bin_in_use(&candidates);
     let imported_accounts = imported_account_count(&fs);
 
     let mut problems = Vec::new();
@@ -199,6 +218,7 @@ pub fn plan(env: &PathEnv, opts: &PurgeOptions) -> PurgePlan {
     if items.is_empty() {
         problems.push("nothing".into());
     }
+    problems.extend(residuals::running_app_problems(&fs, &selected));
     problems.sort();
     problems.dedup();
 
@@ -206,11 +226,17 @@ pub fn plan(env: &PathEnv, opts: &PurgeOptions) -> PurgePlan {
     if imported_accounts > 0 && !opts.remove_imported_accounts {
         warnings.push("accounts-kept-identity-remains".into());
     }
-    let desktop_present = catalog(&fs)
+    let desktop_present = candidates
         .iter()
-        .any(|c| c.group == GROUP_DESKTOP && exists(&c.path));
-    if desktop_present && !opts.remove_desktop_nested {
+        .any(|c| c.group == GROUP_DESKTOP_DATA && candidate_exists(c));
+    if desktop_present && !opts.remove_desktop_data {
         warnings.push("desktop-left-installed".into());
+    }
+    if items.iter().any(|i| i.group == GROUP_DESKTOP_DATA) {
+        warnings.push("desktop-data-login-removed".into());
+    }
+    if items.iter().any(|i| i.group == GROUP_BROWSER) {
+        warnings.push("browser-sync-may-restore".into());
     }
     if items
         .iter()
@@ -219,7 +245,7 @@ pub fn plan(env: &PathEnv, opts: &PurgeOptions) -> PurgePlan {
         warnings.push("machine-id-may-regenerate".into());
     }
 
-    PurgePlan {
+    let plan = PurgePlan {
         problems,
         warnings,
         items,
@@ -227,7 +253,8 @@ pub fn plan(env: &PathEnv, opts: &PurgeOptions) -> PurgePlan {
         live_sessions,
         claude_running,
         imported_accounts,
-    }
+    };
+    (fs, selected, plan)
 }
 
 /// Delete what [`plan`] selects. Re-plans so a stale preview cannot name a path
@@ -239,12 +266,10 @@ pub fn plan(env: &PathEnv, opts: &PurgeOptions) -> PurgePlan {
 /// or the launcher we would delete is locked. [`Error::Validation`] when the
 /// plan has nothing to do.
 pub fn apply(env: &PathEnv, opts: &PurgeOptions) -> Result<PurgeOutcome> {
-    let planned = plan(env, opts);
+    let (fs, selected, planned) = prepare(env, opts);
     if let Some(code) = planned.problems.first() {
         return Err(apply_problem(code, &planned));
     }
-    let fs = PurgeFs::from_env(env);
-    let selected = selected_candidates(&fs, opts);
     let mut out = PurgeOutcome {
         deleted: Vec::new(),
         skipped: Vec::new(),
@@ -252,7 +277,7 @@ pub fn apply(env: &PathEnv, opts: &PurgeOptions) -> Result<PurgeOutcome> {
         bytes: 0,
     };
     for cand in selected {
-        if !exists(&cand.path) {
+        if !candidate_exists(&cand) {
             out.skipped.push(action(&cand, Some("missing")));
             continue;
         }
@@ -260,16 +285,30 @@ pub fn apply(env: &PathEnv, opts: &PurgeOptions) -> Result<PurgeOutcome> {
             out.failed.push(action(&cand, Some("protected")));
             continue;
         }
-        let bytes = item_bytes(&cand);
+        let bytes = planned
+            .items
+            .iter()
+            .find(|i| i.id == cand.id)
+            .map_or(0, |i| i.bytes);
         match remove_candidate(&cand) {
             Ok(()) => {
                 out.bytes = out.bytes.saturating_add(bytes);
                 out.deleted.push(action(&cand, None));
             }
-            Err(e) => out.failed.push(action(&cand, Some(&e.to_string()))),
+            Err(e) => out.failed.push(action(&cand, Some(&failure_reason(&e)))),
         }
     }
     Ok(out)
+}
+
+fn failure_reason(error: &io::Error) -> String {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        "permission-denied".into()
+    } else if cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33)) {
+        "file-in-use".into()
+    } else {
+        error.to_string()
+    }
 }
 
 fn apply_problem(code: &str, plan: &PurgePlan) -> Error {
@@ -292,6 +331,8 @@ enum Opt {
     Ide,
     Project,
     Desktop,
+    DesktopData,
+    Browser,
     Third,
     Managed,
     Accounts,
@@ -304,6 +345,14 @@ struct Candidate {
     option: Option<Opt>,
     path: PathBuf,
     follow_link: bool,
+    operation: Operation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Operation {
+    Remove,
+    IdeIndex,
+    Registry,
 }
 
 struct PurgeFs {
@@ -311,17 +360,23 @@ struct PurgeFs {
     roaming: PathBuf,
     local: PathBuf,
     temp: PathBuf,
+    temp_roots: Vec<PathBuf>,
+    desktop: PathBuf,
     program_data: Vec<PathBuf>,
     allow_machine_stores: bool,
 }
 
 impl PurgeFs {
     fn from_env(env: &PathEnv) -> Self {
-        let roaming = env.home.join("AppData").join("Roaming");
-        let local = env.home.join("AppData").join("Local");
-        let temp = local.join("Temp");
         let real_home = PathEnv::from_process().home;
         let allow_machine_stores = paths_equal(&env.home, &real_home);
+        let roaming =
+            residuals::user_folder(env, "APPDATA", "AppData/Roaming", allow_machine_stores);
+        let local =
+            residuals::user_folder(env, "LOCALAPPDATA", "AppData/Local", allow_machine_stores);
+        let temp = local.join("Temp");
+        let temp_roots = residuals::temp_roots(env, &temp, allow_machine_stores);
+        let desktop = residuals::desktop_folder(env, allow_machine_stores);
         let mut program_data = vec![env.home.join("ProgramData")];
         if allow_machine_stores {
             if let Some(pd) = std::env::var_os("PROGRAMDATA") {
@@ -336,6 +391,8 @@ impl PurgeFs {
             roaming,
             local,
             temp,
+            temp_roots,
+            desktop,
             program_data,
             allow_machine_stores,
         }
@@ -517,6 +574,7 @@ fn catalog(fs: &PurgeFs) -> Vec<Candidate> {
                 option: None,
                 path: PathBuf::from(format!("cmdkey:{target}")),
                 follow_link: false,
+                operation: Operation::Remove,
             });
         }
     }
@@ -529,13 +587,22 @@ fn catalog(fs: &PurgeFs) -> Vec<Candidate> {
         ("windsurf-ext", ".windsurf"),
     ] {
         let dir = home.join(rel).join("extensions");
-        for (n, child) in glob_prefix(&dir, EXT_PREFIX).into_iter().enumerate() {
+        for (n, child) in glob_prefix(&dir, EXT_PREFIX)
+            .into_iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(residuals::extension_name)
+            })
+            .enumerate()
+        {
             out.push(Candidate {
                 id: format!("{id}-{n}"),
                 group: GROUP_IDE,
                 option: Some(Opt::Ide),
                 path: child,
                 follow_link: false,
+                operation: Operation::Remove,
             });
         }
     }
@@ -548,6 +615,7 @@ fn catalog(fs: &PurgeFs) -> Vec<Candidate> {
             option: Some(Opt::Project),
             path,
             follow_link: false,
+            operation: Operation::Remove,
         });
     }
 
@@ -650,6 +718,8 @@ fn catalog(fs: &PurgeFs) -> Vec<Candidate> {
             false,
         );
     }
+    residuals::extend_catalog(fs, &mut out);
+
     // Never let a candidate name this app's own folder.
     out.retain(|c| {
         let name = c
@@ -676,15 +746,31 @@ fn push(
         option,
         path,
         follow_link,
+        operation: Operation::Remove,
     });
 }
 
-fn selected_candidates(fs: &PurgeFs, opts: &PurgeOptions) -> Vec<Candidate> {
-    let mut selected: Vec<Candidate> = catalog(fs)
-        .into_iter()
+fn selected_candidates(candidates: &[Candidate], opts: &PurgeOptions) -> Vec<Candidate> {
+    let mut selected: Vec<Candidate> = candidates
+        .iter()
         .filter(|c| option_enabled(c.option, opts))
+        .cloned()
         .collect();
     selected.sort_by_key(|c| (group_order(c.group), c.id.clone()));
+    // Full desktop cleanup subsumes nested data. Count and delete each tree once.
+    let roots: Vec<PathBuf> = selected
+        .iter()
+        .filter(|c| c.operation == Operation::Remove && c.path.is_dir() && !is_dir_link(&c.path))
+        .map(|c| c.path.clone())
+        .collect();
+    selected.retain(|c| {
+        c.operation != Operation::Remove
+            || !roots
+                .iter()
+                .any(|root| c.path != *root && c.path.starts_with(root))
+    });
+    let mut seen = std::collections::HashSet::new();
+    selected.retain(|c| seen.insert(c.path.to_string_lossy().to_ascii_lowercase()));
     selected
 }
 
@@ -694,6 +780,8 @@ fn option_enabled(option: Option<Opt>, opts: &PurgeOptions) -> bool {
         Some(Opt::Ide) => opts.remove_ide_extension,
         Some(Opt::Project) => opts.remove_project_locals,
         Some(Opt::Desktop) => opts.remove_desktop_nested,
+        Some(Opt::DesktopData) => opts.remove_desktop_data,
+        Some(Opt::Browser) => opts.remove_browser_extension,
         Some(Opt::Third) => opts.remove_third_party_shells,
         Some(Opt::Managed) => opts.remove_managed,
         Some(Opt::Accounts) => opts.remove_imported_accounts,
@@ -704,8 +792,8 @@ fn group_order(group: &str) -> u8 {
     match group {
         GROUP_RUNTIME => 0,
         GROUP_PROJECT => 1,
-        GROUP_DESKTOP => 2,
-        GROUP_THIRD => 3,
+        GROUP_DESKTOP | GROUP_DESKTOP_DATA => 2,
+        GROUP_BROWSER | GROUP_THIRD => 3,
         GROUP_MANAGED => 4,
         GROUP_IDE => 5,
         GROUP_PROGRAM => 6,
@@ -717,7 +805,7 @@ fn group_order(group: &str) -> u8 {
 fn group_existing(candidates: &[Candidate]) -> Vec<PurgeGroup> {
     let mut order: Vec<&str> = Vec::new();
     for c in candidates {
-        if exists(&c.path) && !order.contains(&c.group) {
+        if candidate_exists(c) && !order.contains(&c.group) {
             order.push(c.group);
         }
     }
@@ -727,7 +815,7 @@ fn group_existing(candidates: &[Candidate]) -> Vec<PurgeGroup> {
         .map(|gid| {
             let items: Vec<PurgeItem> = candidates
                 .iter()
-                .filter(|c| c.group == gid && exists(&c.path))
+                .filter(|c| c.group == gid && candidate_exists(c))
                 .map(to_item)
                 .collect();
             let bytes = items
@@ -750,8 +838,12 @@ fn to_item(c: &Candidate) -> PurgeItem {
         group: c.group.into(),
         path: c.path.to_string_lossy().into_owned(),
         bytes: item_bytes(c),
-        exists: exists(&c.path),
-        kind: item_kind(&c.path),
+        exists: candidate_exists(c),
+        kind: match c.operation {
+            Operation::Registry => "registry".into(),
+            Operation::IdeIndex => "json-entries".into(),
+            Operation::Remove => item_kind(&c.path),
+        },
     }
 }
 
@@ -826,6 +918,11 @@ fn project_dirs_from_config(path: &Path) -> Vec<PathBuf> {
 // --- delete ----------------------------------------------------------------------
 
 fn remove_candidate(c: &Candidate) -> io::Result<()> {
+    match c.operation {
+        Operation::Registry => return residuals::remove_registry(&c.path),
+        Operation::IdeIndex => return residuals::clean_ide_index(&c.path),
+        Operation::Remove => {}
+    }
     if let Some(target) = c.path.to_str().and_then(|s| s.strip_prefix("cmdkey:")) {
         return delete_cmdkey(target);
     }
@@ -930,10 +1027,21 @@ fn item_kind(path: &Path) -> String {
 }
 
 fn item_bytes(c: &Candidate) -> u64 {
-    if c.path.to_string_lossy().starts_with("cmdkey:") {
+    if c.operation != Operation::Remove || c.path.to_string_lossy().starts_with("cmdkey:") {
+        return 0;
+    }
+    if is_dir_link(&c.path) && !c.follow_link {
         return 0;
     }
     dir_size(&c.path)
+}
+
+fn candidate_exists(c: &Candidate) -> bool {
+    match c.operation {
+        Operation::Registry => residuals::registry_exists(&c.path),
+        Operation::IdeIndex => residuals::ide_index_contains_claude(&c.path),
+        Operation::Remove => exists(&c.path),
+    }
 }
 
 fn dir_size(path: &Path) -> u64 {
