@@ -199,6 +199,9 @@ sealed class MainForm : Form
     private readonly ToolStripMenuItem _btnTheme;
     private readonly ToolStripButton _btnRefresh;
     private readonly ToolStripButton _btnAdd;
+    private ContextMenuStrip? _addMenu;
+    private LoginDialog? _loginDialog;
+    private bool _exitAfterLogin;
     private readonly ToolStripMenuItem _btnProjects;
     private readonly ToolStripMenuItem _btnOverview;
     private readonly ToolStripMenuItem _btnRelocate;
@@ -1216,6 +1219,13 @@ sealed class MainForm : Form
 
         FormClosing += (_, e) =>
         {
+            if (_loginDialog is { IsDisposed: false })
+            {
+                e.Cancel = true;
+                _exitAfterLogin = e.CloseReason != CloseReason.UserClosing || (ModifierKeys & Keys.Shift) != 0;
+                _loginDialog.Close();
+                return;
+            }
             if (e.CloseReason == CloseReason.UserClosing && (ModifierKeys & Keys.Shift) == 0)
             {
                 e.Cancel = true;
@@ -1271,6 +1281,19 @@ sealed class MainForm : Form
         // handle, which is after the form is shown — and again whenever the
         // list is rebuilt, because those are new windows.
         Shown += (_, _) => NativeScrollbars.Apply(this);
+        Shown += async (_, _) =>
+        {
+            try
+            {
+                var pending = await Task.Run(() => _engine.Call("login_pending"));
+                if (!IsDisposed && pending["pending"] is JsonArray { Count: > 0 })
+                {
+                    _status.Text = Loc.T("login.pending");
+                    _btnAdd.ToolTipText = Loc.T("login.pending");
+                }
+            }
+            catch { /* A failed probe must not prevent the main window opening. */ }
+        };
 
         ApplyBandHeights();
         ApplyShellTheme();
@@ -4860,7 +4883,44 @@ sealed class MainForm : Form
         if (answer == DialogResult.OK) AddCurrentLogin(repairing: m);
     }
 
-    private void DoAdd() => AddCurrentLogin(repairing: null);
+    private void DoAdd()
+    {
+        _addMenu ??= AddAccountMenu.Create(this, DoNewLogin, () => AddCurrentLogin(repairing: null));
+        // The menu survives closing, so refresh its captions after a language change.
+        _addMenu.Items[0].Text = Loc.T("login.title");
+        _addMenu.Items[1].Text = Loc.T("login.captureCurrent");
+        _addMenu.Show(_toolStrip, new Point(_btnAdd.Bounds.Left, _btnAdd.Bounds.Bottom));
+    }
+
+    private void DoNewLogin()
+    {
+        if (_loginDialog is { IsDisposed: false }) { _loginDialog.Activate(); return; }
+        _pollTimer.Stop();
+        _stalledTimer.Stop();
+        bool cloudWasEnabled = _cloudResyncTimer?.Enabled == true;
+        _cloudResyncTimer?.Stop();
+        try
+        {
+            using var dialog = new LoginDialog(_engine);
+            _loginDialog = dialog;
+            dialog.ShowDialog(this);
+            if (dialog.Changed)
+            {
+                // Show the imported account immediately; quota HTTP requests
+                // belong to the normal poll, not the end of browser sign-in.
+                ApplySnapshotFromEngine(refreshAlreadyDone: false);
+                ArmNextPoll(30, forceShort: false);
+            }
+        }
+        finally
+        {
+            _loginDialog = null;
+            _pollTimer.Start();
+            _stalledTimer.Start();
+            if (cloudWasEnabled) _cloudResyncTimer?.Start();
+            if (_exitAfterLogin) { _exitAfterLogin = false; BeginInvoke(() => Application.Exit()); }
+        }
+    }
 
     /// <summary>
     /// Capture the live Claude Code login, or refresh the slot already holding it.

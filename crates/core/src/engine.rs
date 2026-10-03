@@ -36,6 +36,8 @@ use crate::warmup_cloud::{self, CloudSyncReport, RoutineSpec};
 use chrono::Local;
 use std::time::{Duration, Instant};
 
+mod login;
+
 /// Bumped to 6 when snapshot `proxy` (app-wide) was added (additive).
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 6;
 pub const FFI_SCHEMA_VERSION: u32 = 1;
@@ -371,6 +373,7 @@ pub struct Engine {
     warmup_state: Mutex<WarmupState>,
     /// Most recent guardian / force result (for `autoswitch_tick` payloads and UI).
     last_warmup: Mutex<Option<WarmupTickResult>>,
+    login: Mutex<Option<login::LoginFlow>>,
 }
 
 impl Engine {
@@ -424,6 +427,7 @@ impl Engine {
             next_poll: Mutex::new(Duration::from_secs(60)),
             warmup_state: Mutex::new(WarmupState::new()),
             last_warmup: Mutex::new(None),
+            login: Mutex::new(None),
         })
     }
 
@@ -2758,7 +2762,55 @@ impl Engine {
     /// supported method is visible in a single list.
     #[allow(clippy::too_many_lines)]
     pub fn call_json(&self, method: &str, params: &serde_json::Value) -> Result<serde_json::Value> {
+        // A browser authorization can take minutes. No engine/file lock is held
+        // while it runs, but competing credential mutations must be refused.
+        if self.login.lock().is_some()
+            && matches!(
+                method,
+                "login_begin"
+                    | "login_discard"
+                    | "switch_to"
+                    | "add_current"
+                    | "add_raw"
+                    | "remove_account"
+                    | "reconcile_active"
+                    | "set_disabled"
+                    | "set_alias"
+                    | "reorder_accounts"
+                    | "set_proxy"
+                    | "set_locale"
+                    | "set_app_proxy"
+                    | "locale_align"
+                    | "refresh_usage"
+                    | "autoswitch_tick"
+                    | "warmup_tick"
+                    | "warmup_now"
+                    | "warmup_cloud_sync"
+                    | "set_autoswitch"
+                    | "set_warmup"
+                    | "session_prepare"
+                    | "session_remove"
+                    | "agent_run_handoff"
+                    | "purge_apply"
+                    | "relocate_apply"
+                    | "relocate_restore"
+                    | "relocate_delete_backups"
+            )
+        {
+            return Err(Error::Validation("login-in-progress".into()));
+        }
         match method {
+            "login_begin" => self.login_begin(opt_param(params, "id")),
+            "login_pending" => self.login_pending(),
+            "login_discard" => self.login_discard(str_param(params, "id")?),
+            "login_cancel" => self.login_cancel(
+                str_param(params, "id")?,
+                params
+                    .get("discard")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            ),
+            "login_commit" => self.login_commit(str_param(params, "id")?, params),
             "snapshot" => {
                 let s = self.snapshot()?;
                 Ok(serde_json::to_value(s).map_err(|e| Error::Internal(e.to_string()))?)

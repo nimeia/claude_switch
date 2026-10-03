@@ -264,7 +264,7 @@ impl AccountIdentity {
 
     /// Whether two identities name the same account.
     ///
-    /// A shared non-empty `uuid` decides on its own. Otherwise both must agree on
+    /// A shared non-empty `uuid` and compatible organization decide. Otherwise both must agree on
     /// email *and* org uuid — with one concession: when either side has no org
     /// recorded (older backups never captured it), email alone has to do.
     #[must_use]
@@ -273,7 +273,10 @@ impl AccountIdentity {
             return false;
         }
         if !self.uuid.is_empty() && !other.uuid.is_empty() {
-            return self.uuid == other.uuid;
+            return self.uuid == other.uuid
+                && (self.org_uuid.is_empty()
+                    || other.org_uuid.is_empty()
+                    || self.org_uuid == other.org_uuid);
         }
         if self.email.is_empty() || !self.email.eq_ignore_ascii_case(&other.email) {
             return false;

@@ -71,7 +71,8 @@ This tool turns that into: **it switches; you keep writing.**
 
 ### Accounts
 
-- Capture the machine’s current login (**Add account**); multi-slot, aliases, drag reorder, disable
+- **Add account → Sign in with a new account** backs up the current login, opens the official Claude Code browser authorization in an isolated profile, and saves the result automatically. Switching after login is optional and defaults on. Cancelling keeps the current login. A completed authorization interrupted before saving can be recovered from the same dialog; recovery saves without switching.
+- **Add account → Add current login** captures an existing login; multi-slot, aliases, drag reorder, disable.
 - **The active account is resolved from the live login**, not replayed from the last switch this app made — `claude /login` or other tools are recognized correctly
 - Plan info is read from each slot’s own credentials + `.claude.json` backup — **no network request**. Renewal dates are not shown: OAuth tokens have no billing scope, so that date is unavailable
 

@@ -14,6 +14,24 @@ use crate::locks::{ClaudeCodeLocks, FileLock};
 use crate::paths::{PathEnv, Paths};
 use crate::sequence::{AccountRecord, SequenceData};
 
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(data) => Ok(Some(data)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::Io(e)),
+    }
+}
+
+fn restore_optional(path: &Path, data: Option<&[u8]>) -> Result<()> {
+    if read_optional(path)?.as_deref() == data {
+        return Ok(());
+    }
+    match data {
+        Some(data) => atomic_write(path, data).map_err(Error::Io),
+        None => std::fs::remove_file(path).map_err(Error::Io),
+    }
+}
+
 /// Identity columns for a slot record, read from the config snapshot being stored.
 ///
 /// cswap fills `uuid` / `organizationUuid` / `organizationName`; leaving them
@@ -179,6 +197,17 @@ impl Switcher {
     /// reader has to check.
     #[allow(clippy::too_many_lines)]
     pub fn switch_to(&self, num: u32) -> Result<SwitchResult> {
+        let mut file_lock = FileLock::new(&self.paths.lock_file).with_timeout(self.lock_timeout);
+        file_lock.acquire()?;
+        let _cred_locks = ClaudeCodeLocks::acquire_credentials(&self.paths.env, self.lock_timeout)?;
+        let _cfg_lock = ClaudeCodeLocks::acquire_config(&self.paths.env, self.lock_timeout)?;
+        self.switch_to_locked(num, false)
+    }
+
+    /// Caller owns the sequence, credential and config locks. Login imports
+    /// preserve the newly stored target even when it is also the outgoing slot.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn switch_to_locked(&self, num: u32, preserve_target: bool) -> Result<SwitchResult> {
         let seq = self.load_sequence()?;
         let rec = seq
             .account(num)
@@ -216,35 +245,26 @@ impl Switcher {
         // Snapshot live for rollback + shared fields.
         let live_creds = self.store.read_active()?;
         let global_path = self.paths.global_config.clone();
-        let live_config = if global_path.exists() {
-            Some(std::fs::read_to_string(&global_path).map_err(Error::Io)?)
-        } else {
-            None
-        };
+        let raw_creds = read_optional(&self.paths.env.credentials_path())?;
+        let raw_config = read_optional(&global_path)?;
+        let live_config = raw_config
+            .as_deref()
+            .map(std::str::from_utf8)
+            .transpose()
+            .map_err(|e| Error::Config(e.to_string()))?;
 
         let from_num = seq.active_account_number;
         let from_email = from_num.and_then(|n| seq.account(n).map(|a| a.email.clone()));
-
-        // Three locks: our FileLock + CC credentials + CC config.
-        let mut file_lock = FileLock::new(&self.paths.lock_file).with_timeout(self.lock_timeout);
-        file_lock.acquire()?;
-        let _cred_locks = ClaudeCodeLocks::acquire_credentials(&self.paths.env, self.lock_timeout)?;
-        let _cfg_lock = ClaudeCodeLocks::acquire_config(&self.paths.env, self.lock_timeout)?;
-
-        // Re-read under lock.
-        let live_creds = self.store.read_active().unwrap_or(live_creds);
-        let live_config = if global_path.exists() {
-            std::fs::read_to_string(&global_path).ok().or(live_config)
-        } else {
-            live_config
-        };
 
         // Back up the outgoing account's live credential — but never let a
         // logged-out husk overwrite a good backup. Claude Code blanks
         // `accessToken`/`refreshToken` in place on logout, and copying that over
         // the slot destroys the only copy: the account then shows no usage and
         // can only be recovered by logging in again.
-        if let (Some(cur), Some(live)) = (from_num, live_creds.as_ref()) {
+        if let (Some(cur), Some(live)) = (
+            from_num.filter(|n| !preserve_target || *n != num),
+            live_creds.as_ref(),
+        ) {
             if let Some(cur_rec) = seq.account(cur) {
                 if crate::oauth::is_wiped(live) && !crate::credentials::looks_like_api_key(live) {
                     // Keep the stored credential; still refresh the config copy.
@@ -252,7 +272,7 @@ impl Switcher {
                     let _ = self.store.write_slot(cur, &cur_rec.email, live);
                     self.post_backup_write(cur, &cur_rec.email);
                 }
-                if let Some(ref cfg) = live_config {
+                if let Some(cfg) = live_config {
                     let _ = self.store.write_slot_config(
                         &self.paths.configs_dir,
                         cur,
@@ -269,37 +289,27 @@ impl Switcher {
             .unwrap_or_default();
         let composed = merge_shared_credential_fields(&target_creds, &shared);
 
-        // Activate credentials.
-        self.store.write_active(&composed)?;
-
         // Splice oauthAccount into global config.
-        let new_config = splice_oauth_account(live_config.as_deref().unwrap_or(""), &target_oauth)?;
-        if let Some(parent) = global_path.parent() {
-            std::fs::create_dir_all(parent).map_err(Error::Io)?;
-        }
-        if let Err(e) = atomic_write(&global_path, new_config.as_bytes()) {
-            // Best-effort rollback credentials.
-            if let Some(prev) = live_creds.as_ref() {
-                let _ = self.store.write_active(prev);
-            }
-            return Err(Error::Config(format!("failed to write global config: {e}")));
-        }
-
-        // Commit sequence.
+        let new_config = splice_oauth_account(live_config.unwrap_or(""), &target_oauth)?;
         let mut seq = self.load_sequence()?;
         seq.active_account_number = Some(num);
-        if let Err(e) = self.save_sequence(&seq) {
-            // Attempt rollback config + creds.
-            if let Some(prev) = live_config.as_ref() {
-                let _ = atomic_write(&global_path, prev.as_bytes());
-            }
-            if let Some(prev) = live_creds.as_ref() {
-                let _ = self.store.write_active(prev);
+        let result = (|| {
+            self.store.write_active(&composed)?;
+            atomic_write(&global_path, new_config.as_bytes()).map_err(Error::Io)?;
+            self.save_sequence(&seq)
+        })();
+        if let Err(e) = result {
+            // Restore exact files, including their absence for a first login.
+            // write_active alone also changes primaryApiKey in the config.
+            let a = restore_optional(&self.paths.env.credentials_path(), raw_creds.as_deref());
+            let b = restore_optional(&global_path, raw_config.as_deref());
+            if a.is_err() || b.is_err() {
+                return Err(Error::CredentialWrite(format!(
+                    "switch failed ({e}); restoring the previous login also failed"
+                )));
             }
             return Err(e);
         }
-
-        drop(file_lock);
 
         Ok(SwitchResult {
             from: from_num.map(|n| AccountRef {
@@ -334,7 +344,7 @@ impl Switcher {
     /// now, and pulling it out from under a running process is worse than the
     /// drift. It gets a marker instead, honoured on the first launch that finds
     /// the profile quiescent.
-    fn post_backup_write(&self, num: u32, email: &str) {
+    pub(crate) fn post_backup_write(&self, num: u32, email: &str) {
         let dir = self.session_dir(num, email);
         if !dir.is_dir() {
             return;
