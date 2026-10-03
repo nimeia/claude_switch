@@ -197,6 +197,14 @@ Layout is compatible with [claude-swap](https://github.com/realiti4/claude-swap)
 - **Undo** copies the current data back — including everything that changed since the move — and then removes the links. It still works after the backups are deleted. The copy left on the other drive is named so you can delete it
 - `~/.claude.json` stays in your user folder; it is small
 
+### Install or update Claude Code
+
+**Tools → Install / update Claude Code…** detects the active executable, its version, and its installation source. A new installation uses the [official Windows native installer](https://code.claude.com/docs/en/setup). Existing native, npm, Volta, and WinGet installations update through their own installer or package manager. Details show other copies and which path will be updated; an unrecognized source is left for manual resolution.
+
+The dialog runs detection and installation in the background, with an expandable execution log. Close running Claude Code sessions before updating. Downloads and checks can be cancelled; once the installer starts replacing files, closing waits for it to finish. Afterward the app checks the executable again and refreshes its version cache. Failures can be retried without removing account backups or sign-in data. **Sign in** opens the new-account login flow after a working installation is detected.
+
+Installation uses the app's proxy settings. Managed update restrictions are respected. This feature manages Windows installations; WSL installations and migrating between installation methods are outside its scope.
+
 ### Uninstall Claude Code
 
 **Tools → Remove Claude Code…** deletes the Claude Code program and its runtime files, including old `claude.exe.old.<timestamp>.<pid>` binaries, `~/.cache/claude` installer staging files, configuration and session data, browser native-host files, and the current user's Claude CLI protocol / browser native-host registry entries. It also finds Claude temporary files under the current temp paths and the same Windows user profile on other fixed drives. Residuals can be removed even when the main program is already gone.

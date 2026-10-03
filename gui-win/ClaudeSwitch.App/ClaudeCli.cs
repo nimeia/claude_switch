@@ -31,46 +31,61 @@ internal static class ClaudeCli
     ];
 
     /// <summary>Full path to the CLI, or null when it is not installed / not on PATH.</summary>
-    public static string? FindExecutable() => Find("claude");
+    public static string? FindExecutable() => ClaudeInstallPaths.Current.FindAll("claude").FirstOrDefault();
 
     /// <summary>First Claude Code that understands <c>statusLine.refreshInterval</c>.</summary>
     private static readonly Version RefreshIntervalSince = new(2, 1, 97);
 
     private static Version? s_version;
-    private static bool s_versionProbed;
+    private static readonly object VersionGate = new();
+    private static Task<Version?>? s_versionProbe;
+    private static int s_versionGeneration;
 
     /// <summary>
     /// Installed Claude Code version, or null when it cannot be asked.
     /// </summary>
     /// <remarks>
-    /// Probed once per run, and only when something actually needs the answer:
-    /// this spawns the Node CLI, which takes the better part of a second.
+    /// Starts a bounded background probe. UI callers use the last known version;
+    /// the startup warm-up can await RefreshInstalledVersionAsync explicitly.
     /// </remarks>
     public static Version? InstalledVersion()
     {
-        if (s_versionProbed) return s_version;
-        s_versionProbed = true;
-        try
+        _ = RefreshInstalledVersionAsync();
+        lock (VersionGate) return s_version;
+    }
+
+    internal static Task<Version?> RefreshInstalledVersionAsync()
+    {
+        lock (VersionGate)
         {
-            if (FindExecutable() is not { } exe) return null;
-            using var p = Process.Start(new ProcessStartInfo(exe, "--version")
+            int generation = s_versionGeneration;
+            return s_versionProbe ??= Task.Run(async () =>
             {
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
+                Version? version = null;
+                try
+                {
+                    if (FindExecutable() is { } exe)
+                    {
+                        var result = await new ClaudeCommandRunner().RunAsync(new(exe, "--version"),
+                            CancellationToken.None, timeout: TimeSpan.FromSeconds(5));
+                        if (result.ExitCode == 0) version = ParseVersion(result.Output);
+                    }
+                }
+                catch { /* An unavailable CLI must not block the UI. */ }
+                lock (VersionGate) if (generation == s_versionGeneration) s_version = version;
+                return version;
             });
-            if (p is null) return null;
-            string output = p.StandardOutput.ReadToEnd();
-            if (!p.WaitForExit(5000)) return null;
-            s_version = ParseVersion(output);
         }
-        catch (Exception)
-        {
-            // No Claude Code, no permission, a hung CLI: the caller's feature
-            // has a "do not write that key" path, which is the safe answer.
-        }
-        return s_version;
+    }
+
+    internal static void InvalidateVersionCache()
+    {
+        lock (VersionGate) { s_versionGeneration++; s_version = null; s_versionProbe = null; }
+    }
+
+    internal static void SetInstalledVersion(Version? version)
+    {
+        lock (VersionGate) { s_versionGeneration++; s_version = version; s_versionProbe = Task.FromResult(version); }
     }
 
     /// <summary>

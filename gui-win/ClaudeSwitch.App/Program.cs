@@ -201,12 +201,15 @@ sealed class MainForm : Form
     private readonly ToolStripButton _btnAdd;
     private ContextMenuStrip? _addMenu;
     private LoginDialog? _loginDialog;
+    private ClaudeInstallDialog? _installDialog;
+    private bool _exitAfterInstall;
     private bool _exitAfterLogin;
     private readonly ToolStripMenuItem _btnProjects;
     private readonly ToolStripMenuItem _btnOverview;
     private readonly ToolStripMenuItem _btnRelocate;
     private readonly ToolStripMenuItem _btnDemo;
     private readonly ToolStripMenuItem _btnPurge;
+    private readonly ToolStripMenuItem _btnInstall;
     private readonly ToolStripMenuItem _btnAppProxy;
     private readonly ToolStripMenuItem _btnTerminal;
     private readonly ToolStripDropDownButton _btnTools;
@@ -506,6 +509,8 @@ sealed class MainForm : Form
             ToolTipText = Loc.T("menu.purge.tip"),
         };
         _btnPurge.Click += (_, _) => DoPurge();
+        _btnInstall = new ToolStripMenuItem(Loc.T("install.title")) { Enabled = !DemoMode.IsActive };
+        _btnInstall.Click += (_, _) => BeginInvoke(() => { if (!IsDisposed && !Disposing) DoInstallClaude(); });
         _btnDemo = new ToolStripMenuItem(Loc.T("menu.demo"))
         {
             ToolTipText = Loc.T("menu.demo.tip"),
@@ -515,7 +520,7 @@ sealed class MainForm : Form
         _btnDemo.Click += (_, _) => DemoMode.Launch();
         _btnTools.DropDownItems.AddRange([
             _btnProjects, _btnOverview, new ToolStripSeparator(),
-            _btnRelocate, _btnPurge, _btnAppProxy, _btnTerminal, _btnDemo, _btnTheme, _btnLang,
+            _btnRelocate, _btnInstall, _btnPurge, _btnAppProxy, _btnTerminal, _btnDemo, _btnTheme, _btnLang,
         ]);
         _search = new ToolStripTextBox("search")
         {
@@ -1219,6 +1224,13 @@ sealed class MainForm : Form
 
         FormClosing += (_, e) =>
         {
+            if (_installDialog is { IsDisposed: false })
+            {
+                e.Cancel = true;
+                _exitAfterInstall = e.CloseReason != CloseReason.UserClosing || (ModifierKeys & Keys.Shift) != 0;
+                _installDialog.Close();
+                return;
+            }
             if (_loginDialog is { IsDisposed: false })
             {
                 e.Cancel = true;
@@ -1301,9 +1313,9 @@ sealed class MainForm : Form
         // Both of these talk to something slow — the status line's own binary
         // and `claude --version` — and neither has anything to say to the user
         // unless it fails, so neither belongs on the thread drawing the window.
-        _ = Task.Run(() =>
+        _ = Task.Run(async () =>
         {
-            ClaudeCli.StatusLineRefreshInterval();
+            await ClaudeCli.RefreshInstalledVersionAsync();
             HealStatusline();
         });
         Reload();
@@ -1716,6 +1728,7 @@ sealed class MainForm : Form
         _btnDemo.Text = Loc.T("menu.demo");
         _btnDemo.ToolTipText = Loc.T("menu.demo.tip");
         _btnPurge.Text = Loc.T("menu.purge");
+        _btnInstall.Text = Loc.T("install.title");
         _btnPurge.ToolTipText = Loc.T("menu.purge.tip");
         _btnAppProxy.Text = Loc.T("menu.appProxy");
         _btnAppProxy.ToolTipText = Loc.T("menu.appProxy.tip");
@@ -2333,6 +2346,7 @@ sealed class MainForm : Form
     /// </param>
     private void DoWarmupNow(int? onlyNumber)
     {
+        if (_installDialog is { IsDisposed: false }) { _installDialog.Activate(); return; }
         try
         {
             // Fresh usage so open windows are reported as window-active skips.
@@ -4309,6 +4323,7 @@ sealed class MainForm : Form
     /// </summary>
     private void RunEnginePoll(bool force)
     {
+        if (_installDialog is { IsDisposed: false }) return;
         try
         {
             var result = _poll.RunTick(_engine, _autoEnabled.Checked);
@@ -4894,7 +4909,9 @@ sealed class MainForm : Form
 
     private void DoNewLogin()
     {
+        if (_installDialog is { IsDisposed: false }) { _installDialog.Activate(); return; }
         if (_loginDialog is { IsDisposed: false }) { _loginDialog.Activate(); return; }
+        if (!DemoMode.IsActive && ClaudeCli.FindExecutable() is null) { DoInstallClaude(); return; }
         _pollTimer.Stop();
         _stalledTimer.Stop();
         bool cloudWasEnabled = _cloudResyncTimer?.Enabled == true;
@@ -5065,6 +5082,7 @@ sealed class MainForm : Form
 
     private void DoRelocate()
     {
+        if (_installDialog is { IsDisposed: false }) { _installDialog.Activate(); return; }
         _pollTimer.Stop();
         _stalledTimer.Stop();
         try
@@ -5081,6 +5099,7 @@ sealed class MainForm : Form
 
     private void DoPurge()
     {
+        if (_installDialog is { IsDisposed: false }) { _installDialog.Activate(); return; }
         _pollTimer.Stop();
         _stalledTimer.Stop();
         try
@@ -5089,6 +5108,7 @@ sealed class MainForm : Form
             dlg.ShowDialog(this);
             if (dlg.Changed)
             {
+                ClaudeCli.InvalidateVersionCache();
                 _status.Text = dlg.AccountsKept
                     ? Loc.T("purge.status.gone")
                     : Loc.T("purge.status.goneEmpty");
@@ -5100,6 +5120,35 @@ sealed class MainForm : Form
             _pollTimer.Start();
             _stalledTimer.Start();
         }
+    }
+
+    private void DoInstallClaude()
+    {
+        if (DemoMode.IsActive) return;
+        if (_installDialog is { IsDisposed: false }) { _installDialog.Activate(); return; }
+        if (_loginDialog is { IsDisposed: false }) { _loginDialog.Activate(); return; }
+        bool pollWasEnabled = _pollTimer.Enabled, stalledWasEnabled = _stalledTimer.Enabled;
+        bool cloudWasEnabled = _cloudResyncTimer?.Enabled == true;
+        _pollTimer.Stop();
+        _stalledTimer.Stop();
+        _cloudResyncTimer?.Stop();
+        bool login = false;
+        try
+        {
+            using var dialog = new ClaudeInstallDialog(new ClaudeInstallRunner(SessionMode.ResolveProxy(_engine, null)));
+            _installDialog = dialog;
+            dialog.ShowDialog(this);
+            login = dialog.LoginRequested;
+        }
+        finally
+        {
+            _installDialog = null;
+            if (pollWasEnabled) _pollTimer.Start();
+            if (stalledWasEnabled) _stalledTimer.Start();
+            if (cloudWasEnabled) _cloudResyncTimer?.Start();
+        }
+        if (_exitAfterInstall) { _exitAfterInstall = false; BeginInvoke(() => Application.Exit()); }
+        else if (login) BeginInvoke(() => DoNewLogin());
     }
 
     private void DoEditTerminal()
